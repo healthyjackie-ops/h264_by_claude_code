@@ -58,8 +58,11 @@ typedef struct {
     int16_t *mv_x, *mv_y;      /* per 4x4 block, quarter-pel */
     int8_t *mb_ref;            /* per 4x4: 0 = ref0, -1 = intra/none */
     uint8_t *mb_skip;          /* per MB: decoded as skipped (CABAC ctx) */
+    int n_refs;                /* list0 length (most recent first) */
     uint8_t *mvd_ax, *mvd_ay;  /* per 4x4: |mvd| clipped to 70 (mvd ctxInc) */
-    const uint8_t *refY, *refU, *refV;   /* previous decoded frame (padded) */
+    const uint8_t * const *refsY;        /* list0 planes, [0] = most recent */
+    const uint8_t * const *refsU;
+    const uint8_t * const *refsV;
 
     int8_t *mb_dbf_idc;        /* per-MB slice deblock params */
     int8_t *mb_dbf_a, *mb_dbf_b;
@@ -473,7 +476,7 @@ static int med3(int a, int b, int cc) {
 /* Luma MV prediction (8.4.1.3): partition at (gx,gy) of w4*h4 4x4 units.
  * ptype: 0 normal, 1/2 = 16x8 top/bottom, 3/4 = 8x16 left/right. */
 static void mv_pred(const ictx_t *c, int sid, int gx, int gy, int w4,
-                    int ptype, int16_t *pmx, int16_t *pmy) {
+                    int ptype, int cur_ref, int16_t *pmx, int16_t *pmy) {
     int16_t ax, ay, bx, by, cx, cy;
     int ar, br, cr;
     int has_a = mv_nbr(c, sid, gx - 1, gy, &ax, &ay, &ar);
@@ -483,19 +486,19 @@ static void mv_pred(const ictx_t *c, int sid, int gx, int gy, int w4,
         has_c = mv_nbr(c, sid, gx - 1, gy - 1, &cx, &cy, &cr);   /* D */
     }
 
-    /* Directional special cases (single reference: match = inter). */
-    if (ptype == 1 && br == 0) { *pmx = bx; *pmy = by; return; }
-    if (ptype == 2 && ar == 0) { *pmx = ax; *pmy = ay; return; }
-    if (ptype == 3 && ar == 0) { *pmx = ax; *pmy = ay; return; }
-    if (ptype == 4 && cr == 0) { *pmx = cx; *pmy = cy; return; }
+    /* Directional special cases (8.4.1.3, matching reference). */
+    if (ptype == 1 && br == cur_ref) { *pmx = bx; *pmy = by; return; }
+    if (ptype == 2 && ar == cur_ref) { *pmx = ax; *pmy = ay; return; }
+    if (ptype == 3 && ar == cur_ref) { *pmx = ax; *pmy = ay; return; }
+    if (ptype == 4 && cr == cur_ref) { *pmx = cx; *pmy = cy; return; }
 
     if (!has_b && !has_c && has_a) {               /* only A decoded */
         *pmx = ax; *pmy = ay; return;
     }
-    int match = (ar == 0) + (br == 0) + (cr == 0);
+    int match = (ar == cur_ref) + (br == cur_ref) + (cr == cur_ref);
     if (match == 1) {
-        if (ar == 0) { *pmx = ax; *pmy = ay; }
-        else if (br == 0) { *pmx = bx; *pmy = by; }
+        if (ar == cur_ref) { *pmx = ax; *pmy = ay; }
+        else if (br == cur_ref) { *pmx = bx; *pmy = by; }
         else { *pmx = cx; *pmy = cy; }
         return;
     }
@@ -505,29 +508,29 @@ static void mv_pred(const ictx_t *c, int sid, int gx, int gy, int w4,
 
 /* Motion-compensate one partition: (gx,gy) in 4x4 units, w4*h4 size,
  * write mv/ref bookkeeping and predict into the current frame. */
-static void inter_pred_part(ictx_t *c, int gx, int gy, int w4, int h4,
-                            int16_t mvx, int16_t mvy) {
+static void inter_pred_part(ictx_t *c, int ref, int gx, int gy,
+                            int w4, int h4, int16_t mvx, int16_t mvy) {
     uint32_t bw = c->mb_w * 4;
     for (int j = 0; j < h4; j++)
         for (int i = 0; i < w4; i++) {
             uint32_t gi = (uint32_t)(gy + j) * bw + (uint32_t)(gx + i);
             c->mv_x[gi] = mvx;
             c->mv_y[gi] = mvy;
-            c->mb_ref[gi] = 0;
+            c->mb_ref[gi] = (int8_t)ref;
         }
     int lx = gx * 4, ly = gy * 4;
     int pw = (int)c->ls, phh = (int)(c->mb_h * 16);
-    h264_mc_luma(c->refY, c->ls, pw, phh,
+    h264_mc_luma(c->refsY[ref], c->ls, pw, phh,
                  lx + (mvx >> 2), ly + (mvy >> 2), mvx & 3, mvy & 3,
                  c->Y + (size_t)ly * c->ls + (size_t)lx, c->ls,
                  w4 * 4, h4 * 4);
     int cx = gx * 2, cy = gy * 2;
     int cw = (int)c->cs, chh = (int)(c->mb_h * 8);
-    h264_mc_chroma(c->refU, c->cs, cw, chh,
+    h264_mc_chroma(c->refsU[ref], c->cs, cw, chh,
                    cx + (mvx >> 3), cy + (mvy >> 3), mvx & 7, mvy & 7,
                    c->U + (size_t)cy * c->cs + (size_t)cx, c->cs,
                    w4 * 2, h4 * 2);
-    h264_mc_chroma(c->refV, c->cs, cw, chh,
+    h264_mc_chroma(c->refsV[ref], c->cs, cw, chh,
                    cx + (mvx >> 3), cy + (mvy >> 3), mvx & 7, mvy & 7,
                    c->V + (size_t)cy * c->cs + (size_t)cx, c->cs,
                    w4 * 2, h4 * 2);
@@ -548,7 +551,36 @@ static void p_skip_mv(const ictx_t *c, int sid, uint32_t mbx, uint32_t mby,
         *my = 0;
         return;
     }
-    mv_pred(c, sid, gx, gy, 4, 0, mx, my);
+    mv_pred(c, sid, gx, gy, 4, 0, 0, mx, my);
+}
+
+/* ref_idx_l0 (9.3.3.1.1.6 / te(v)). CABAC: bin0 at ctx 54 + condA +
+ * 2*condB (cond = neighbor ref > 0), unary continuation at 58 then 59. */
+static int read_ref_idx(bs_t *bs, cabac_t *cb, int use_cabac,
+                        const ictx_t *c, int sid, int gx, int gy,
+                        int num_ref, uint32_t *err) {
+    if (num_ref <= 1) return 0;
+    if (!use_cabac) {
+        uint32_t v = (num_ref == 2) ? (uint32_t)!bs_u1(bs) : bs_ue(bs);
+        if (bs->error) { *err = H264_ERR_TRUNC; return -1; }
+        if (v >= (uint32_t)num_ref) { *err = H264_ERR_BAD_STREAM; return -1; }
+        return (int)v;
+    }
+    uint32_t bw = c->mb_w * 4;
+    int inc = 0;
+    if (blk4_avail(c, sid, gx - 1, gy) &&
+        c->mb_ref[(uint32_t)gy * bw + (uint32_t)(gx - 1)] > 0) inc += 1;
+    if (blk4_avail(c, sid, gx, gy - 1) &&
+        c->mb_ref[(uint32_t)(gy - 1) * bw + (uint32_t)gx] > 0) inc += 2;
+    if (!cabac_decision(cb, 54 + inc)) return 0;
+    int v = 1;
+    if (cabac_decision(cb, 58)) {
+        v = 2;
+        while (v < num_ref && cabac_decision(cb, 59)) v++;
+    }
+    if (cb->error) { *err = H264_ERR_TRUNC; return -1; }
+    if (v >= num_ref) { *err = H264_ERR_BAD_STREAM; return -1; }
+    return v;
 }
 
 /* Read one mvd pair, either entropy. gx/gy locate the partition origin
@@ -605,13 +637,15 @@ typedef struct {
     size_t size;
     size_t byte;               /* slice_data start (CAVLC: bit too) */
     int bit;
+    int is_idr;
     slice_hdr_t sh;
 } slice_ent_t;
 
 static int decode_picture(slice_ent_t *ents, int nslices,
                           const sps_t *sps, const pps_t *pps,
-                          const uint8_t *refY, const uint8_t *refU,
-                          const uint8_t *refV,
+                          const uint8_t * const *refsY,
+                          const uint8_t * const *refsU,
+                          const uint8_t * const *refsV, int n_refs,
                           uint8_t **keepY, uint8_t **keepU, uint8_t **keepV,
                           h264_decoded_t *out) {
     ictx_t c;
@@ -655,9 +689,10 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     c.mb_skip = (uint8_t *)calloc(nmbs, 1);
     c.mvd_ax = (uint8_t *)calloc((size_t)bw * bh, 1);
     c.mvd_ay = (uint8_t *)calloc((size_t)bw * bh, 1);
-    c.refY = refY;
-    c.refU = refU;
-    c.refV = refV;
+    c.refsY = refsY;
+    c.refsU = refsU;
+    c.refsV = refsV;
+    c.n_refs = n_refs;
     int ok = c.mv_x && c.mv_y && c.mb_ref && c.mb_skip && c.mvd_ax &&
              c.mvd_ay &&
              c.Y && c.U && c.V && c.i4_mode && c.nzL && c.nzC[0] &&
@@ -682,8 +717,9 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     uint32_t total_mbs = c.mb_w * c.mb_h;
     uint32_t mbs_done = 0;
     for (int s = 0; s < nslices; s++) {
-        if (ents[s].sh.is_p && !refY) {
-            out->err = H264_ERR_BAD_STREAM;        /* P without a reference */
+        if (ents[s].sh.is_p &&
+            (n_refs < 1 || ents[s].sh.num_ref_l0 > (uint32_t)n_refs)) {
+            out->err = H264_ERR_BAD_STREAM;   /* P needs its references */
             goto fail;
         }
     }
@@ -742,7 +778,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         if (this_skip) {
             int16_t smx, smy;
             p_skip_mv(&c, sid, mbx, mby, &smx, &smy);
-            inter_pred_part(&c, (int)(mbx * 4), (int)(mby * 4), 4, 4,
+            inter_pred_part(&c, 0, (int)(mbx * 4), (int)(mby * 4), 4, 4,
                             smx, smy);
             for (int k = 0; k < 16; k++) {
                 uint32_t gx2 = mbx * 4 + zscan_x[k];
@@ -804,44 +840,75 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             int16_t pmx, pmy;
             int16_t dx, dy;
             int adx, ady;
+            int nref = (int)sh->num_ref_l0;
             if (mb_type == 0) {                    /* 16x16 */
+                int r0 = read_ref_idx(bs, &cbx, use_cabac, &c, sid,
+                                      gx0, gy0, nref, &out->err);
+                if (r0 < 0) goto fail;
                 if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid, gx0, gy0,
                                   &dx, &dy, &adx, &ady, &out->err)) goto fail;
-                mv_pred(&c, sid, gx0, gy0, 4, 0, &pmx, &pmy);
-                inter_pred_part(&c, gx0, gy0, 4, 4,
+                mv_pred(&c, sid, gx0, gy0, 4, 0, r0, &pmx, &pmy);
+                inter_pred_part(&c, r0, gx0, gy0, 4, 4,
                                 (int16_t)(pmx + dx), (int16_t)(pmy + dy));
                 store_mvd(&c, gx0, gy0, 4, 4, adx, ady);
-            } else if (mb_type == 1) {             /* 16x8 */
+            } else if (mb_type == 1 || mb_type == 2) {  /* 16x8 / 8x16 */
+                int r[2];
+                /* refs for both partitions precede both mvds (7.3.5.1).
+                 * ref_idx ctxInc uses the partition origin's neighbors;
+                 * the second partition's A/B blocks are outside this MB
+                 * or in the (not yet written) first partition — write
+                 * each partition's ref into mb_ref before reading the
+                 * next so intra-MB neighbors resolve. */
                 for (int part = 0; part < 2; part++) {
-                    if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid,
-                                      gx0, gy0 + part * 2,
-                                      &dx, &dy, &adx, &ady, &out->err))
-                        goto fail;
-                    mv_pred(&c, sid, gx0, gy0 + part * 2, 4,
-                            1 + part, &pmx, &pmy);
-                    inter_pred_part(&c, gx0, gy0 + part * 2, 4, 2,
-                                    (int16_t)(pmx + dx), (int16_t)(pmy + dy));
-                    store_mvd(&c, gx0, gy0 + part * 2, 4, 2, adx, ady);
+                    int px = (mb_type == 1) ? gx0 : gx0 + part * 2;
+                    int py = (mb_type == 1) ? gy0 + part * 2 : gy0;
+                    r[part] = read_ref_idx(bs, &cbx, use_cabac, &c, sid,
+                                           px, py, nref, &out->err);
+                    if (r[part] < 0) goto fail;
+                    int w4 = (mb_type == 1) ? 4 : 2;
+                    int h4 = (mb_type == 1) ? 2 : 4;
+                    for (int j = 0; j < h4; j++)
+                        for (int i = 0; i < w4; i++)
+                            c.mb_ref[(uint32_t)(py + j) * bw +
+                                     (uint32_t)(px + i)] = (int8_t)r[part];
                 }
-            } else if (mb_type == 2) {             /* 8x16 */
                 for (int part = 0; part < 2; part++) {
-                    if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid,
-                                      gx0 + part * 2, gy0,
+                    int px = (mb_type == 1) ? gx0 : gx0 + part * 2;
+                    int py = (mb_type == 1) ? gy0 + part * 2 : gy0;
+                    if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid, px, py,
                                       &dx, &dy, &adx, &ady, &out->err))
                         goto fail;
-                    mv_pred(&c, sid, gx0 + part * 2, gy0, 2,
-                            3 + part, &pmx, &pmy);
-                    inter_pred_part(&c, gx0 + part * 2, gy0, 2, 4,
+                    mv_pred(&c, sid, px, py, (mb_type == 1) ? 4 : 2,
+                            (mb_type == 1 ? 1 : 3) + part, r[part],
+                            &pmx, &pmy);
+                    inter_pred_part(&c, r[part], px, py,
+                                    (mb_type == 1) ? 4 : 2,
+                                    (mb_type == 1) ? 2 : 4,
                                     (int16_t)(pmx + dx), (int16_t)(pmy + dy));
-                    store_mvd(&c, gx0 + part * 2, gy0, 2, 4, adx, ady);
+                    store_mvd(&c, px, py, (mb_type == 1) ? 4 : 2,
+                              (mb_type == 1) ? 2 : 4, adx, ady);
                 }
             } else {                               /* P_8x8 / P_8x8ref0 */
                 uint32_t sub[4];
+                int r8[4];
                 for (int b = 0; b < 4; b++) {
                     sub[b] = use_cabac ? cabac_p_sub_type(&cbx) : bs_ue(bs);
                     if (sub[b] > 3) { out->err = H264_ERR_BAD_STREAM; goto fail; }
                 }
-                /* single reference: no ref_idx fields */
+                for (int b = 0; b < 4; b++) {
+                    int bx0 = gx0 + (b & 1) * 2, by0 = gy0 + (b >> 1) * 2;
+                    if (mb_type == 4) {            /* P_8x8ref0 */
+                        r8[b] = 0;
+                        continue;
+                    }
+                    r8[b] = read_ref_idx(bs, &cbx, use_cabac, &c, sid,
+                                         bx0, by0, nref, &out->err);
+                    if (r8[b] < 0) goto fail;
+                    for (int j = 0; j < 2; j++)
+                        for (int i = 0; i < 2; i++)
+                            c.mb_ref[(uint32_t)(by0 + j) * bw +
+                                     (uint32_t)(bx0 + i)] = (int8_t)r8[b];
+                }
                 for (int b = 0; b < 4; b++) {
                     int bx0 = gx0 + (b & 1) * 2, by0 = gy0 + (b >> 1) * 2;
                     int nsub = (sub[b] == 0) ? 1 : (sub[b] == 3) ? 4 : 2;
@@ -859,8 +926,8 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                         if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid,
                                           sx, sy, &dx, &dy, &adx, &ady,
                                           &out->err)) goto fail;
-                        mv_pred(&c, sid, sx, sy, w4, 0, &pmx, &pmy);
-                        inter_pred_part(&c, sx, sy, w4, h4,
+                        mv_pred(&c, sid, sx, sy, w4, 0, r8[b], &pmx, &pmy);
+                        inter_pred_part(&c, r8[b], sx, sy, w4, h4,
                                         (int16_t)(pmx + dx),
                                         (int16_t)(pmy + dy));
                         store_mvd(&c, sx, sy, w4, h4, adx, ady);
@@ -1615,7 +1682,10 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
             slice_ent_t ents[MAX_SLICES];
             int nslices = 0;
             int have_nal = 1;                      /* n holds a slice NAL */
-            uint8_t *refY = NULL, *refU = NULL, *refV = NULL;
+            enum { MAX_REFS = 8 };
+            uint8_t *dpbY[MAX_REFS] = {0}, *dpbU[MAX_REFS] = {0},
+                    *dpbV[MAX_REFS] = {0};
+            int ndpb = 0;
             for (;;) {
                 slice_hdr_t sh;
                 if (parse_slice_header(&bs, &sps, &pps, n.type, n.ref_idc,
@@ -1626,14 +1696,36 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
                 if (sh.first_mb == 0 && nslices > 0) {
                     /* picture boundary: decode what we have first */
                     uint8_t *kY, *kU, *kV;
+                    int was_idr = ents[0].is_idr;
                     if (decode_picture(ents, nslices, &sps, &pps,
-                                       refY, refU, refV, &kY, &kU, &kV,
-                                       out)) {
+                                       (const uint8_t * const *)dpbY,
+                                       (const uint8_t * const *)dpbU,
+                                       (const uint8_t * const *)dpbV, ndpb,
+                                       &kY, &kU, &kV, out)) {
                         nal_free(&n);
                         goto ents_fail;
                     }
-                    free(refY); free(refU); free(refV);
-                    refY = kY; refU = kU; refV = kV;
+                    if (was_idr) {                 /* IDR empties the DPB */
+                        for (int i = 0; i < ndpb; i++) {
+                            free(dpbY[i]); free(dpbU[i]); free(dpbV[i]);
+                            dpbY[i] = dpbU[i] = dpbV[i] = NULL;
+                        }
+                        ndpb = 0;
+                    }
+                    /* push front (list0 order: most recent first) */
+                    if (ndpb == MAX_REFS) {
+                        free(dpbY[MAX_REFS - 1]);
+                        free(dpbU[MAX_REFS - 1]);
+                        free(dpbV[MAX_REFS - 1]);
+                        ndpb--;
+                    }
+                    for (int i = ndpb; i > 0; i--) {
+                        dpbY[i] = dpbY[i - 1];
+                        dpbU[i] = dpbU[i - 1];
+                        dpbV[i] = dpbV[i - 1];
+                    }
+                    dpbY[0] = kY; dpbU[0] = kU; dpbV[0] = kV;
+                    ndpb++;
                     for (int i = 0; i < nslices; i++) free(ents[i].rbsp);
                     nslices = 0;
                 }
@@ -1652,6 +1744,7 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
                 ents[nslices].size = n.size;
                 ents[nslices].byte = bs.byte;
                 ents[nslices].bit = bs.bit;
+                ents[nslices].is_idr = (n.type == NAL_SLICE_IDR);
                 ents[nslices].sh = sh;
                 nslices++;
                 n.rbsp = NULL;
@@ -1671,13 +1764,20 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
             }
             uint8_t *kY = NULL, *kU = NULL, *kV = NULL;
             int rc = decode_picture(ents, nslices, &sps, &pps,
-                                    refY, refU, refV, &kY, &kU, &kV, out);
-            free(refY); free(refU); free(refV);
+                                    (const uint8_t * const *)dpbY,
+                                    (const uint8_t * const *)dpbU,
+                                    (const uint8_t * const *)dpbV, ndpb,
+                                    &kY, &kU, &kV, out);
             free(kY); free(kU); free(kV);
+            for (int i = 0; i < ndpb; i++) {
+                free(dpbY[i]); free(dpbU[i]); free(dpbV[i]);
+            }
             for (int i = 0; i < nslices; i++) free(ents[i].rbsp);
             return rc;
 ents_fail:
-            free(refY); free(refU); free(refV);
+            for (int i = 0; i < ndpb; i++) {
+                free(dpbY[i]); free(dpbU[i]); free(dpbV[i]);
+            }
             for (int i = 0; i < nslices; i++) free(ents[i].rbsp);
             return -1;
         }

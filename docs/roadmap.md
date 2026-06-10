@@ -69,11 +69,15 @@ padded 尺寸。
 --bframes 0 --weightp 0，否则混入 B slice/加权预测被正确拒掉、但向量
 就测不到目标路径（与"覆盖率要可证"同一课）。
 
-## Wave 7+（暂列）
+## Wave 7 — 多参考
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **15** ✅ | 多参考 P（--ref ≤8）：DPB 滑窗（最新在前 = list0 初始化序、IDR 清空）、ref_idx 语法（CAVLC te(v) / CABAC ctx54+condA+2condB→58→59）、P MB 语法序（全部 ref 先于全部 mvd，分区 ref 预写供 ctxInc）、MV 预测真实 ref 匹配 | 10/10 phase15（振荡运动 + 生成器断言 ref>0 ≥10%，实测 35-96%）；全语料 145/145 |
 
 | 项 | 备注 |
 |---|---|
-| 多参考 / B 帧 | ref_idx 语法 + list1 + POC 重排 |
+| B 帧 | list1 + POC 输出重排 + direct 模式 + 双向平均 |
 | 加权预测 | pred_weight_table |
 | ASO | first_mb 乱序（mb_avail 已就绪，解析序需重排） |
 | RTL | I 帧子集起步 |

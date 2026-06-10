@@ -30,11 +30,12 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
         if (pps->bottom_field_poc_present) (void)bs_se(bs);
     }
     if (sh->is_p) {
+        sh->num_ref_l0 = pps->num_ref_idx_l0;
         if (bs_u1(bs)) {                           /* num_ref_idx_override */
-            uint32_t n0 = bs_ue(bs) + 1;
-            if (n0 != 1) { *err = H264_ERR_UNSUP; return -1; }
-        } else if (pps->num_ref_idx_l0 != 1) {
-            *err = H264_ERR_UNSUP;                 /* single-reference scope */
+            sh->num_ref_l0 = bs_ue(bs) + 1;
+        }
+        if (sh->num_ref_l0 < 1 || sh->num_ref_l0 > 8) {
+            *err = H264_ERR_UNSUP;
             return -1;
         }
         if (bs_u1(bs)) {                           /* ref_pic_list_modification */

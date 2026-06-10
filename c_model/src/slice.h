@@ -16,6 +16,7 @@ typedef struct {
     int32_t alpha_c0_offset;    /* ×2 applied, per spec */
     int32_t beta_offset;
     int cabac_init_idc;         /* P slices, CABAC only */
+    uint32_t num_ref_l0;        /* active list0 size (P) */
 } slice_hdr_t;
 
 /* Parse an I/IDR slice header (everything before slice_data). Returns 0 on
