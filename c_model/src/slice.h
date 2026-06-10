@@ -15,6 +15,7 @@ typedef struct {
     int disable_deblock;        /* disable_deblocking_filter_idc (0 when absent) */
     int32_t alpha_c0_offset;    /* ×2 applied, per spec */
     int32_t beta_offset;
+    int cabac_init_idc;         /* P slices, CABAC only */
 } slice_hdr_t;
 
 /* Parse an I/IDR slice header (everything before slice_data). Returns 0 on

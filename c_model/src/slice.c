@@ -56,6 +56,11 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
             return -1;
         }
     }
+    if (sh->is_p && pps->entropy_coding_mode) {
+        uint32_t idc = bs_ue(bs);                  /* cabac_init_idc */
+        if (idc > 2) { *err = H264_ERR_BAD_STREAM; return -1; }
+        sh->cabac_init_idc = (int)idc;
+    }
     sh->slice_qp = pps->pic_init_qp + bs_se(bs);
     if (sh->slice_qp < 0 || sh->slice_qp > 51) {
         *err = H264_ERR_BAD_STREAM;

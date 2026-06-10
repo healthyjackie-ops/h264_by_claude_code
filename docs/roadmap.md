@@ -59,12 +59,23 @@ patch 应用，叠加 python replace 无断言 → 二分时状态错乱——�
 必须 assert；(3) 参考帧是**全 MB 网格**（crop 只影响输出），MC clamp 用
 padded 尺寸。
 
-## Wave 6+（暂列）
+## Wave 6 — P 帧 CABAC
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **14** ✅ | P CABAC：mb_skip_flag ctx11+邻、P mb_type 树 ctx14-17（intra 后缀 base17 平铺 ctx）、sub_mb_type ctx21-23、mvd UEG3 ctx40/47（邻 \|mvd\| clip70 ctxInc、TU≤9 + EG3 bypass）、PB 上下文初始化表 ×3（cabac_init_idc slice 字段）、cbf inter 邻规则（不可用→cur_intra）、CBP/qp_delta/残差复用 | 15/15 phase14（main P 全矩阵 + 多 slice）；全语料 135/135 |
+
+教训：x264 main/high 默认 --bframes 3 / --weightp 2——P 向量必须显式
+--bframes 0 --weightp 0，否则混入 B slice/加权预测被正确拒掉、但向量
+就测不到目标路径（与"覆盖率要可证"同一课）。
+
+## Wave 7+（暂列）
 
 | 项 | 备注 |
 |---|---|
-| P CABAC | mb_skip_flag/mb_type/sub_mb_type/mvd(UEG3)/ref ctx |
-| 多参考 / B 帧 | ref_idx 语法 + list1 |
+| 多参考 / B 帧 | ref_idx 语法 + list1 + POC 重排 |
+| 加权预测 | pred_weight_table |
 | ASO | first_mb 乱序（mb_avail 已就绪，解析序需重排） |
+| RTL | I 帧子集起步 |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |
 | RTL | C model 收敛后按 jpeg Wave 节奏移植 |

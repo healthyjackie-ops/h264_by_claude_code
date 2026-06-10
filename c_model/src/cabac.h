@@ -25,10 +25,11 @@ typedef struct {
     uint8_t mps[H264_CABAC_NCTX];
 } cabac_t;
 
-/* Initialize contexts for an I slice at SliceQPy and prime the engine on
- * byte-aligned RBSP data starting at `pos`. */
+/* Initialize contexts at SliceQPy and prime the engine on byte-aligned
+ * RBSP data starting at `pos`. model: -1 = I-slice table, 0..2 =
+ * cabac_init_idc P/B tables. */
 void cabac_init(cabac_t *c, const uint8_t *data, size_t size, size_t pos,
-                int slice_qp);
+                int slice_qp, int model);
 
 int cabac_decision(cabac_t *c, int ctx);   /* returns the decoded bin */
 int cabac_bypass(cabac_t *c);

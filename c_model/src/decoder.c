@@ -57,6 +57,8 @@ typedef struct {
     uint16_t *mb_slice;        /* owning slice index per MB (0xFFFF = none) */
     int16_t *mv_x, *mv_y;      /* per 4x4 block, quarter-pel */
     int8_t *mb_ref;            /* per 4x4: 0 = ref0, -1 = intra/none */
+    uint8_t *mb_skip;          /* per MB: decoded as skipped (CABAC ctx) */
+    uint8_t *mvd_ax, *mvd_ay;  /* per 4x4: |mvd| clipped to 70 (mvd ctxInc) */
     const uint8_t *refY, *refU, *refV;   /* previous decoded frame (padded) */
 
     int8_t *mb_dbf_idc;        /* per-MB slice deblock params */
@@ -184,6 +186,81 @@ static uint32_t cabac_cbp(cabac_t *cb, const ictx_t *c, int sid,
         cbp |= (1u + (uint32_t)cabac_decision(cb, 77 + ctx)) << 4;
     }
     return cbp;
+}
+
+/* mb_skip_flag (P): ctx 11 + available-and-not-skipped neighbors. */
+static int cabac_mb_skip(cabac_t *cb, const ictx_t *c, int sid,
+                         uint32_t mbx, uint32_t mby) {
+    int inc = 0;
+    if (mb_avail(c, sid, (int)mbx - 1, (int)mby) &&
+        !c->mb_skip[mby * c->mb_w + mbx - 1]) inc++;
+    if (mb_avail(c, sid, (int)mbx, (int)mby - 1) &&
+        !c->mb_skip[(mby - 1) * c->mb_w + mbx]) inc++;
+    return cabac_decision(cb, 11 + inc);
+}
+
+/* Intra mb_type suffix at base ctx 17 (P slices): bin0@17, terminate for
+ * PCM, cbpL@18, cbpC@19/19, pred@20/20 — per ffmpeg
+ * decode_cabac_intra_mb_type(ctx_base=17, intra_slice=0). */
+static uint32_t cabac_mb_type_I_suffix17(cabac_t *cb) {
+    if (cabac_decision(cb, 17) == 0) return 0;     /* I_4x4 */
+    if (cabac_terminate(cb)) return 25;            /* I_PCM */
+    uint32_t mt = 1;
+    mt += 12u * (uint32_t)cabac_decision(cb, 18);
+    if (cabac_decision(cb, 19)) {
+        mt += 4u * (1u + (uint32_t)cabac_decision(cb, 19));
+    }
+    mt += 2u * (uint32_t)cabac_decision(cb, 20);
+    mt += (uint32_t)cabac_decision(cb, 20);
+    return mt;
+}
+
+/* P mb_type tree (ctx 14..17). Returns the ue-equivalent value: 0..4
+ * inter (4 = P_8x8ref0 never produced), >=5 means 5 + intra mb_type. */
+static uint32_t cabac_p_mb_type(cabac_t *cb) {
+    if (cabac_decision(cb, 14)) {
+        return 5 + cabac_mb_type_I_suffix17(cb);
+    }
+    if (cabac_decision(cb, 15) == 0) {
+        return cabac_decision(cb, 16) ? 3u : 0u;   /* P_8x8 : 16x16 */
+    }
+    return cabac_decision(cb, 17) ? 1u : 2u;       /* 16x8 : 8x16 */
+}
+
+/* sub_mb_type (P): ctx 21..23. */
+static uint32_t cabac_p_sub_type(cabac_t *cb) {
+    if (cabac_decision(cb, 21)) return 0;          /* 8x8 */
+    if (!cabac_decision(cb, 22)) return 1;         /* 8x4 */
+    return cabac_decision(cb, 23) ? 2u : 3u;       /* 4x8 : 4x4 */
+}
+
+/* mvd component (9.3.3.1.1.7, UEG3): base 40 (x) / 47 (y), bin0 ctxInc
+ * from the neighbor |mvd| sum; clipped |mvd| out for future neighbors. */
+static int cabac_mvd(cabac_t *cb, int base, int amvd, int16_t *out,
+                     uint32_t *err) {
+    int inc = (amvd > 2 ? 1 : 0) + (amvd > 32 ? 1 : 0);
+    if (!cabac_decision(cb, base + inc)) {
+        *out = 0;
+        return 0;
+    }
+    int mvd = 1;
+    int ctx = base + 3;
+    while (mvd < 9 && cabac_decision(cb, ctx)) {
+        if (mvd < 4) ctx++;
+        mvd++;
+    }
+    if (mvd >= 9) {
+        int k = 3;
+        while (cabac_bypass(cb)) {
+            mvd += 1 << k;
+            k++;
+            if (k > 24) { *err = H264_ERR_BAD_STREAM; return -1; }
+        }
+        while (k--) mvd += cabac_bypass(cb) << k;
+    }
+    if (cb->error) { *err = H264_ERR_TRUNC; return -1; }
+    *out = (int16_t)(cabac_bypass(cb) ? -mvd : mvd);
+    return mvd < 70 ? mvd : 70;
 }
 
 /* mb_qp_delta: unary with ctx 60+(last!=0), 62, 63. */
@@ -326,38 +403,38 @@ static int cabac_residual8x8(cabac_t *cb, int16_t scan[64], uint32_t *err) {
  * out-of-picture neighbor counts as 1, I_PCM counts as 1, otherwise the
  * stored cbf of the matching block/MB (0 when the neighbor has no such
  * block, e.g. luma DC next to a non-I16x16 MB). */
-static int cbf_cond_luma4(const ictx_t *c, int sid, int gx, int gy) {
+static int cbf_cond_luma4(const ictx_t *c, int cur_intra, int sid, int gx, int gy) {
     uint32_t bw = c->mb_w * 4;
-    if (!blk4_avail(c, sid, gx, gy)) return 1;
+    if (!blk4_avail(c, sid, gx, gy)) return cur_intra;
     uint32_t mb = ((uint32_t)gy >> 2) * c->mb_w + ((uint32_t)gx >> 2);
     if (c->mb_cat[mb] == 2) return 1;
     return c->cbf_l[(uint32_t)gy * bw + (uint32_t)gx];
 }
 
-static int cbf_cond_chroma4(const ictx_t *c, int sid, int comp,
+static int cbf_cond_chroma4(const ictx_t *c, int cur_intra, int sid, int comp,
                             int gx, int gy) {
     uint32_t cw = c->mb_w * 2;
-    if (gx < 0 || gy < 0 || (uint32_t)gx >= cw) return 1;
-    if (!mb_avail(c, sid, gx >> 1, gy >> 1)) return 1;
+    if (gx < 0 || gy < 0 || (uint32_t)gx >= cw) return cur_intra;
+    if (!mb_avail(c, sid, gx >> 1, gy >> 1)) return cur_intra;
     uint32_t mb = ((uint32_t)gy >> 1) * c->mb_w + ((uint32_t)gx >> 1);
     if (c->mb_cat[mb] == 2) return 1;
     return c->cbf_c[comp][(uint32_t)gy * cw + (uint32_t)gx];
 }
 
-static int cbf_cond_lumadc(const ictx_t *c, int sid, uint32_t mbx,
+static int cbf_cond_lumadc(const ictx_t *c, int cur_intra, int sid, uint32_t mbx,
                            uint32_t mby, int dx, int dy) {
     int nx = (int)mbx + dx, ny = (int)mby + dy;
-    if (!mb_avail(c, sid, nx, ny)) return 1;
+    if (!mb_avail(c, sid, nx, ny)) return cur_intra;
     uint32_t mb = (uint32_t)ny * c->mb_w + (uint32_t)nx;
     if (c->mb_cat[mb] == 2) return 1;
     if (c->mb_cat[mb] != 1) return 0;          /* no DC block in I_4x4 */
     return c->cbf_ldc[mb];
 }
 
-static int cbf_cond_chromadc(const ictx_t *c, int sid, int comp,
+static int cbf_cond_chromadc(const ictx_t *c, int cur_intra, int sid, int comp,
                              uint32_t mbx, uint32_t mby, int dx, int dy) {
     int nx = (int)mbx + dx, ny = (int)mby + dy;
-    if (!mb_avail(c, sid, nx, ny)) return 1;
+    if (!mb_avail(c, sid, nx, ny)) return cur_intra;
     uint32_t mb = (uint32_t)ny * c->mb_w + (uint32_t)nx;
     if (c->mb_cat[mb] == 2) return 1;
     return c->cbf_cdc[comp][mb];
@@ -474,6 +551,54 @@ static void p_skip_mv(const ictx_t *c, int sid, uint32_t mbx, uint32_t mby,
     mv_pred(c, sid, gx, gy, 4, 0, mx, my);
 }
 
+/* Read one mvd pair, either entropy. gx/gy locate the partition origin
+ * for the CABAC neighbor ctxInc (|mvd| sums from A/B blocks); the
+ * decoded clipped magnitudes are stored over the partition area by the
+ * caller via store_mvd(). */
+static int read_mvd_pair(bs_t *bs, cabac_t *cb, int use_cabac,
+                         const ictx_t *c, int sid, int gx, int gy,
+                         int16_t *dx, int16_t *dy, int *adx, int *ady,
+                         uint32_t *err) {
+    if (!use_cabac) {
+        *dx = (int16_t)bs_se(bs);
+        *dy = (int16_t)bs_se(bs);
+        if (bs->error) { *err = H264_ERR_TRUNC; return -1; }
+        *adx = 0;
+        *ady = 0;
+        return 0;
+    }
+    uint32_t bw = c->mb_w * 4;
+    int ax = 0, ay = 0, bx2 = 0, by2 = 0;
+    if (blk4_avail(c, sid, gx - 1, gy) &&
+        c->mb_ref[(uint32_t)gy * bw + (uint32_t)(gx - 1)] != -2) {
+        ax = c->mvd_ax[(uint32_t)gy * bw + (uint32_t)(gx - 1)];
+        ay = c->mvd_ay[(uint32_t)gy * bw + (uint32_t)(gx - 1)];
+    }
+    if (blk4_avail(c, sid, gx, gy - 1) &&
+        c->mb_ref[(uint32_t)(gy - 1) * bw + (uint32_t)gx] != -2) {
+        bx2 = c->mvd_ax[(uint32_t)(gy - 1) * bw + (uint32_t)gx];
+        by2 = c->mvd_ay[(uint32_t)(gy - 1) * bw + (uint32_t)gx];
+    }
+    int r1 = cabac_mvd(cb, 40, ax + bx2, dx, err);
+    if (r1 < 0) return -1;
+    int r2 = cabac_mvd(cb, 47, ay + by2, dy, err);
+    if (r2 < 0) return -1;
+    *adx = r1;
+    *ady = r2;
+    return 0;
+}
+
+static void store_mvd(ictx_t *c, int gx, int gy, int w4, int h4,
+                      int adx, int ady) {
+    uint32_t bw = c->mb_w * 4;
+    for (int j = 0; j < h4; j++)
+        for (int i = 0; i < w4; i++) {
+            uint32_t gi = (uint32_t)(gy + j) * bw + (uint32_t)(gx + i);
+            c->mvd_ax[gi] = (uint8_t)adx;
+            c->mvd_ay[gi] = (uint8_t)ady;
+        }
+}
+
 /* One frame's worth of slices: RBSP ownership + resume position. */
 typedef struct {
     uint8_t *rbsp;
@@ -527,10 +652,14 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     c.mv_x = (int16_t *)calloc((size_t)bw * bh, sizeof(int16_t));
     c.mv_y = (int16_t *)calloc((size_t)bw * bh, sizeof(int16_t));
     c.mb_ref = (int8_t *)malloc((size_t)bw * bh);
+    c.mb_skip = (uint8_t *)calloc(nmbs, 1);
+    c.mvd_ax = (uint8_t *)calloc((size_t)bw * bh, 1);
+    c.mvd_ay = (uint8_t *)calloc((size_t)bw * bh, 1);
     c.refY = refY;
     c.refU = refU;
     c.refV = refV;
-    int ok = c.mv_x && c.mv_y && c.mb_ref &&
+    int ok = c.mv_x && c.mv_y && c.mb_ref && c.mb_skip && c.mvd_ax &&
+             c.mvd_ay &&
              c.Y && c.U && c.V && c.i4_mode && c.nzL && c.nzC[0] &&
              c.nzC[1] && c.mb_qp && c.mb_cat && c.mb_cmode && c.mb_cbp &&
              c.cbf_l && c.cbf_ldc && c.cbf_c[0] && c.cbf_c[1] &&
@@ -574,7 +703,8 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     memset(&cbx, 0, sizeof(cbx));
     if (use_cabac) {
         bs_byte_align(bs);             /* cabac_alignment_one_bit(s) */
-        cabac_init(&cbx, bs->data, bs->size, bs->byte, qp);
+        cabac_init(&cbx, bs->data, bs->size, bs->byte, qp,
+                   sh->is_p ? sh->cabac_init_idc : -1);
     }
 
     uint32_t addr = sh->first_mb;
@@ -595,44 +725,61 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             c.mb_ref[gi] = -2;
         }
 
-        if (sh->is_p && !use_cabac) {
+        int this_skip = 0;
+        if (sh->is_p && use_cabac) {
+            this_skip = cabac_mb_skip(&cbx, &c, sid, mbx, mby);
+            if (cbx.error) { out->err = H264_ERR_TRUNC; goto fail; }
+        } else if (sh->is_p) {
             if (skip_run < 0) skip_run = (int)bs_ue(bs);
             if (bs->error) { out->err = H264_ERR_TRUNC; goto fail; }
             if (skip_run > 0) {
                 skip_run--;
-                int16_t smx, smy;
-                p_skip_mv(&c, sid, mbx, mby, &smx, &smy);
-                inter_pred_part(&c, (int)(mbx * 4), (int)(mby * 4), 4, 4,
-                                smx, smy);
-                for (int k = 0; k < 16; k++) {
-                    uint32_t gx2 = mbx * 4 + zscan_x[k];
-                    uint32_t gy2 = mby * 4 + zscan_y[k];
-                    c.nzL[gy2 * bw + gx2] = 0;
-                    c.cbf_l[gy2 * bw + gx2] = 0;
-                    c.i4_mode[gy2 * bw + gx2] = 2;
-                }
-                for (int k = 0; k < 4; k++) {
-                    uint32_t gx2 = mbx * 2 + (uint32_t)(k & 1);
-                    uint32_t gy2 = mby * 2 + (uint32_t)(k >> 1);
-                    c.nzC[0][gy2 * (bw / 2) + gx2] = 0;
-                    c.nzC[1][gy2 * (bw / 2) + gx2] = 0;
-                    c.cbf_c[0][gy2 * (bw / 2) + gx2] = 0;
-                    c.cbf_c[1][gy2 * (bw / 2) + gx2] = 0;
-                }
-                c.mb_qp[mby * c.mb_w + mbx] = (uint8_t)qp;
-                c.mb_cat[mby * c.mb_w + mbx] = 3;
-                c.mb_cbp[mby * c.mb_w + mbx] = 0;
-                c.mb_cmode[mby * c.mb_w + mbx] = 0;
-                last_qpd_nz = 0;
-                goto mb_done;
+                this_skip = 1;
+            } else {
+                skip_run = -1;             /* a coded MB follows */
             }
-            skip_run = -1;                /* a coded MB follows */
+        }
+        if (this_skip) {
+            int16_t smx, smy;
+            p_skip_mv(&c, sid, mbx, mby, &smx, &smy);
+            inter_pred_part(&c, (int)(mbx * 4), (int)(mby * 4), 4, 4,
+                            smx, smy);
+            for (int k = 0; k < 16; k++) {
+                uint32_t gx2 = mbx * 4 + zscan_x[k];
+                uint32_t gy2 = mby * 4 + zscan_y[k];
+                c.nzL[gy2 * bw + gx2] = 0;
+                c.cbf_l[gy2 * bw + gx2] = 0;
+                c.i4_mode[gy2 * bw + gx2] = 2;
+            }
+            for (int k = 0; k < 4; k++) {
+                uint32_t gx2 = mbx * 2 + (uint32_t)(k & 1);
+                uint32_t gy2 = mby * 2 + (uint32_t)(k >> 1);
+                c.nzC[0][gy2 * (bw / 2) + gx2] = 0;
+                c.nzC[1][gy2 * (bw / 2) + gx2] = 0;
+                c.cbf_c[0][gy2 * (bw / 2) + gx2] = 0;
+                c.cbf_c[1][gy2 * (bw / 2) + gx2] = 0;
+            }
+            c.mb_qp[mby * c.mb_w + mbx] = (uint8_t)qp;
+            c.mb_cat[mby * c.mb_w + mbx] = 3;
+            c.mb_cbp[mby * c.mb_w + mbx] = 0;
+            c.mb_cmode[mby * c.mb_w + mbx] = 0;
+            c.mb_skip[mby * c.mb_w + mbx] = 1;
+            last_qpd_nz = 0;
+            goto mb_done;
         }
         uint32_t mb_type;
         int is_inter = 0;
         if (use_cabac) {
-            if (sh->is_p) { out->err = H264_ERR_UNSUP; goto fail; }
-            mb_type = cabac_mb_type_I(&cbx, &c, sid, mbx, mby);
+            if (sh->is_p) {
+                mb_type = cabac_p_mb_type(&cbx);
+                if (mb_type < 5) {
+                    is_inter = 1;
+                } else {
+                    mb_type -= 5;
+                }
+            } else {
+                mb_type = cabac_mb_type_I(&cbx, &c, sid, mbx, mby);
+            }
             if (cbx.error) { out->err = H264_ERR_TRUNC; goto fail; }
         } else {
             mb_type = bs_ue(bs);
@@ -655,41 +802,43 @@ static int decode_picture(slice_ent_t *ents, int nslices,
              * qp_delta and inter residuals (7.3.5.1 / 8.4). */
             int gx0 = (int)(mbx * 4), gy0 = (int)(mby * 4);
             int16_t pmx, pmy;
+            int16_t dx, dy;
+            int adx, ady;
             if (mb_type == 0) {                    /* 16x16 */
-                int16_t dx = (int16_t)bs_se(bs), dy = (int16_t)bs_se(bs);
+                if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid, gx0, gy0,
+                                  &dx, &dy, &adx, &ady, &out->err)) goto fail;
                 mv_pred(&c, sid, gx0, gy0, 4, 0, &pmx, &pmy);
                 inter_pred_part(&c, gx0, gy0, 4, 4,
                                 (int16_t)(pmx + dx), (int16_t)(pmy + dy));
+                store_mvd(&c, gx0, gy0, 4, 4, adx, ady);
             } else if (mb_type == 1) {             /* 16x8 */
-                int16_t d[2][2];
                 for (int part = 0; part < 2; part++) {
-                    d[part][0] = (int16_t)bs_se(bs);
-                    d[part][1] = (int16_t)bs_se(bs);
-                }
-                for (int part = 0; part < 2; part++) {
+                    if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid,
+                                      gx0, gy0 + part * 2,
+                                      &dx, &dy, &adx, &ady, &out->err))
+                        goto fail;
                     mv_pred(&c, sid, gx0, gy0 + part * 2, 4,
                             1 + part, &pmx, &pmy);
                     inter_pred_part(&c, gx0, gy0 + part * 2, 4, 2,
-                                    (int16_t)(pmx + d[part][0]),
-                                    (int16_t)(pmy + d[part][1]));
+                                    (int16_t)(pmx + dx), (int16_t)(pmy + dy));
+                    store_mvd(&c, gx0, gy0 + part * 2, 4, 2, adx, ady);
                 }
             } else if (mb_type == 2) {             /* 8x16 */
-                int16_t d[2][2];
                 for (int part = 0; part < 2; part++) {
-                    d[part][0] = (int16_t)bs_se(bs);
-                    d[part][1] = (int16_t)bs_se(bs);
-                }
-                for (int part = 0; part < 2; part++) {
+                    if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid,
+                                      gx0 + part * 2, gy0,
+                                      &dx, &dy, &adx, &ady, &out->err))
+                        goto fail;
                     mv_pred(&c, sid, gx0 + part * 2, gy0, 2,
                             3 + part, &pmx, &pmy);
                     inter_pred_part(&c, gx0 + part * 2, gy0, 2, 4,
-                                    (int16_t)(pmx + d[part][0]),
-                                    (int16_t)(pmy + d[part][1]));
+                                    (int16_t)(pmx + dx), (int16_t)(pmy + dy));
+                    store_mvd(&c, gx0 + part * 2, gy0, 2, 4, adx, ady);
                 }
             } else {                               /* P_8x8 / P_8x8ref0 */
                 uint32_t sub[4];
                 for (int b = 0; b < 4; b++) {
-                    sub[b] = bs_ue(bs);
+                    sub[b] = use_cabac ? cabac_p_sub_type(&cbx) : bs_ue(bs);
                     if (sub[b] > 3) { out->err = H264_ERR_BAD_STREAM; goto fail; }
                 }
                 /* single reference: no ref_idx fields */
@@ -707,24 +856,33 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                             sx = bx0 + (s & 1); sy = by0 + (s >> 1);
                             w4 = 1; h4 = 1;
                         }
-                        int16_t dx = (int16_t)bs_se(bs);
-                        int16_t dy = (int16_t)bs_se(bs);
+                        if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid,
+                                          sx, sy, &dx, &dy, &adx, &ady,
+                                          &out->err)) goto fail;
                         mv_pred(&c, sid, sx, sy, w4, 0, &pmx, &pmy);
                         inter_pred_part(&c, sx, sy, w4, h4,
                                         (int16_t)(pmx + dx),
                                         (int16_t)(pmy + dy));
+                        store_mvd(&c, sx, sy, w4, h4, adx, ady);
                     }
                 }
             }
-            if (bs->error) { out->err = H264_ERR_TRUNC; goto fail; }
+            if (bs->error || cbx.error) { out->err = H264_ERR_TRUNC; goto fail; }
 
-            /* CBP (inter me table) + qp_delta. */
-            uint32_t code = bs_ue(bs);
-            if (code >= 48 || bs->error) {
-                out->err = bs->error ? H264_ERR_TRUNC : H264_ERR_BAD_STREAM;
-                goto fail;
+            /* CBP + qp_delta. */
+            uint32_t cbp;
+            if (use_cabac) {
+                cbp = cabac_cbp(&cbx, &c, sid, mbx, mby);
+                if (cbx.error) { out->err = H264_ERR_TRUNC; goto fail; }
+            } else {
+                uint32_t code = bs_ue(bs);
+                if (code >= 48 || bs->error) {
+                    out->err = bs->error ? H264_ERR_TRUNC
+                                         : H264_ERR_BAD_STREAM;
+                    goto fail;
+                }
+                cbp = golomb_to_inter_cbp[code];
             }
-            uint32_t cbp = golomb_to_inter_cbp[code];
             uint32_t cbp_luma = cbp & 15, cbp_chroma = cbp >> 4;
             if (cbp_chroma > 2) { out->err = H264_ERR_BAD_STREAM; goto fail; }
             c.mb_cat[mby * c.mb_w + mbx] = 3;
@@ -737,12 +895,21 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 c.i4_mode[gy2 * bw + gx2] = 2;
             }
             if (cbp_luma != 0 || cbp_chroma != 0) {
-                int32_t delta = bs_se(bs);
+                int32_t delta;
+                if (use_cabac) {
+                    if (cabac_qp_delta(&cbx, last_qpd_nz, &delta, &out->err))
+                        goto fail;
+                    last_qpd_nz = (delta != 0);
+                } else {
+                    delta = bs_se(bs);
+                }
                 if (delta < -26 || delta > 25 || bs->error) {
                     out->err = bs->error ? H264_ERR_TRUNC : H264_ERR_BAD_STREAM;
                     goto fail;
                 }
                 qp = (qp + (int)delta + 52) % 52;
+            } else {
+                last_qpd_nz = 0;
             }
             c.mb_qp[mby * c.mb_w + mbx] = (uint8_t)qp;
 
@@ -754,10 +921,18 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 int gx = (int)(mbx * 4 + zscan_x[k]);
                 int gy = (int)(mby * 4 + zscan_y[k]);
                 if (cbp_luma & (1u << (k >> 2))) {
-                    int nc = derive_nc(c.nzL, bw, gx, gy,
-                                       blk4_avail(&c, sid, gx - 1, gy),
-                                       blk4_avail(&c, sid, gx, gy - 1));
-                    int tc = cavlc_residual_block(bs, nc, 16, scan, &out->err);
+                    int tc;
+                    if (use_cabac) {
+                        int ca = cbf_cond_luma4(&c, 0, sid, gx - 1, gy);
+                        int cbn = cbf_cond_luma4(&c, 0, sid, gx, gy - 1);
+                        tc = cabac_residual(&cbx, 2, ca, cbn, 16, scan,
+                                            &out->err);
+                    } else {
+                        int nc = derive_nc(c.nzL, bw, gx, gy,
+                                           blk4_avail(&c, sid, gx - 1, gy),
+                                           blk4_avail(&c, sid, gx, gy - 1));
+                        tc = cavlc_residual_block(bs, nc, 16, scan, &out->err);
+                    }
                     if (tc < 0) goto fail;
                     c.nzL[(uint32_t)gy * bw + (uint32_t)gx] = (uint8_t)tc;
                     c.cbf_l[(uint32_t)gy * bw + (uint32_t)gx] = (tc != 0);
@@ -772,8 +947,20 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             memset(cdc, 0, sizeof(cdc));
             if (cbp_chroma != 0) {
                 for (int comp = 0; comp < 2; comp++) {
-                    if (cavlc_residual_block(bs, -1, 4, scan, &out->err) < 0)
-                        goto fail;
+                    int tc;
+                    if (use_cabac) {
+                        int ca = cbf_cond_chromadc(&c, 0, sid, comp,
+                                                   mbx, mby, -1, 0);
+                        int cbn = cbf_cond_chromadc(&c, 0, sid, comp,
+                                                    mbx, mby, 0, -1);
+                        tc = cabac_residual(&cbx, 3, ca, cbn, 4, scan,
+                                            &out->err);
+                        if (tc < 0) goto fail;
+                        c.cbf_cdc[comp][mby * c.mb_w + mbx] = (tc != 0);
+                    } else {
+                        tc = cavlc_residual_block(bs, -1, 4, scan, &out->err);
+                        if (tc < 0) goto fail;
+                    }
                     for (int i = 0; i < 4; i++) cdc[comp][i] = scan[i];
                 }
             }
@@ -784,13 +971,24 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                     int gx = (int)(mbx * 2 + (uint32_t)(k & 1));
                     int gy = (int)(mby * 2 + (uint32_t)(k >> 1));
                     if (cbp_chroma == 2) {
-                        int avA = gx > 0 &&
-                            mb_avail(&c, sid, (gx - 1) >> 1, gy >> 1);
-                        int avB = gy > 0 &&
-                            mb_avail(&c, sid, gx >> 1, (gy - 1) >> 1);
-                        int tc = cavlc_residual_block(bs,
-                            derive_nc(c.nzC[comp], bw / 2, gx, gy, avA, avB),
-                            15, scan, &out->err);
+                        int tc;
+                        if (use_cabac) {
+                            int ca = cbf_cond_chroma4(&c, 0, sid, comp,
+                                                      gx - 1, gy);
+                            int cbn = cbf_cond_chroma4(&c, 0, sid, comp,
+                                                       gx, gy - 1);
+                            tc = cabac_residual(&cbx, 4, ca, cbn, 15, scan,
+                                                &out->err);
+                        } else {
+                            int avA = gx > 0 &&
+                                mb_avail(&c, sid, (gx - 1) >> 1, gy >> 1);
+                            int avB = gy > 0 &&
+                                mb_avail(&c, sid, gx >> 1, (gy - 1) >> 1);
+                            tc = cavlc_residual_block(bs,
+                                derive_nc(c.nzC[comp], bw / 2, gx, gy,
+                                          avA, avB),
+                                15, scan, &out->err);
+                        }
                         if (tc < 0) goto fail;
                         c.nzC[comp][(uint32_t)gy * (bw / 2) + (uint32_t)gx] =
                             (uint8_t)tc;
@@ -1023,8 +1221,8 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             int16_t dcraw[16];
             memset(dcraw, 0, sizeof(dcraw));
             if (use_cabac) {
-                int ca = cbf_cond_lumadc(&c, sid, mbx, mby, -1, 0);
-                int cbn = cbf_cond_lumadc(&c, sid, mbx, mby, 0, -1);
+                int ca = cbf_cond_lumadc(&c, 1, sid, mbx, mby, -1, 0);
+                int cbn = cbf_cond_lumadc(&c, 1, sid, mbx, mby, 0, -1);
                 int tc = cabac_residual(&cbx, 0, ca, cbn, 16, scan, &out->err);
                 if (tc < 0) goto fail;
                 c.cbf_ldc[mby * c.mb_w + mbx] = (tc != 0);
@@ -1099,8 +1297,8 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 int maxc = intra4x4 ? 16 : 15;
                 int tc;
                 if (use_cabac) {
-                    int ca = cbf_cond_luma4(&c, sid, gx - 1, gy);
-                    int cbn = cbf_cond_luma4(&c, sid, gx, gy - 1);
+                    int ca = cbf_cond_luma4(&c, 1, sid, gx - 1, gy);
+                    int cbn = cbf_cond_luma4(&c, 1, sid, gx, gy - 1);
                     tc = cabac_residual(&cbx, intra4x4 ? 2 : 1, ca, cbn,
                                         maxc, scan, &out->err);
                     if (tc < 0) goto fail;
@@ -1131,8 +1329,8 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         if (cbp_chroma != 0) {
             for (int comp = 0; comp < 2; comp++) {
                 if (use_cabac) {
-                    int ca = cbf_cond_chromadc(&c, sid, comp, mbx, mby, -1, 0);
-                    int cbn = cbf_cond_chromadc(&c, sid, comp, mbx, mby, 0, -1);
+                    int ca = cbf_cond_chromadc(&c, 1, sid, comp, mbx, mby, -1, 0);
+                    int cbn = cbf_cond_chromadc(&c, 1, sid, comp, mbx, mby, 0, -1);
                     int tc = cabac_residual(&cbx, 3, ca, cbn, 4, scan,
                                             &out->err);
                     if (tc < 0) goto fail;
@@ -1153,8 +1351,8 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 if (cbp_chroma == 2) {
                     int tc;
                     if (use_cabac) {
-                        int ca = cbf_cond_chroma4(&c, sid, comp, gx - 1, gy);
-                        int cbn = cbf_cond_chroma4(&c, sid, comp, gx, gy - 1);
+                        int ca = cbf_cond_chroma4(&c, 1, sid, comp, gx - 1, gy);
+                        int cbn = cbf_cond_chroma4(&c, 1, sid, comp, gx, gy - 1);
                         tc = cabac_residual(&cbx, 4, ca, cbn, 15, scan,
                                             &out->err);
                         if (tc < 0) goto fail;
@@ -1351,6 +1549,7 @@ mb_done:
     free(c.cbf_cdc[0]); free(c.cbf_cdc[1]); free(c.mb_t8);
     free(c.mb_slice); free(c.mb_dbf_idc); free(c.mb_dbf_a); free(c.mb_dbf_b);
     free(c.mv_x); free(c.mv_y); free(c.mb_ref);
+    free(c.mb_skip); free(c.mvd_ax); free(c.mvd_ay);
     *keepY = c.Y;                       /* caller keeps the padded frame */
     *keepU = c.U;
     *keepV = c.V;
@@ -1365,6 +1564,7 @@ fail:
     free(c.cbf_cdc[0]); free(c.cbf_cdc[1]); free(c.mb_t8);
     free(c.mb_slice); free(c.mb_dbf_idc); free(c.mb_dbf_a); free(c.mb_dbf_b);
     free(c.mv_x); free(c.mv_y); free(c.mb_ref);
+    free(c.mb_skip); free(c.mvd_ax); free(c.mvd_ay);
     return -1;
 }
 
