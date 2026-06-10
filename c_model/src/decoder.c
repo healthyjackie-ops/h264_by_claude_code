@@ -6,6 +6,7 @@
 
 #include "bitstream.h"
 #include "cavlc.h"
+#include "deblock.h"
 #include "intra.h"
 #include "nal.h"
 #include "params.h"
@@ -41,6 +42,7 @@ typedef struct {
     int8_t *i4_mode;           /* [mb_h*4][mb_w*4]; 2 (DC) for non-I4x4 MBs */
     uint8_t *nzL;              /* [mb_h*4][mb_w*4] total_coeff per luma 4x4 */
     uint8_t *nzC[2];           /* [mb_h*2][mb_w*2] per chroma component */
+    uint8_t *mb_qp;            /* [mb_h][mb_w] final luma QP per MB */
 } ictx_t;
 
 static int clip3(int lo, int hi, int v) {
@@ -94,7 +96,9 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
     c.nzL = (uint8_t *)calloc((size_t)bw * bh, 1);
     c.nzC[0] = (uint8_t *)calloc((size_t)(bw / 2) * (bh / 2), 1);
     c.nzC[1] = (uint8_t *)calloc((size_t)(bw / 2) * (bh / 2), 1);
-    int ok = c.Y && c.U && c.V && c.i4_mode && c.nzL && c.nzC[0] && c.nzC[1];
+    c.mb_qp = (uint8_t *)calloc((size_t)c.mb_w * c.mb_h, 1);
+    int ok = c.Y && c.U && c.V && c.i4_mode && c.nzL && c.nzC[0] &&
+             c.nzC[1] && c.mb_qp;
     if (!ok) {
         out->err = H264_ERR_INTERNAL;
         goto fail;
@@ -139,6 +143,7 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
                 c.nzC[0][gy * (bw / 2) + gx] = 16;
                 c.nzC[1][gy * (bw / 2) + gx] = 16;
             }
+            c.mb_qp[mby * c.mb_w + mbx] = (uint8_t)qp;
             if (dbg >= 2) fprintf(stderr, "MB %u,%u I_PCM\n", mbx, mby);
             continue;
         }
@@ -201,6 +206,7 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
             }
             qp = (qp + (int)delta + 52) % 52;
         }
+        c.mb_qp[mby * c.mb_w + mbx] = (uint8_t)qp;
         if (dbg >= 2) {
             fprintf(stderr, "MB %u,%u type=%u cbpL=%u cbpC=%u qp=%d\n",
                     mbx, mby, mb_type, cbp_luma, cbp_chroma, qp);
@@ -326,6 +332,13 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
     }
     }
 
+    /* ---- in-loop deblocking (8.7) ---- */
+    if (sh->disable_deblock != 1) {
+        h264_deblock_frame(c.Y, c.U, c.V, c.ls, c.cs, c.mb_w, c.mb_h,
+                           c.mb_qp, (int)pps->chroma_qp_offset,
+                           (int)sh->alpha_c0_offset, (int)sh->beta_offset);
+    }
+
     /* ---- crop to output planes ---- */
     {
     uint32_t W = c.mb_w * 16 - 2 * (sps->crop_l + sps->crop_r);
@@ -352,12 +365,14 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
 
     free(c.Y); free(c.U); free(c.V);
     free(c.i4_mode); free(c.nzL); free(c.nzC[0]); free(c.nzC[1]);
+    free(c.mb_qp);
     out->err = 0;
     return 0;
 
 fail:
     free(c.Y); free(c.U); free(c.V);
     free(c.i4_mode); free(c.nzL); free(c.nzC[0]); free(c.nzC[1]);
+    free(c.mb_qp);
     return -1;
 }
 
