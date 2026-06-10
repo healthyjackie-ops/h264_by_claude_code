@@ -925,28 +925,41 @@ mb_done:
                        (int)pps->chroma_qp_offset,
                        (int)pps->second_chroma_qp_offset);
 
-    /* ---- crop to output planes ---- */
+    /* ---- crop and append this frame to the output sequence ---- */
     {
     uint32_t W = c.mb_w * 16 - 2 * (sps->crop_l + sps->crop_r);
     uint32_t H = c.mb_h * 16 - 2 * (sps->crop_t + sps->crop_b);
     out->width = (uint16_t)W;
     out->height = (uint16_t)H;
     uint32_t cw = W / 2, chh = H / 2;
-    out->y_plane = (uint8_t *)malloc((size_t)W * H);
-    out->cb_plane = (uint8_t *)malloc((size_t)cw * chh);
-    out->cr_plane = (uint8_t *)malloc((size_t)cw * chh);
-    if (!out->y_plane || !out->cb_plane || !out->cr_plane) {
+    size_t ysz = (size_t)W * H, csz = (size_t)cw * chh;
+    uint32_t fr = out->nframes;
+    uint8_t *ny = (uint8_t *)realloc(out->y_plane, ysz * (fr + 1));
+    uint8_t *nu = (uint8_t *)realloc(out->cb_plane, csz * (fr + 1));
+    uint8_t *nv = (uint8_t *)realloc(out->cr_plane, csz * (fr + 1));
+    if (!ny || !nu || !nv) {
+        free(ny ? ny : out->y_plane);
+        free(nu ? nu : out->cb_plane);
+        free(nv ? nv : out->cr_plane);
+        out->y_plane = out->cb_plane = out->cr_plane = NULL;
         out->err = H264_ERR_INTERNAL;
         goto fail;
     }
+    out->y_plane = ny;
+    out->cb_plane = nu;
+    out->cr_plane = nv;
     size_t yoff = (size_t)sps->crop_t * 2 * c.ls + (size_t)sps->crop_l * 2;
     size_t coff = (size_t)sps->crop_t * c.cs + (size_t)sps->crop_l;
     for (uint32_t r = 0; r < H; r++)
-        memcpy(out->y_plane + (size_t)r * W, c.Y + yoff + (size_t)r * c.ls, W);
+        memcpy(out->y_plane + fr * ysz + (size_t)r * W,
+               c.Y + yoff + (size_t)r * c.ls, W);
     for (uint32_t r = 0; r < chh; r++) {
-        memcpy(out->cb_plane + (size_t)r * cw, c.U + coff + (size_t)r * c.cs, cw);
-        memcpy(out->cr_plane + (size_t)r * cw, c.V + coff + (size_t)r * c.cs, cw);
+        memcpy(out->cb_plane + fr * csz + (size_t)r * cw,
+               c.U + coff + (size_t)r * c.cs, cw);
+        memcpy(out->cr_plane + fr * csz + (size_t)r * cw,
+               c.V + coff + (size_t)r * c.cs, cw);
     }
+    out->nframes = fr + 1;
     }
 
     free(c.Y); free(c.U); free(c.V);
@@ -1009,16 +1022,27 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
         } else if (n.type == NAL_SLICE_IDR || n.type == NAL_SLICE_NON_IDR) {
             if (!sps.valid) { out->err = H264_ERR_NO_SPS; nal_free(&n); return -1; }
             if (!pps.valid) { out->err = H264_ERR_NO_PPS; nal_free(&n); return -1; }
-            /* Collect every slice of this picture, then decode them all. */
+            /* Decode pictures until the stream runs out of slices. A slice
+             * with first_mb==0 (after the first) starts the next picture. */
             enum { MAX_SLICES = 256 };
             slice_ent_t ents[MAX_SLICES];
             int nslices = 0;
+            int have_nal = 1;                      /* n holds a slice NAL */
             for (;;) {
                 slice_hdr_t sh;
                 if (parse_slice_header(&bs, &sps, &pps, n.type, n.ref_idc,
                                        &sh, &out->err)) {
                     nal_free(&n);
                     goto ents_fail;
+                }
+                if (sh.first_mb == 0 && nslices > 0) {
+                    /* picture boundary: decode what we have first */
+                    if (decode_picture(ents, nslices, &sps, &pps, out)) {
+                        nal_free(&n);
+                        goto ents_fail;
+                    }
+                    for (int i = 0; i < nslices; i++) free(ents[i].rbsp);
+                    nslices = 0;
                 }
                 if (trace_level()) {
                     fprintf(stderr,
@@ -1040,17 +1064,17 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
                 n.rbsp = NULL;
 
                 /* Advance to the next slice NAL (skip SEI etc.). */
-                int more = 0;
+                have_nal = 0;
                 while (nal_next(data, size, &pos, &n) == 0) {
                     if (n.type == NAL_SLICE_IDR ||
                         n.type == NAL_SLICE_NON_IDR) {
                         bs_init(&bs, n.rbsp, n.size);
-                        more = 1;
+                        have_nal = 1;
                         break;
                     }
                     nal_free(&n);
                 }
-                if (!more) break;
+                if (!have_nal) break;
             }
             int rc = decode_picture(ents, nslices, &sps, &pps, out);
             for (int i = 0; i < nslices; i++) free(ents[i].rbsp);

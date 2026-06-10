@@ -92,9 +92,11 @@ int main(int argc, char **argv) {
 
         size_t W = ours.width, H = ours.height;
         size_t ysz = W * H, csz = (W >> 1) * (H >> 1);
-        if (gsz != ysz + 2 * csz) {
-            fprintf(stderr, "[FAIL] %s: golden size %zu != %zu (W=%zu H=%zu)\n",
-                    argv[a], gsz, ysz + 2 * csz, W, H);
+        size_t fsz = ysz + 2 * csz;
+        if (gsz != fsz * ours.nframes) {
+            fprintf(stderr,
+                    "[FAIL] %s: golden size %zu != %zu (W=%zu H=%zu n=%u)\n",
+                    argv[a], gsz, fsz * ours.nframes, W, H, ours.nframes);
             fail++;
             free(gold);
             h264_free(&ours);
@@ -103,24 +105,28 @@ int main(int argc, char **argv) {
         }
 
         int dy = 0, dc = 0;
-        for (size_t i = 0; i < ysz; i++) {
-            int d = (int)ours.y_plane[i] - (int)gold[i];
-            if (d < 0) d = -d;
-            if (d > dy) dy = d;
-        }
-        for (size_t i = 0; i < csz; i++) {
-            int d1 = (int)ours.cb_plane[i] - (int)gold[ysz + i];
-            int d2 = (int)ours.cr_plane[i] - (int)gold[ysz + csz + i];
-            if (d1 < 0) d1 = -d1;
-            if (d2 < 0) d2 = -d2;
-            if (d1 > dc) dc = d1;
-            if (d2 > dc) dc = d2;
+        for (uint32_t fr = 0; fr < ours.nframes; fr++) {
+            const uint8_t *gf = gold + (size_t)fr * fsz;
+            for (size_t i = 0; i < ysz; i++) {
+                int d = (int)ours.y_plane[fr * ysz + i] - (int)gf[i];
+                if (d < 0) d = -d;
+                if (d > dy) dy = d;
+            }
+            for (size_t i = 0; i < csz; i++) {
+                int d1 = (int)ours.cb_plane[fr * csz + i] - (int)gf[ysz + i];
+                int d2 = (int)ours.cr_plane[fr * csz + i] - (int)gf[ysz + csz + i];
+                if (d1 < 0) d1 = -d1;
+                if (d2 < 0) d2 = -d2;
+                if (d1 > dc) dc = d1;
+                if (d2 > dc) dc = d2;
+            }
         }
         if (dy == 0 && dc == 0) {
-            printf("[PASS] %s %zux%zu exact\n", argv[a], W, H);
+            printf("[PASS] %s %zux%zu x%u exact\n", argv[a], W, H, ours.nframes);
             pass++;
         } else {
-            printf("[FAIL] %s %zux%zu maxDiff Y=%d C=%d\n", argv[a], W, H, dy, dc);
+            printf("[FAIL] %s %zux%zu x%u maxDiff Y=%d C=%d\n",
+                   argv[a], W, H, ours.nframes, dy, dc);
             fail++;
         }
         if (dy > worst_y) worst_y = dy;

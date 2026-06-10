@@ -35,15 +35,19 @@ int main(int argc, char **argv) {
         free(data);
         return 2;
     }
-    fprintf(stderr, "decoded %ux%u\n", dec.width, dec.height);
+    fprintf(stderr, "decoded %ux%u x%u frames\n", dec.width, dec.height,
+            dec.nframes);
 
     if (argc >= 3) {
         FILE *f = fopen(argv[2], "wb");
         if (f) {
-            size_t cw = (size_t)dec.width >> 1, ch = (size_t)dec.height >> 1;
-            fwrite(dec.y_plane, 1, (size_t)dec.width * dec.height, f);
-            fwrite(dec.cb_plane, 1, cw * ch, f);
-            fwrite(dec.cr_plane, 1, cw * ch, f);
+            size_t ys = (size_t)dec.width * dec.height;
+            size_t cs = ((size_t)dec.width >> 1) * ((size_t)dec.height >> 1);
+            for (uint32_t fr = 0; fr < dec.nframes; fr++) {
+                fwrite(dec.y_plane + fr * ys, 1, ys, f);
+                fwrite(dec.cb_plane + fr * cs, 1, cs, f);
+                fwrite(dec.cr_plane + fr * cs, 1, cs, f);
+            }
             fclose(f);
         }
     }

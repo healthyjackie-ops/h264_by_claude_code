@@ -20,14 +20,16 @@ enum {
 typedef struct {
     uint16_t width;    /* cropped luma dims */
     uint16_t height;
-    /* yuv420p planes, cropped: y = W*H, cb/cr = (W/2)*(H/2). */
+    uint32_t nframes;
+    /* yuv420p planes, nframes concatenated:
+     * y = W*H*n, cb/cr = (W/2)*(H/2)*n. */
     uint8_t *y_plane;
     uint8_t *cb_plane;
     uint8_t *cr_plane;
     uint32_t err;
 } h264_decoded_t;
 
-/* Decode the first IDR I-frame of an Annex-B byte stream. Returns 0 on
+/* Decode every coded picture of an Annex-B byte stream. Returns 0 on
  * success. On failure all planes are released and only err survives. */
 int h264_decode(const uint8_t *data, size_t size, h264_decoded_t *out);
 void h264_free(h264_decoded_t *out);
