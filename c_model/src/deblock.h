@@ -12,6 +12,8 @@
 /* mb_dbf_idc/a/b carry each MB's slice-header filter parameters:
  * idc==1 disables the MB entirely, idc==2 skips edges whose p-side MB
  * belongs to a different slice; offsets follow the q-side MB. */
+/* mb_cat (<3 = intra), nzL (total_coeff per 4x4) and the quarter-pel
+ * motion arrays drive the inter boundary strengths (8.7.2.1). */
 void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         size_t ls, size_t cs,
                         uint32_t mb_w, uint32_t mb_h,
@@ -20,6 +22,10 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         const uint16_t *mb_slice,
                         const int8_t *mb_dbf_idc,
                         const int8_t *mb_dbf_a, const int8_t *mb_dbf_b,
+                        const uint8_t *mb_cat,
+                        const uint8_t *nzL,
+                        const int16_t *mv_x, const int16_t *mv_y,
+                        const int8_t *mb_ref,
                         int chroma_qp_offset, int second_chroma_qp_offset);
 
 #endif

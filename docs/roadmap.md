@@ -46,9 +46,25 @@ SPS 真带矩阵时继承，matrix-less SPS → rule A 默认；(3) chroma DC �
 无舍入项（JM 插桩验证 `((f·w0·V0)<<p)>>5`），luma DC/4x4/8x8 才带
 rshift_rnd_sf 舍入。
 
+## Wave 5 — P 帧（CAVLC 完成）
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **13a** ✅ | 多帧解码架构（nframes API + picture 循环 + golden 多帧比对） | 3×IDR 序列 bit-exact |
+| **13b** ✅ | P 帧 CAVLC：6-tap qpel luma MC + 1/8 双线性 chroma、P_L0 全分区（16x16/16x8/8x16/8x8+子分区）、MV 中值预测（16x8/8x16 方向特例 + only-A 规则）、P_Skip（零强制条件）、mb_skip_run、inter CBP me 表、P slice 内 intra MB、inter deblock bS 0/1/2（per 4-样本段，nz/ref/mv 差推导） | 14/14 phase13（运动/场景切换/非对齐/deblock on/off）；全语料 120/120 |
+
+教训：(1) intra MB 的运动哨兵（-2）必须在 mb_done 归位为 -1，否则邻居
+MV 预测把 intra 邻当"未解码"；(2) `a || b && c` 的 shell 优先级吞掉了
+patch 应用，叠加 python replace 无断言 → 二分时状态错乱——一切 replace
+必须 assert；(3) 参考帧是**全 MB 网格**（crop 只影响输出），MC clamp 用
+padded 尺寸。
+
+## Wave 6+（暂列）
+
 | 项 | 备注 |
 |---|---|
-| P 帧 | 运动补偿（半/四像素 6-tap 插值）+ MV 预测 + P_Skip + ref 管理 |
+| P CABAC | mb_skip_flag/mb_type/sub_mb_type/mvd(UEG3)/ref ctx |
+| 多参考 / B 帧 | ref_idx 语法 + list1 |
 | ASO | first_mb 乱序（mb_avail 已就绪，解析序需重排） |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |
 | RTL | C model 收敛后按 jpeg Wave 节奏移植 |

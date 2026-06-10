@@ -6,7 +6,8 @@
 
 typedef struct {
     uint32_t first_mb;
-    uint32_t slice_type;        /* raw value; %5 == 2 means I slice */
+    uint32_t slice_type;        /* raw; %5: 2 = I, 0 = P */
+    int is_p;
     uint32_t pps_id;
     uint32_t frame_num;
     uint32_t idr_pic_id;

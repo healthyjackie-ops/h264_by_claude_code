@@ -11,7 +11,8 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
     memset(sh, 0, sizeof(*sh));
     sh->first_mb = bs_ue(bs);
     sh->slice_type = bs_ue(bs);
-    if (sh->slice_type % 5 != 2) {                 /* I slices only in v0.1 */
+    sh->is_p = (sh->slice_type % 5 == 0);
+    if (sh->slice_type % 5 != 2 && !sh->is_p) {    /* I and P slices */
         *err = H264_ERR_UNSUP;
         return -1;
     }
@@ -28,7 +29,24 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
         (void)bs_se(bs);
         if (pps->bottom_field_poc_present) (void)bs_se(bs);
     }
-    /* I slice: no ref-pic-list modification, no pred-weight table. */
+    if (sh->is_p) {
+        if (bs_u1(bs)) {                           /* num_ref_idx_override */
+            uint32_t n0 = bs_ue(bs) + 1;
+            if (n0 != 1) { *err = H264_ERR_UNSUP; return -1; }
+        } else if (pps->num_ref_idx_l0 != 1) {
+            *err = H264_ERR_UNSUP;                 /* single-reference scope */
+            return -1;
+        }
+        if (bs_u1(bs)) {                           /* ref_pic_list_modification */
+            *err = H264_ERR_UNSUP;
+            return -1;
+        }
+        if (pps->weighted_pred) {                  /* pred_weight_table */
+            *err = H264_ERR_UNSUP;
+            return -1;
+        }
+    }
+    /* No pred-weight table for I; marking below. */
     if (nal_type == NAL_SLICE_IDR) {
         bs_skip(bs, 1);                            /* no_output_of_prior_pics */
         bs_skip(bs, 1);                            /* long_term_reference_flag */

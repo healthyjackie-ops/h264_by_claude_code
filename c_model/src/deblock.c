@@ -39,13 +39,18 @@ static uint8_t clip_u8(int v) {
 
 static int iabs(int v) { return v < 0 ? -v : v; }
 
-/* Filter one edge of `len` sample lines. q0p points at the first q0
- * sample; pstep crosses the edge (towards q3), lstep walks along it. */
+/* Filter one edge of `len` sample lines with per-4-sample boundary
+ * strengths: line i uses bs4[i / seg] (seg = 4 luma, 2 chroma). q0p
+ * points at the first q0 sample; pstep crosses the edge, lstep walks. */
 static void filter_edge(uint8_t *q0p, ptrdiff_t pstep, ptrdiff_t lstep,
-                        int len, int alpha, int beta, int bs, int tc0,
+                        int len, int alpha, int beta,
+                        const int bs4[4], const int tc04[4], int seg,
                         int chroma) {
     if (alpha == 0) return;
     for (int i = 0; i < len; i++) {
+        int bs = bs4[i / seg];
+        int tc0 = tc04[i / seg];
+        if (bs == 0) continue;
         uint8_t *q = q0p + lstep * i;
         int q0 = q[0], q1 = q[pstep], q2 = q[2 * pstep];
         int p0 = q[-pstep], p1 = q[-2 * pstep], p2 = q[-3 * pstep];
@@ -101,6 +106,28 @@ static void filter_edge(uint8_t *q0p, ptrdiff_t pstep, ptrdiff_t lstep,
     }
 }
 
+/* Boundary strength for the edge between 4x4 blocks p=(px,py), q=(qx,qy)
+ * (8.7.2.1, frame coding, single reference). */
+static int edge_bs(uint32_t mb_w, const uint8_t *mb_cat, const uint8_t *nzL,
+                   const int16_t *mv_x, const int16_t *mv_y,
+                   const int8_t *mb_ref,
+                   int px, int py, int qx, int qy, int mb_edge) {
+    uint32_t bw = mb_w * 4;
+    uint32_t pi = (uint32_t)py * bw + (uint32_t)px;
+    uint32_t qi = (uint32_t)qy * bw + (uint32_t)qx;
+    int p_intra = mb_cat[((uint32_t)py >> 2) * mb_w + ((uint32_t)px >> 2)] < 3;
+    int q_intra = mb_cat[((uint32_t)qy >> 2) * mb_w + ((uint32_t)qx >> 2)] < 3;
+    if (p_intra || q_intra) return mb_edge ? 4 : 3;
+    if (nzL[pi] || nzL[qi]) return 2;
+    if (mb_ref[pi] != mb_ref[qi]) return 1;
+    int dx = mv_x[pi] - mv_x[qi];
+    int dy = mv_y[pi] - mv_y[qi];
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    if (dx >= 4 || dy >= 4) return 1;
+    return 0;
+}
+
 void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         size_t ls, size_t cs,
                         uint32_t mb_w, uint32_t mb_h,
@@ -109,6 +136,10 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         const uint16_t *mb_slice,
                         const int8_t *mb_dbf_idc,
                         const int8_t *mb_dbf_a, const int8_t *mb_dbf_b,
+                        const uint8_t *mb_cat,
+                        const uint8_t *nzL,
+                        const int16_t *mv_x, const int16_t *mv_y,
+                        const int8_t *mb_ref,
                         int chroma_qp_offset, int second_chroma_qp_offset) {
     for (uint32_t mby = 0; mby < mb_h; mby++) {
     for (uint32_t mbx = 0; mbx < mb_w; mbx++) {
@@ -137,21 +168,57 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                 }
                 int ia = clip3(0, 51, qpav + alpha_off);
                 int ib = clip3(0, 51, qpav + beta_off);
-                int bs = (e == 0) ? 4 : 3;
-                int tc0 = (bs < 4) ? TC0[ia][bs - 1] : 0;
+                int bs4[4], tc04[4];
+                for (int s = 0; s < 4; s++) {
+                    int px, py, qx, qy;
+                    if (dir == 0) {
+                        qx = (int)(mbx * 4) + e;
+                        qy = (int)(mby * 4) + s;
+                        px = qx - 1;
+                        py = qy;
+                    } else {
+                        qx = (int)(mbx * 4) + s;
+                        qy = (int)(mby * 4) + e;
+                        px = qx;
+                        py = qy - 1;
+                    }
+                    bs4[s] = edge_bs(mb_w, mb_cat, nzL, mv_x, mv_y, mb_ref,
+                                     px, py, qx, qy, e == 0);
+                    tc04[s] = (bs4[s] > 0 && bs4[s] < 4)
+                                  ? TC0[ia][bs4[s] - 1] : 0;
+                }
                 uint8_t *base = (dir == 0)
                     ? Y + (size_t)mby * 16 * ls + (size_t)mbx * 16 + (size_t)e * 4
                     : Y + ((size_t)mby * 16 + (size_t)e * 4) * ls + (size_t)mbx * 16;
                 filter_edge(base,
                             dir == 0 ? 1 : (ptrdiff_t)ls,
                             dir == 0 ? (ptrdiff_t)ls : 1,
-                            16, ALPHA[ia], BETA[ib], bs, tc0, 0);
+                            16, ALPHA[ia], BETA[ib], bs4, tc04, 4, 0);
             }
             /* chroma: edges at chroma x/y 0 and 4 (luma 0 and 8); each
              * component averages its own QPc (Cr uses the second offset). */
             for (int e = 0; e < 2; e++) {
                 if (e == 0 && (dir == 0 ? skip_left : skip_top)) continue;
-                int bs = (e == 0) ? 4 : 3;
+                /* chroma edge at luma x/y offset 2*e*4: bS from the
+                 * corresponding luma block pairs (2 luma segments per
+                 * chroma edge half). */
+                int cbs4[4], luma_e = e * 2;
+                for (int s = 0; s < 4; s++) {
+                    int px, py, qx, qy;
+                    if (dir == 0) {
+                        qx = (int)(mbx * 4) + luma_e;
+                        qy = (int)(mby * 4) + s;
+                        px = qx - 1;
+                        py = qy;
+                    } else {
+                        qx = (int)(mbx * 4) + s;
+                        qy = (int)(mby * 4) + luma_e;
+                        px = qx;
+                        py = qy - 1;
+                    }
+                    cbs4[s] = edge_bs(mb_w, mb_cat, nzL, mv_x, mv_y, mb_ref,
+                                      px, py, qx, qy, e == 0);
+                }
                 for (int comp = 0; comp < 2; comp++) {
                     int off = comp ? second_chroma_qp_offset : chroma_qp_offset;
                     int qpcav = h264_chroma_qp(clip3(0, 51, qp + off));
@@ -163,7 +230,11 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                     }
                     int ia = clip3(0, 51, qpcav + alpha_off);
                     int ib = clip3(0, 51, qpcav + beta_off);
-                    int tc0 = (bs < 4) ? TC0[ia][bs - 1] : 0;
+                    int tc04[4];
+                    for (int s = 0; s < 4; s++) {
+                        tc04[s] = (cbs4[s] > 0 && cbs4[s] < 4)
+                                      ? TC0[ia][cbs4[s] - 1] : 0;
+                    }
                     uint8_t *plane = comp ? V : U;
                     uint8_t *base = (dir == 0)
                         ? plane + (size_t)mby * 8 * cs + (size_t)mbx * 8 + (size_t)e * 4
@@ -171,7 +242,7 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                     filter_edge(base,
                                 dir == 0 ? 1 : (ptrdiff_t)cs,
                                 dir == 0 ? (ptrdiff_t)cs : 1,
-                                8, ALPHA[ia], BETA[ib], bs, tc0, 1);
+                                8, ALPHA[ia], BETA[ib], cbs4, tc04, 2, 1);
                 }
             }
         }
