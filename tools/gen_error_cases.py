@@ -68,9 +68,11 @@ def main() -> int:
         ("err_empty_annexb.264", b"\x00\x00\x00\x01"),
     ]
 
-    # Out-of-scope tools that must be cleanly rejected:
-    cabac = OUT / "err_cabac_main.264"
-    x264(cabac, 64, 64, ["--profile", "main", "--slices", "1"])
+    # Out-of-scope tools that must be cleanly rejected (CABAC graduated to
+    # a supported feature in Phase 8/9 — interlaced replaces it here):
+    interlaced = OUT / "err_interlaced.264"
+    x264(interlaced, 64, 64, ["--profile", "main", "--slices", "1",
+                              "--interlaced"])
     multislice = OUT / "err_multislice.264"
     x264(multislice, 64, 64, ["--profile", "baseline", "--slices", "4"])
 

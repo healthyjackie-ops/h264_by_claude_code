@@ -16,11 +16,22 @@ bit-exact + `make regress` 全量零退步 + `-Werror` 干净构建。
 | **06** ✅ | deblocking filter（bS/α/β/tc0 + 强弱滤波 + chroma） | 18/18 deblock-ON（含 offset 扫描）；全量 40/40 |
 | **07** ✅ | 错误向量 + errtest + 泄漏检查 + README | 6/6 拒绝（trunc/no-SPS/garbage/CABAC/多slice/空流），0 泄漏 |
 
-## Wave 2+（暂列）
+## Wave 2 — CABAC I 帧（完成）
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **08** ✅ | CABAC 引擎（Table 9-44/9-45 + ctx init 0..276）+ 逐 bin JM 对拍 | 引擎 trace 与 JM TRACE=2 完全一致 |
+| **09** ✅ | I 帧 CABAC 语法（mb_type/pred/CBP/qp_delta/残差/eos）| 20/20 phase08 向量 bit-exact；全语料 60/60；errtest 6/6 |
+
+关键教训：x264 tables.c 的 range_lps 表按**反向 state 序**存储，
+不能直接当规范 Table 9-44 用（JM biaridecod.h 才是规范序）；CBP chroma
+的不可用邻语义是 condTerm=0（边界 cbp 视作 0x0F，验 JM 而非凭 ffmpeg
+代码记忆）。调试链路：CABAC_DBG=1 引擎 trace ↔ JM ldecod TRACE=2。
+
+## Wave 3+（暂列）
 
 | 项 | 备注 |
 |---|---|
-| CABAC I 帧 | 上下文模型 + 算术解码核（可参照 jpeg Phase 21 Q-coder 方法论） |
 | High profile | Intra_8x8 + 8x8 变换 + scaling list |
 | 多 slice / ASO | 邻块可用性按 slice 边界收紧 |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |

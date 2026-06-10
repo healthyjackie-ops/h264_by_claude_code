@@ -102,11 +102,7 @@ int parse_pps(bs_t *bs, pps_t *pps, uint32_t *err) {
         *err = H264_ERR_BAD_STREAM;
         return -1;
     }
-    pps->entropy_coding_mode = (int)bs_u1(bs);
-    if (pps->entropy_coding_mode != 0) {           /* CABAC: Wave 2 */
-        *err = H264_ERR_UNSUP;
-        return -1;
-    }
+    pps->entropy_coding_mode = (int)bs_u1(bs);   /* 0 CAVLC / 1 CABAC */
     pps->bottom_field_poc_present = (int)bs_u1(bs);
     pps->num_slice_groups = bs_ue(bs) + 1;
     if (pps->num_slice_groups != 1) {              /* FMO out of scope */
