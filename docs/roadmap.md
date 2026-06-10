@@ -7,14 +7,14 @@ bit-exact + `make regress` 全量零退步 + `-Werror` 干净构建。
 
 | Phase | 内容 | 验收 |
 |---|---|---|
-| **00** | Spec 冻结 + 骨架 + roadmap | docs 合入 |
-| **01** | bitstream（RBSP u/ue/se）+ NAL（Annex-B + EPB） | test_bitstream 单测全过 |
-| **02** | SPS / PPS / slice header（I/IDR） | 解析字段 == x264 编码参数（多组流交叉验证） |
-| **03** | CAVLC 残差（coeff_token ×4 表 + total_zeros + run_before + level） | 单测 + 实流解析不越界、CBP/系数计数自洽 |
-| **04** | Intra 预测（4x4/16x16/chroma）+ 反量化 + IDCT + I_PCM + crop | 首向量（flat 16×16）bit-exact |
-| **05** | no-deblock 向量矩阵（尺寸×qp×图案）golden bit-exact | phase05 全过 + make regress |
-| **06** | deblocking filter（bS/α/β/tc0 + 强弱滤波 + chroma） | 默认 deblock 向量全过；no-deblock 零退步 |
-| **07** | 错误向量 + errtest + 泄漏检查 + README | errtest 全拒 0 泄漏 |
+| **00** ✅ | Spec 冻结 + 骨架 + roadmap | docs 合入 |
+| **01** ✅ | bitstream（RBSP u/ue/se）+ NAL（Annex-B + EPB） | test_bitstream 单测全过 |
+| **02** ✅ | SPS / PPS / slice header（I/IDR） | 解析字段 == x264 编码参数（64x48 / 100x76 crop 交叉验证） |
+| **03** ✅ | CAVLC 残差（coeff_token ×4 表 + total_zeros + run_before + level） | 表转录自 ffmpeg；随 Phase 4/5 golden 验证 |
+| **04** ✅ | Intra 预测（4x4/16x16/chroma）+ 反量化 + IDCT + I_PCM + crop | 10 例 ad-hoc 矩阵 bit-exact（DC 反量化 ×16 修正后一次通过） |
+| **05** ✅ | no-deblock 向量矩阵（尺寸×qp×图案）golden bit-exact | 22/22 + 真实照片帧 |
+| **06** ✅ | deblocking filter（bS/α/β/tc0 + 强弱滤波 + chroma） | 18/18 deblock-ON（含 offset 扫描）；全量 40/40 |
+| **07** ✅ | 错误向量 + errtest + 泄漏检查 + README | 6/6 拒绝（trunc/no-SPS/garbage/CABAC/多slice/空流），0 泄漏 |
 
 ## Wave 2+（暂列）
 
