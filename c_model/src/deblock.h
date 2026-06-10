@@ -9,12 +9,17 @@
  * boundaries and 3 on internal 4x4 edges. mb_qp holds each MB's final
  * luma QP (for cross-edge averages). Offsets are the slice-header
  * FilterOffsetA/B (already x2). */
+/* mb_dbf_idc/a/b carry each MB's slice-header filter parameters:
+ * idc==1 disables the MB entirely, idc==2 skips edges whose p-side MB
+ * belongs to a different slice; offsets follow the q-side MB. */
 void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         size_t ls, size_t cs,
                         uint32_t mb_w, uint32_t mb_h,
                         const uint8_t *mb_qp,
                         const uint8_t *mb_t8,
-                        int chroma_qp_offset, int second_chroma_qp_offset,
-                        int alpha_off, int beta_off);
+                        const uint16_t *mb_slice,
+                        const int8_t *mb_dbf_idc,
+                        const int8_t *mb_dbf_a, const int8_t *mb_dbf_b,
+                        int chroma_qp_offset, int second_chroma_qp_offset);
 
 #endif

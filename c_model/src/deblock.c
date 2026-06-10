@@ -106,17 +106,27 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         uint32_t mb_w, uint32_t mb_h,
                         const uint8_t *mb_qp,
                         const uint8_t *mb_t8,
-                        int chroma_qp_offset, int second_chroma_qp_offset,
-                        int alpha_off, int beta_off) {
+                        const uint16_t *mb_slice,
+                        const int8_t *mb_dbf_idc,
+                        const int8_t *mb_dbf_a, const int8_t *mb_dbf_b,
+                        int chroma_qp_offset, int second_chroma_qp_offset) {
     for (uint32_t mby = 0; mby < mb_h; mby++) {
     for (uint32_t mbx = 0; mbx < mb_w; mbx++) {
-        int qp = mb_qp[mby * mb_w + mbx];
-        int t8 = mb_t8[mby * mb_w + mbx];
+        uint32_t mi = mby * mb_w + mbx;
+        if (mb_dbf_idc[mi] == 1) continue;         /* filtering disabled */
+        int qp = mb_qp[mi];
+        int t8 = mb_t8[mi];
+        int alpha_off = mb_dbf_a[mi];
+        int beta_off = mb_dbf_b[mi];
+        int skip_left = (mbx == 0) ||
+            (mb_dbf_idc[mi] == 2 && mb_slice[mi - 1] != mb_slice[mi]);
+        int skip_top = (mby == 0) ||
+            (mb_dbf_idc[mi] == 2 && mb_slice[mi - mb_w] != mb_slice[mi]);
 
         /* ---- luma vertical edges (left to right), then horizontal ---- */
         for (int dir = 0; dir < 2; dir++) {
             for (int e = 0; e < 4; e++) {
-                if (e == 0 && (dir == 0 ? mbx == 0 : mby == 0)) continue;
+                if (e == 0 && (dir == 0 ? skip_left : skip_top)) continue;
                 if (t8 && (e == 1 || e == 3)) continue;   /* 8x8 transform:
                                                 no internal 4x4 edges */
                 int qpav = qp;
@@ -140,7 +150,7 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
             /* chroma: edges at chroma x/y 0 and 4 (luma 0 and 8); each
              * component averages its own QPc (Cr uses the second offset). */
             for (int e = 0; e < 2; e++) {
-                if (e == 0 && (dir == 0 ? mbx == 0 : mby == 0)) continue;
+                if (e == 0 && (dir == 0 ? skip_left : skip_top)) continue;
                 int bs = (e == 0) ? 4 : 3;
                 for (int comp = 0; comp < 2; comp++) {
                     int off = comp ? second_chroma_qp_offset : chroma_qp_offset;

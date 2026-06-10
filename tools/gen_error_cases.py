@@ -68,13 +68,29 @@ def main() -> int:
         ("err_empty_annexb.264", b"\x00\x00\x00\x01"),
     ]
 
-    # Out-of-scope tools that must be cleanly rejected (CABAC graduated to
-    # a supported feature in Phase 8/9 — interlaced replaces it here):
+    # Out-of-scope tools that must be cleanly rejected. (CABAC graduated
+    # in Phase 8/9, multi-slice in Phase 12 — each replaced when support
+    # landed.)
     interlaced = OUT / "err_interlaced.264"
     x264(interlaced, 64, 64, ["--profile", "main", "--slices", "1",
                               "--interlaced"])
-    multislice = OUT / "err_multislice.264"
-    x264(multislice, 64, 64, ["--profile", "baseline", "--slices", "4"])
+    # Incomplete picture: drop the last slice NAL of a 4-slice frame; the
+    # decoder must reject the partial MB coverage rather than emit a frame.
+    msl = OUT / ".tmp_4slice.264"
+    x264(msl, 64, 64, ["--profile", "baseline", "--slices", "4"])
+    data = msl.read_bytes()
+    starts = []
+    i = 0
+    while True:
+        j = data.find(b"\x00\x00\x01", i)
+        if j < 0:
+            break
+        if data[j + 3] & 0x1F in (1, 5):
+            starts.append(j - 1 if j > 0 and data[j - 1] == 0 else j)
+        i = j + 3
+    assert len(starts) == 4, starts
+    (OUT / "err_missing_slice.264").write_bytes(data[: starts[-1]])
+    msl.unlink()
 
     for name, data in cases:
         (OUT / name).write_bytes(data)

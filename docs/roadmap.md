@@ -39,7 +39,7 @@ bit-exact + `make regress` 全量零退步 + `-Werror` 干净构建。
 | Phase | 内容 | 验收 |
 |---|---|---|
 | **11** ✅ | scaling list：SPS/PPS scaling_list() 解析（delta_scale 链 + useDefault）、默认矩阵 Table 7-3/7-4、fall-back 规则 A/B（B 仅当 SPS 实际带矩阵）、dequant 全家族接 weightScale（4x4/8x8/luma DC/chroma DC per-list）| 14/14 phase11（jvt fall-back + cqmfile 显式链 × CABAC/CAVLC × 8x8 on/off）；全语料 92/92 |
-| **12** | 多 slice I 帧 | x264 --slices N 向量 |
+| **12** ✅ | 多 slice I 帧：slice 收集 + per-slice 解码状态（CABAC 重 init/qp 链）、邻块可用性按 slice 边界（mb_avail/blk4_avail 统一 6.4.9 语义，覆盖 intra pred/nC/全部 ctxInc/cbf/TR）、per-MB deblock 参数（idc==1 整 MB 禁滤、idc==2 跨 slice 边不滤、offset 随 q 侧 MB） | 14/14 phase12（2..8 slices × main/high × CABAC/CAVLC）；全语料 106/106 |
 
 Phase 11 教训：(1) x264 --cqm 写 PPS 不写 SPS；(2) fall-back rule B 仅在
 SPS 真带矩阵时继承，matrix-less SPS → rule A 默认；(3) chroma DC 反量化
@@ -48,6 +48,7 @@ rshift_rnd_sf 舍入。
 
 | 项 | 备注 |
 |---|---|
-| ASO | 邻块可用性按 slice 边界收紧（多 slice 落地后） |
+| P 帧 | 运动补偿（半/四像素 6-tap 插值）+ MV 预测 + P_Skip + ref 管理 |
+| ASO | first_mb 乱序（mb_avail 已就绪，解析序需重排） |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |
 | RTL | C model 收敛后按 jpeg Wave 节奏移植 |
