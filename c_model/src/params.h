@@ -18,6 +18,11 @@ typedef struct {
     int direct_8x8;
     int crop;
     uint32_t crop_l, crop_r, crop_t, crop_b;   /* in chroma units (×2 luma) */
+    /* weightScale matrices, raster order; flat 16 when absent. I-frame
+     * use: w4[0..2] = intra Y/Cb/Cr, w8[0] = 8x8 intra. */
+    int scaling_present;                 /* seq_scaling_matrix_present */
+    uint8_t w4[6][16];
+    uint8_t w8[2][64];
 } sps_t;
 
 typedef struct {
@@ -37,10 +42,15 @@ typedef struct {
     int redundant_pic_cnt_present;       /* must be 0 */
     int transform_8x8;                   /* High profile 8x8 transform */
     int32_t second_chroma_qp_offset;     /* Cr offset (defaults to Cb's) */
+    int scaling_present;                 /* PPS overrides SPS matrices */
+    uint8_t w4[6][16];
+    uint8_t w8[2][64];
 } pps_t;
 
 /* Both return 0 on success, -1 with *err set otherwise. */
 int parse_sps(bs_t *bs, sps_t *sps, uint32_t *err);
-int parse_pps(bs_t *bs, pps_t *pps, uint32_t *err);
+/* sps may be NULL (or invalid) when no SPS preceded the PPS; it feeds
+ * fall-back rule B for PPS scaling lists. */
+int parse_pps(bs_t *bs, pps_t *pps, const sps_t *sps, uint32_t *err);
 
 #endif

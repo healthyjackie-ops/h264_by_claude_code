@@ -375,6 +375,8 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
     }
 
     {
+    const uint8_t (*aw4)[16] = pps->scaling_present ? pps->w4 : sps->w4;
+    const uint8_t (*aw8)[64] = pps->scaling_present ? pps->w8 : sps->w8;
     int qp = (int)sh->slice_qp;
     int dbg = trace_level();
     int use_cabac = pps->entropy_coding_mode;
@@ -592,7 +594,7 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
                     goto fail;
             }
             for (int i = 0; i < 16; i++) dcraw[h264_zigzag4x4[i]] = scan[i];
-            h264_luma_dc_dequant(dcraw, qp, luma_dc);
+            h264_luma_dc_dequant(dcraw, qp, aw4[0][0], luma_dc);
         }
 
         int16_t resid[16][16];                     /* raster per 4x4 block */
@@ -750,7 +752,7 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
                     goto fail;
                 }
                 if (cbp_luma & (1u << b)) {
-                    h264_dequant8x8(resid8[b], qp, d64);
+                    h264_dequant8x8(resid8[b], qp, aw8[0], d64);
                     h264_idct8x8_add(bdst, c.ls, d64);
                 }
             }
@@ -766,7 +768,7 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
                     goto fail;
                 }
                 if (cbp_luma & (1u << (k >> 2))) {
-                    h264_dequant4x4(resid[k], qp, d);
+                    h264_dequant4x4(resid[k], qp, aw4[0], d);
                     h264_idct4x4_add(bdst, c.ls, d);
                 }
             }
@@ -778,7 +780,7 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
             for (int k = 0; k < 16; k++) {
                 uint32_t x4 = zscan_x[k], y4 = zscan_y[k];
                 uint8_t *bdst = ydst + (size_t)y4 * 4 * c.ls + (size_t)x4 * 4;
-                h264_dequant4x4(resid[k], qp, d);
+                h264_dequant4x4(resid[k], qp, aw4[0], d);
                 d[0] = luma_dc[y4 * 4 + x4];
                 h264_idct4x4_add(bdst, c.ls, d);
             }
@@ -795,12 +797,13 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
                 goto fail;
             }
             if (cbp_chroma == 0) continue;
+            const uint8_t *wc = aw4[1 + comp];
             int32_t cdcd[4];
-            h264_chroma_dc_dequant(cdc[comp], qpc, cdcd);
+            h264_chroma_dc_dequant(cdc[comp], qpc, wc[0], cdcd);
             for (int k = 0; k < 4; k++) {
                 uint8_t *bdst = cdst + (size_t)(k >> 1) * 4 * c.cs
                                      + (size_t)(k & 1) * 4;
-                h264_dequant4x4(cres[comp][k], qpc, d);
+                h264_dequant4x4(cres[comp][k], qpc, wc, d);
                 d[0] = cdcd[k];
                 h264_idct4x4_add(bdst, c.cs, d);
             }
@@ -896,12 +899,15 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
                         sps.crop_l, sps.crop_r, sps.crop_t, sps.crop_b);
             }
         } else if (n.type == NAL_PPS) {
-            if (parse_pps(&bs, &pps, &out->err)) { nal_free(&n); return -1; }
+            if (parse_pps(&bs, &pps, sps.valid ? &sps : NULL, &out->err)) { nal_free(&n); return -1; }
             if (trace_level()) {
                 fprintf(stderr,
-                        "[PPS] entropy=%d init_qp=%d cqp_off=%d dbf_ctrl=%d\n",
+                        "[PPS] entropy=%d init_qp=%d cqp_off=%d dbf_ctrl=%d "
+                        "scal=%d w4[0][0]=%d w4[1][0]=%d w8[0][0]=%d\n",
                         pps.entropy_coding_mode, pps.pic_init_qp,
-                        pps.chroma_qp_offset, pps.deblock_control_present);
+                        pps.chroma_qp_offset, pps.deblock_control_present,
+                        pps.scaling_present, pps.w4[0][0], pps.w4[1][0],
+                        pps.w8[0][0]);
             }
         } else if (n.type == NAL_SLICE_IDR || n.type == NAL_SLICE_NON_IDR) {
             if (!sps.valid) { out->err = H264_ERR_NO_SPS; nal_free(&n); return -1; }

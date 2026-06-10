@@ -34,12 +34,20 @@ bit-exact + `make regress` 全量零退步 + `-Werror` 干净构建。
 |---|---|---|
 | **10** ✅ | Intra_8x8（9 模式 + 8.3.2.2.1 参考样本滤波）+ 8x8 变换/反量化 + transform_size_8x8_flag（CAVLC u1 / CABAC ctx399+inc）+ CAVLC 4x4 交错 + CABAC cat5（sig/last 8x8 位置映射、无 cbf）+ second_chroma_qp_offset（Cr 独立 QPc，含 deblock）+ deblock 8x8 内部边跳过 | 18/18 phase10 向量 bit-exact（CABAC+CAVLC，平均 8x8 占比 45%、最高 100%）；全语料 78/78；errtest 6/6 |
 
-scaling list（非 flat CQM）仍拒绝 —— x264 默认 flat，需 --cqm 向量时再做。
+## Wave 4 — scaling list + 多 slice
 
-## Wave 4+（暂列）
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **11** ✅ | scaling list：SPS/PPS scaling_list() 解析（delta_scale 链 + useDefault）、默认矩阵 Table 7-3/7-4、fall-back 规则 A/B（B 仅当 SPS 实际带矩阵）、dequant 全家族接 weightScale（4x4/8x8/luma DC/chroma DC per-list）| 14/14 phase11（jvt fall-back + cqmfile 显式链 × CABAC/CAVLC × 8x8 on/off）；全语料 92/92 |
+| **12** | 多 slice I 帧 | x264 --slices N 向量 |
+
+Phase 11 教训：(1) x264 --cqm 写 PPS 不写 SPS；(2) fall-back rule B 仅在
+SPS 真带矩阵时继承，matrix-less SPS → rule A 默认；(3) chroma DC 反量化
+无舍入项（JM 插桩验证 `((f·w0·V0)<<p)>>5`），luma DC/4x4/8x8 才带
+rshift_rnd_sf 舍入。
 
 | 项 | 备注 |
 |---|---|
-| 多 slice / ASO | 邻块可用性按 slice 边界收紧 |
+| ASO | 邻块可用性按 slice 边界收紧（多 slice 落地后） |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |
 | RTL | C model 收敛后按 jpeg Wave 节奏移植 |

@@ -31,14 +31,18 @@ int h264_chroma_qp(int qp) {
     return map[qp - 30];
 }
 
-void h264_dequant4x4(const int16_t c[16], int qp, int32_t d[16]) {
+void h264_dequant4x4(const int16_t c[16], int qp, const uint8_t w[16],
+                     int32_t d[16]) {
+    /* JM form: d = ((c * w * V) << (qp/6) + 8) >> 4 — exact for flat 16. */
     int shift = qp / 6, rem = qp % 6;
     for (int i = 0; i < 16; i++) {
-        d[i] = ((int32_t)c[i] * dequant_v[rem][vclass(i)]) << shift;
+        int64_t v = (int64_t)c[i] * w[i] * dequant_v[rem][vclass(i)];
+        d[i] = (int32_t)(((v << shift) + 8) >> 4);
     }
 }
 
-void h264_luma_dc_dequant(const int16_t c[16], int qp, int32_t out[16]) {
+void h264_luma_dc_dequant(const int16_t c[16], int qp, int w0,
+                          int32_t out[16]) {
     /* 4x4 inverse Hadamard (rows then columns, no normalization). */
     int32_t t[16], f[16];
     for (int i = 0; i < 4; i++) {
@@ -59,35 +63,31 @@ void h264_luma_dc_dequant(const int16_t c[16], int qp, int32_t out[16]) {
         f[2 * 4 + j] = s1 - s2;
         f[3 * 4 + j] = s0 - s3;
     }
-    /* 8.5.10 with LevelScale = 16 * normAdjust (flat weightScale):
-     * qp >= 36: dc = (f * 16v) << (qp/6 - 6)  =  (f * v) << (qp/6 - 2)
-     * else:     dc = (f * 16v + 2^(5 - qp/6)) >> (6 - qp/6)              */
+    /* JM form (equivalent to 8.5.10 with LevelScale = w0 * normAdjust):
+     * dc = ((f * w0 * V0) << (qp/6) + 32) >> 6 */
     int v0 = dequant_v[qp % 6][0];
-    if (qp >= 36) {
-        int sh = qp / 6 - 2;
-        for (int i = 0; i < 16; i++) out[i] = (f[i] * v0) << sh;
-    } else {
-        int sh = 6 - qp / 6;
-        int64_t round = (int64_t)1 << (sh - 1);
-        for (int i = 0; i < 16; i++) {
-            out[i] = (int32_t)(((int64_t)f[i] * v0 * 16 + round) >> sh);
-        }
+    int sh = qp / 6;
+    for (int i = 0; i < 16; i++) {
+        int64_t v = (int64_t)f[i] * w0 * v0;
+        out[i] = (int32_t)(((v << sh) + 32) >> 6);
     }
 }
 
-void h264_chroma_dc_dequant(const int16_t c[4], int qp, int32_t out[4]) {
+void h264_chroma_dc_dequant(const int16_t c[4], int qp, int w0,
+                            int32_t out[4]) {
     int32_t f0 = c[0] + c[1] + c[2] + c[3];
     int32_t f1 = c[0] - c[1] + c[2] - c[3];
     int32_t f2 = c[0] + c[1] - c[2] - c[3];
     int32_t f3 = c[0] - c[1] - c[2] + c[3];
-    /* 8.5.11 with LevelScale = 16 * normAdjust:
-     * dc = ((f * 16v) << (qp/6)) >> 5  =  ((f * v) << (qp/6)) >> 1 */
+    /* JM form, NO rounding term: dc = ((f * w0 * V0) << (qp/6)) >> 5
+     * (verified against instrumented JM read_comp_cavlc). */
     int v0 = dequant_v[qp % 6][0];
     int sh = qp / 6;
-    out[0] = ((f0 * v0) << sh) >> 1;
-    out[1] = ((f1 * v0) << sh) >> 1;
-    out[2] = ((f2 * v0) << sh) >> 1;
-    out[3] = ((f3 * v0) << sh) >> 1;
+    int32_t f[4] = { f0, f1, f2, f3 };
+    for (int i = 0; i < 4; i++) {
+        int64_t v = (int64_t)f[i] * w0 * v0;
+        out[i] = (int32_t)((v << sh) >> 5);
+    }
 }
 
 static uint8_t clip_u8(int32_t v) {
@@ -142,12 +142,13 @@ static const int16_t dequant8_v[6][4][4] = {
     { {36, 34, 46, 34}, {34, 32, 43, 32}, {46, 43, 58, 43}, {34, 32, 43, 32} },
 };
 
-void h264_dequant8x8(const int16_t c[64], int qp, int32_t d[64]) {
-    /* JM-equivalent (flat 16 weight): d = ((c*16*V8) << (qp/6) + 32) >> 6 */
+void h264_dequant8x8(const int16_t c[64], int qp, const uint8_t w[64],
+                     int32_t d[64]) {
+    /* JM form: d = ((c * w * V8) << (qp/6) + 32) >> 6 */
     int per = qp / 6, rem = qp % 6;
     for (int i = 0; i < 64; i++) {
         int y = i >> 3, x = i & 7;
-        int64_t v = (int64_t)c[i] * dequant8_v[rem][y & 3][x & 3] * 16;
+        int64_t v = (int64_t)c[i] * w[i] * dequant8_v[rem][y & 3][x & 3];
         d[i] = (int32_t)(((v << per) + 32) >> 6);
     }
 }
