@@ -35,6 +35,8 @@ typedef struct {
     int deblock_control_present;
     int constrained_intra;               /* must be 0 */
     int redundant_pic_cnt_present;       /* must be 0 */
+    int transform_8x8;                   /* High profile 8x8 transform */
+    int32_t second_chroma_qp_offset;     /* Cr offset (defaults to Cb's) */
 } pps_t;
 
 /* Both return 0 on success, -1 with *err set otherwise. */

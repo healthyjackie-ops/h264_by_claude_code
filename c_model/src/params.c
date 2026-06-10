@@ -128,14 +128,19 @@ int parse_pps(bs_t *bs, pps_t *pps, uint32_t *err) {
         *err = H264_ERR_UNSUP;
         return -1;
     }
+    pps->second_chroma_qp_offset = pps->chroma_qp_offset;
     if (bs_more_rbsp_data(bs)) {
-        int transform_8x8 = (int)bs_u1(bs);
-        int pic_scaling = (int)bs_u1(bs);
-        if (transform_8x8 || pic_scaling) {        /* High-profile tools */
+        pps->transform_8x8 = (int)bs_u1(bs);
+        if (bs_u1(bs)) {                           /* pic_scaling_matrix */
             *err = H264_ERR_UNSUP;
             return -1;
         }
-        (void)bs_se(bs);                           /* second_chroma_qp_offset */
+        pps->second_chroma_qp_offset = bs_se(bs);
+        if (pps->second_chroma_qp_offset < -12 ||
+            pps->second_chroma_qp_offset > 12) {
+            *err = H264_ERR_BAD_STREAM;
+            return -1;
+        }
     }
     if (bs->error) { *err = H264_ERR_TRUNC; return -1; }
     pps->valid = 1;

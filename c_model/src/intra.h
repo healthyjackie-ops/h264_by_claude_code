@@ -21,4 +21,11 @@ int h264_intra16x16_pred(uint8_t *dst, size_t stride, int mode,
 int h264_intra_chroma_pred(uint8_t *dst, size_t stride, int mode,
                            int avail_left, int avail_top);
 
+/* Intra_8x8 luma prediction (8.3.2): same nine modes as Intra_4x4 at 8x8
+ * size, with the mandatory reference-sample low-pass filter (8.3.2.2.1)
+ * applied first. Neighbor samples are read from the plane around dst. */
+int h264_intra8x8_pred(uint8_t *dst, size_t stride, int mode,
+                       int avail_left, int avail_top,
+                       int avail_topleft, int avail_topright);
+
 #endif

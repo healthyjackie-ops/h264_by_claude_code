@@ -28,11 +28,18 @@ bit-exact + `make regress` 全量零退步 + `-Werror` 干净构建。
 的不可用邻语义是 condTerm=0（边界 cbp 视作 0x0F，验 JM 而非凭 ffmpeg
 代码记忆）。调试链路：CABAC_DBG=1 引擎 trace ↔ JM ldecod TRACE=2。
 
-## Wave 3+（暂列）
+## Wave 3 — High profile I 帧（完成）
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **10** ✅ | Intra_8x8（9 模式 + 8.3.2.2.1 参考样本滤波）+ 8x8 变换/反量化 + transform_size_8x8_flag（CAVLC u1 / CABAC ctx399+inc）+ CAVLC 4x4 交错 + CABAC cat5（sig/last 8x8 位置映射、无 cbf）+ second_chroma_qp_offset（Cr 独立 QPc，含 deblock）+ deblock 8x8 内部边跳过 | 18/18 phase10 向量 bit-exact（CABAC+CAVLC，平均 8x8 占比 45%、最高 100%）；全语料 78/78；errtest 6/6 |
+
+scaling list（非 flat CQM）仍拒绝 —— x264 默认 flat，需 --cqm 向量时再做。
+
+## Wave 4+（暂列）
 
 | 项 | 备注 |
 |---|---|
-| High profile | Intra_8x8 + 8x8 变换 + scaling list |
 | 多 slice / ASO | 邻块可用性按 slice 边界收紧 |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |
 | RTL | C model 收敛后按 jpeg Wave 节奏移植 |

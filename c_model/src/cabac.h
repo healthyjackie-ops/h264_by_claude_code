@@ -5,11 +5,12 @@
 #include <stdint.h>
 
 /* CABAC arithmetic decoding engine (clause 9.3.3.2) plus the I-slice
- * context models 0..276 (all an intra CAVLC->CABAC port needs: mb_type,
- * qp_delta, chroma pred, intra pred, CBP, coded_block_flag, significance
- * maps, levels, and the terminate context). */
+ * context models 0..435: the 4x4 set (mb_type, qp_delta, chroma pred,
+ * intra pred, CBP, coded_block_flag, significance maps, levels,
+ * terminate) and the High-profile 8x8 set (transform_size 399..401,
+ * sig 402.., last 417.., abs 426..). */
 
-#define H264_CABAC_NCTX 277
+#define H264_CABAC_NCTX 436
 
 typedef struct {
     const uint8_t *data;

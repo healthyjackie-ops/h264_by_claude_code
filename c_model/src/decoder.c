@@ -52,6 +52,7 @@ typedef struct {
     uint8_t *cbf_ldc;          /* Intra16x16 luma DC cbf per MB */
     uint8_t *cbf_c[2];         /* chroma AC cbf per 4x4 [bw/2 * bh/2] */
     uint8_t *cbf_cdc[2];       /* chroma DC cbf per MB */
+    uint8_t *mb_t8;            /* transform_size_8x8_flag per MB */
 } ictx_t;
 
 static int clip3(int lo, int hi, int v) {
@@ -229,6 +230,69 @@ static int cabac_residual(cabac_t *cb, int cat, int cond_a, int cond_b,
     return total;
 }
 
+/* High-profile 8x8 residual (ctxBlockCat 5): no coded_block_flag, the
+ * significance/last maps use position->ctx tables (JM pos2ctx_map8x8 /
+ * pos2ctx_last8x8), levels run the same node machine at 426+. Output in
+ * 8x8 zigzag scan order. Returns total_coeff or -1. */
+static int cabac_residual8x8(cabac_t *cb, int16_t scan[64], uint32_t *err) {
+    static const uint8_t sig8[64] = {
+        0, 1, 2, 3, 4, 5, 5, 4, 4, 3, 3, 4, 4, 4, 5, 5,
+        4, 4, 4, 4, 3, 3, 6, 7, 7, 7, 8, 9,10, 9, 8, 7,
+        7, 6,11,12,13,11, 6, 7, 8, 9,14,10, 9, 8, 6,11,
+       12,13,11, 6, 9,14,10, 9,11,12,13,11,14,10,12,14
+    };
+    static const uint8_t last8[64] = {
+        0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+        3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4,
+        5, 5, 5, 5, 6, 6, 6, 6, 7, 7, 7, 7, 8, 8, 8, 8
+    };
+    static const uint8_t l1ctx[8] = { 1, 2, 3, 4, 0, 0, 0, 0 };
+    static const uint8_t gt1ctx[8] = { 5, 5, 5, 5, 6, 7, 8, 9 };
+    static const uint8_t tr_eq1[8] = { 1, 2, 3, 3, 4, 5, 6, 7 };
+    static const uint8_t tr_gt1[8] = { 4, 4, 4, 4, 5, 6, 7, 7 };
+
+    memset(scan, 0, 64 * sizeof(scan[0]));
+    int idx[64];
+    int cnt = 0;
+    int i;
+    for (i = 0; i < 63; i++) {
+        if (cabac_decision(cb, 402 + sig8[i])) {
+            idx[cnt++] = i;
+            if (cabac_decision(cb, 417 + last8[i])) break;
+        }
+    }
+    if (i == 63) idx[cnt++] = 63;
+    if (cnt == 0 || cb->error) { *err = H264_ERR_BAD_STREAM; return -1; }
+
+    int total = cnt;
+    int node = 0;
+    while (cnt) {
+        int pos = idx[--cnt];
+        int abs_lvl;
+        if (!cabac_decision(cb, 426 + l1ctx[node])) {
+            abs_lvl = 1;
+            node = tr_eq1[node];
+        } else {
+            abs_lvl = 2;
+            int ctx = 426 + gt1ctx[node];
+            node = tr_gt1[node];
+            while (abs_lvl < 15 && cabac_decision(cb, ctx)) abs_lvl++;
+            if (abs_lvl >= 15) {
+                int j = 0;
+                while (cabac_bypass(cb) && j < 23) j++;
+                int v = 1;
+                while (j--) v = 2 * v + cabac_bypass(cb);
+                abs_lvl = v + 14;
+            }
+        }
+        int sign = cabac_bypass(cb);
+        scan[pos] = (int16_t)(sign ? -abs_lvl : abs_lvl);
+        if (cb->error) { *err = H264_ERR_TRUNC; return -1; }
+    }
+    return total;
+}
+
 /* coded_block_flag neighbor terms (9.3.3.1.1.9, all-intra frame): an
  * out-of-picture neighbor counts as 1, I_PCM counts as 1, otherwise the
  * stored cbf of the matching block/MB (0 when the neighbor has no such
@@ -300,10 +364,11 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
     c.cbf_c[1] = (uint8_t *)calloc((size_t)(bw / 2) * (bh / 2), 1);
     c.cbf_cdc[0] = (uint8_t *)calloc(nmbs, 1);
     c.cbf_cdc[1] = (uint8_t *)calloc(nmbs, 1);
+    c.mb_t8 = (uint8_t *)calloc(nmbs, 1);
     int ok = c.Y && c.U && c.V && c.i4_mode && c.nzL && c.nzC[0] &&
              c.nzC[1] && c.mb_qp && c.mb_cat && c.mb_cmode && c.mb_cbp &&
              c.cbf_l && c.cbf_ldc && c.cbf_c[0] && c.cbf_c[1] &&
-             c.cbf_cdc[0] && c.cbf_cdc[1];
+             c.cbf_cdc[0] && c.cbf_cdc[1] && c.mb_t8;
     if (!ok) {
         out->err = H264_ERR_INTERNAL;
         goto fail;
@@ -377,10 +442,47 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
 
         int intra4x4 = (mb_type == 0);
         int modes[16];
+        int modes8[4] = { 2, 2, 2, 2 };
         int i16_mode = 0;
+        int t8 = 0;
         uint32_t cbp_luma, cbp_chroma;
 
-        if (intra4x4) {
+        if (intra4x4 && pps->transform_8x8) {
+            if (use_cabac) {
+                int inc = 0;
+                if (mbx > 0 && c.mb_t8[mby * c.mb_w + mbx - 1]) inc++;
+                if (mby > 0 && c.mb_t8[(mby - 1) * c.mb_w + mbx]) inc++;
+                t8 = cabac_decision(&cbx, 399 + inc);
+            } else {
+                t8 = (int)bs_u1(bs);
+            }
+        }
+
+        if (intra4x4 && t8) {
+            /* Four 8x8 partitions, prev/rem syntax as in 4x4; the decoded
+             * mode fills the block's 2x2 patch of the 4x4 mode grid. */
+            for (int b = 0; b < 4; b++) {
+                int gx = (int)(mbx * 4 + (uint32_t)(b & 1) * 2);
+                int gy = (int)(mby * 4 + (uint32_t)(b >> 1) * 2);
+                int pA = (gx > 0) ? c.i4_mode[(uint32_t)gy * bw + (uint32_t)gx - 1] : -1;
+                int pB = (gy > 0) ? c.i4_mode[((uint32_t)gy - 1) * bw + (uint32_t)gx] : -1;
+                int pred = (pA < 0 || pB < 0) ? 2 : (pA < pB ? pA : pB);
+                int mode;
+                if (use_cabac) {
+                    mode = cabac_intra4x4_mode(&cbx, pred);
+                } else if (bs_u1(bs)) {
+                    mode = pred;
+                } else {
+                    int rem = (int)bs_u(bs, 3);
+                    mode = (rem < pred) ? rem : rem + 1;
+                }
+                modes8[b] = mode;
+                for (int dy = 0; dy < 2; dy++)
+                    for (int dx = 0; dx < 2; dx++)
+                        c.i4_mode[((uint32_t)gy + (uint32_t)dy) * bw +
+                                  (uint32_t)gx + (uint32_t)dx] = (int8_t)mode;
+            }
+        } else if (intra4x4) {
             for (int k = 0; k < 16; k++) {
                 int gx = (int)(mbx * 4 + zscan_x[k]);
                 int gy = (int)(mby * 4 + zscan_y[k]);
@@ -399,7 +501,8 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
                 modes[k] = mode;
                 c.i4_mode[(uint32_t)gy * bw + (uint32_t)gx] = (int8_t)mode;
             }
-        } else {
+        }
+        if (!intra4x4) {
             uint32_t m = mb_type - 1;
             i16_mode = (int)(m & 3);
             cbp_chroma = (m >> 2) % 3;
@@ -441,6 +544,7 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
         }
 
         c.mb_cat[mby * c.mb_w + mbx] = intra4x4 ? 0 : 1;
+        c.mb_t8[mby * c.mb_w + mbx] = (uint8_t)t8;
         c.mb_cmode[mby * c.mb_w + mbx] = (uint8_t)chroma_mode;
         c.mb_cbp[mby * c.mb_w + mbx] = (uint8_t)((cbp_chroma << 4) | cbp_luma);
 
@@ -492,7 +596,57 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
         }
 
         int16_t resid[16][16];                     /* raster per 4x4 block */
+        int16_t resid8[4][64];                     /* raster per 8x8 block */
         memset(resid, 0, sizeof(resid));
+        memset(resid8, 0, sizeof(resid8));
+        if (t8) {
+            int16_t scan64[64];
+            for (int b = 0; b < 4; b++) {
+                int bx0 = (int)(mbx * 4 + (uint32_t)(b & 1) * 2);
+                int by0 = (int)(mby * 4 + (uint32_t)(b >> 1) * 2);
+                if (cbp_luma & (1u << b)) {
+                    if (use_cabac) {
+                        int tc = cabac_residual8x8(&cbx, scan64, &out->err);
+                        if (tc < 0) goto fail;
+                        for (int k = 0; k < 64; k++)
+                            resid8[b][h264_zigzag8x8[k]] = scan64[k];
+                        for (int dy = 0; dy < 2; dy++)
+                            for (int dx = 0; dx < 2; dx++) {
+                                uint32_t gi = ((uint32_t)(by0 + dy)) * bw +
+                                              (uint32_t)(bx0 + dx);
+                                c.nzL[gi] = (uint8_t)(tc > 16 ? 16 : tc);
+                                c.cbf_l[gi] = (tc != 0);
+                            }
+                    } else {
+                        /* CAVLC: the 8x8 block is sent as 4 interleaved 4x4
+                         * blocks; sub-block j carries scan positions 4k+j of
+                         * the 8x8 zigzag (7.4.5.3.3). */
+                        for (int j = 0; j < 4; j++) {
+                            int gx = bx0 + (j & 1);
+                            int gy = by0 + (j >> 1);
+                            int nc = derive_nc(c.nzL, bw, gx, gy,
+                                               gx > 0, gy > 0);
+                            int tc = cavlc_residual_block(bs, nc, 16, scan,
+                                                          &out->err);
+                            if (tc < 0) goto fail;
+                            uint32_t gi = (uint32_t)gy * bw + (uint32_t)gx;
+                            c.nzL[gi] = (uint8_t)tc;
+                            c.cbf_l[gi] = (tc != 0);
+                            for (int k = 0; k < 16; k++)
+                                resid8[b][h264_zigzag8x8[4 * k + j]] = scan[k];
+                        }
+                    }
+                } else {
+                    for (int dy = 0; dy < 2; dy++)
+                        for (int dx = 0; dx < 2; dx++) {
+                            uint32_t gi = ((uint32_t)(by0 + dy)) * bw +
+                                          (uint32_t)(bx0 + dx);
+                            c.nzL[gi] = 0;
+                            c.cbf_l[gi] = 0;
+                        }
+                }
+            }
+        } else
         for (int k = 0; k < 16; k++) {
             int gx = (int)(mbx * 4 + zscan_x[k]);
             int gy = (int)(mby * 4 + zscan_y[k]);
@@ -577,7 +731,30 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
 
         /* ---- reconstruction ---- */
         int32_t d[16];
-        if (intra4x4) {
+        if (intra4x4 && t8) {
+            int32_t d64[64];
+            for (int b = 0; b < 4; b++) {
+                uint8_t *bdst = ydst + (size_t)(b >> 1) * 8 * c.ls
+                                     + (size_t)(b & 1) * 8;
+                int aL = (b & 1) ? 1 : (mbx > 0);
+                int aT = (b >> 1) ? 1 : (mby > 0);
+                int aTL = (b == 0) ? (mbx > 0 && mby > 0)
+                        : (b == 1) ? (mby > 0)
+                        : (b == 2) ? (mbx > 0) : 1;
+                int aTR = (b == 0) ? (mby > 0)
+                        : (b == 1) ? (mby > 0 && mbx + 1 < c.mb_w)
+                        : (b == 2) ? 1 : 0;
+                if (h264_intra8x8_pred(bdst, c.ls, modes8[b],
+                                       aL, aT, aTL, aTR)) {
+                    out->err = H264_ERR_BAD_STREAM;
+                    goto fail;
+                }
+                if (cbp_luma & (1u << b)) {
+                    h264_dequant8x8(resid8[b], qp, d64);
+                    h264_idct8x8_add(bdst, c.ls, d64);
+                }
+            }
+        } else if (intra4x4) {
             for (int k = 0; k < 16; k++) {
                 int gx = (int)(mbx * 4 + zscan_x[k]);
                 int gy = (int)(mby * 4 + zscan_y[k]);
@@ -607,8 +784,10 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
             }
         }
 
-        int qpc = h264_chroma_qp(clip3(0, 51, qp + (int)pps->chroma_qp_offset));
         for (int comp = 0; comp < 2; comp++) {
+            int qpc = h264_chroma_qp(clip3(0, 51,
+                qp + (int)(comp ? pps->second_chroma_qp_offset
+                                : pps->chroma_qp_offset)));
             uint8_t *cdst = comp ? vdst : udst;
             if (h264_intra_chroma_pred(cdst, c.cs, (int)chroma_mode,
                                        mbx > 0, mby > 0)) {
@@ -642,7 +821,9 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
     /* ---- in-loop deblocking (8.7) ---- */
     if (sh->disable_deblock != 1) {
         h264_deblock_frame(c.Y, c.U, c.V, c.ls, c.cs, c.mb_w, c.mb_h,
-                           c.mb_qp, (int)pps->chroma_qp_offset,
+                           c.mb_qp, c.mb_t8,
+                           (int)pps->chroma_qp_offset,
+                           (int)pps->second_chroma_qp_offset,
                            (int)sh->alpha_c0_offset, (int)sh->beta_offset);
     }
 
@@ -674,7 +855,7 @@ static int decode_islice(bs_t *bs, const sps_t *sps, const pps_t *pps,
     free(c.i4_mode); free(c.nzL); free(c.nzC[0]); free(c.nzC[1]);
     free(c.mb_qp); free(c.mb_cat); free(c.mb_cmode); free(c.mb_cbp);
     free(c.cbf_l); free(c.cbf_ldc); free(c.cbf_c[0]); free(c.cbf_c[1]);
-    free(c.cbf_cdc[0]); free(c.cbf_cdc[1]);
+    free(c.cbf_cdc[0]); free(c.cbf_cdc[1]); free(c.mb_t8);
     out->err = 0;
     return 0;
 
@@ -683,7 +864,7 @@ fail:
     free(c.i4_mode); free(c.nzL); free(c.nzC[0]); free(c.nzC[1]);
     free(c.mb_qp); free(c.mb_cat); free(c.mb_cmode); free(c.mb_cbp);
     free(c.cbf_l); free(c.cbf_ldc); free(c.cbf_c[0]); free(c.cbf_c[1]);
-    free(c.cbf_cdc[0]); free(c.cbf_cdc[1]);
+    free(c.cbf_cdc[0]); free(c.cbf_cdc[1]); free(c.mb_t8);
     return -1;
 }
 

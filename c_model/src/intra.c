@@ -315,3 +315,206 @@ int h264_intra_chroma_pred(uint8_t *dst, size_t stride, int mode,
         return -1;
     }
 }
+
+/* ---------------- Intra_8x8 (8.3.2) ---------------- */
+
+int h264_intra8x8_pred(uint8_t *dst, size_t stride, int mode,
+                       int avail_left, int avail_top,
+                       int avail_topleft, int avail_topright) {
+    /* Gather raw neighbors: l[0..7], tl, t[0..15] (E..H run substituted
+     * with t[7] when top-right is unavailable). */
+    uint8_t lr[8], tr_[16], tlr = 0;
+    if (avail_left) {
+        for (int y = 0; y < 8; y++) lr[y] = *(dst + (size_t)y * stride - 1);
+    }
+    if (avail_topleft) tlr = *(dst - stride - 1);
+    if (avail_top) {
+        for (int x = 0; x < 8; x++) tr_[x] = *(dst - stride + (size_t)x);
+        if (avail_topright) {
+            for (int x = 8; x < 16; x++) tr_[x] = *(dst - stride + (size_t)x);
+        } else {
+            for (int x = 8; x < 16; x++) tr_[x] = tr_[7];
+        }
+    }
+
+    /* Reference sample filtering (8.3.2.2.1). */
+    uint8_t l[8], tbuf[17];
+    uint8_t *t = tbuf + 1;
+    if (avail_top) {
+        t[0] = avail_topleft
+                   ? (uint8_t)((tlr + 2 * tr_[0] + tr_[1] + 2) >> 2)
+                   : (uint8_t)((3 * tr_[0] + tr_[1] + 2) >> 2);
+        for (int x = 1; x < 15; x++) {
+            t[x] = (uint8_t)((tr_[x - 1] + 2 * tr_[x] + tr_[x + 1] + 2) >> 2);
+        }
+        t[15] = (uint8_t)((tr_[14] + 3 * tr_[15] + 2) >> 2);
+    }
+    if (avail_topleft) {
+        if (avail_top && avail_left) {
+            t[-1] = (uint8_t)((tr_[0] + 2 * tlr + lr[0] + 2) >> 2);
+        } else if (avail_top) {
+            t[-1] = (uint8_t)((3 * tlr + tr_[0] + 2) >> 2);
+        } else if (avail_left) {
+            t[-1] = (uint8_t)((3 * tlr + lr[0] + 2) >> 2);
+        } else {
+            t[-1] = tlr;
+        }
+    }
+    if (avail_left) {
+        l[0] = avail_topleft
+                   ? (uint8_t)((tlr + 2 * lr[0] + lr[1] + 2) >> 2)
+                   : (uint8_t)((3 * lr[0] + lr[1] + 2) >> 2);
+        for (int y = 1; y < 7; y++) {
+            l[y] = (uint8_t)((lr[y - 1] + 2 * lr[y] + lr[y + 1] + 2) >> 2);
+        }
+        l[7] = (uint8_t)((lr[6] + 3 * lr[7] + 2) >> 2);
+    }
+
+    switch (mode) {
+    case 0:                                   /* Vertical */
+        if (!avail_top) return -1;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+                dst[(size_t)y * stride + (size_t)x] = t[x];
+        return 0;
+    case 1:                                   /* Horizontal */
+        if (!avail_left) return -1;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+                dst[(size_t)y * stride + (size_t)x] = l[y];
+        return 0;
+    case 2: {                                 /* DC */
+        int sum = 0, n = 0;
+        if (avail_top) { for (int x = 0; x < 8; x++) sum += t[x]; n += 8; }
+        if (avail_left) { for (int y = 0; y < 8; y++) sum += l[y]; n += 8; }
+        uint8_t v = (n == 16) ? (uint8_t)((sum + 8) >> 4)
+                  : (n == 8) ? (uint8_t)((sum + 4) >> 3) : 128;
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 8; x++)
+                dst[(size_t)y * stride + (size_t)x] = v;
+        return 0;
+    }
+    case 3:                                   /* Diagonal down-left */
+        if (!avail_top) return -1;
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                int v;
+                if (x == 7 && y == 7) {
+                    v = (t[14] + 3 * t[15] + 2) >> 2;
+                } else {
+                    int i = x + y;
+                    v = (t[i] + 2 * t[i + 1] + t[i + 2] + 2) >> 2;
+                }
+                dst[(size_t)y * stride + (size_t)x] = (uint8_t)v;
+            }
+        }
+        return 0;
+    case 4:                                   /* Diagonal down-right */
+        if (!avail_top || !avail_left || !avail_topleft) return -1;
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                int v;
+                if (x > y) {
+                    int i = x - y;       /* i>=1; t[-1] is the corner */
+                    v = (t[i - 2] + 2 * t[i - 1] + t[i] + 2) >> 2;
+                } else if (x < y) {
+                    int i = y - x;
+                    int p0 = (i - 2 >= 0) ? l[i - 2] : t[-1];
+                    int p1 = l[i - 1];
+                    v = (p0 + 2 * p1 + l[i] + 2) >> 2;
+                } else {
+                    v = (t[0] + 2 * t[-1] + l[0] + 2) >> 2;
+                }
+                dst[(size_t)y * stride + (size_t)x] = (uint8_t)v;
+            }
+        }
+        return 0;
+    case 5:                                   /* Vertical-right */
+        if (!avail_top || !avail_left || !avail_topleft) return -1;
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                int z = 2 * x - y;
+                int v;
+                if (z >= 0 && (z & 1) == 0) {
+                    int i = x - (y >> 1);
+                    v = (t[i - 1] + t[i] + 1) >> 1;
+                } else if (z >= 0) {
+                    int i = x - (y >> 1);
+                    v = (t[i - 2] + 2 * t[i - 1] + t[i] + 2) >> 2;
+                } else if (z == -1) {
+                    v = (l[0] + 2 * t[-1] + t[0] + 2) >> 2;
+                } else {
+                    int i = y - 2 * x;   /* z <= -2 ⇒ i >= 2 */
+                    int p0 = (i - 3 >= 0) ? l[i - 3] : t[-1];
+                    v = (p0 + 2 * l[i - 2] + l[i - 1] + 2) >> 2;
+                }
+                dst[(size_t)y * stride + (size_t)x] = (uint8_t)v;
+            }
+        }
+        return 0;
+    case 6:                                   /* Horizontal-down */
+        if (!avail_top || !avail_left || !avail_topleft) return -1;
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                int z = 2 * y - x;
+                int v;
+                if (z >= 0 && (z & 1) == 0) {
+                    int i = y - (x >> 1);
+                    int p0 = (i - 1 >= 0) ? l[i - 1] : t[-1];
+                    v = (p0 + l[i] + 1) >> 1;
+                } else if (z >= 0) {
+                    int i = y - (x >> 1);
+                    int p0 = (i - 2 >= 0) ? l[i - 2] : t[-1];
+                    int p1 = (i - 1 >= 0) ? l[i - 1] : t[-1];
+                    v = (p0 + 2 * p1 + l[i] + 2) >> 2;
+                } else if (z == -1) {
+                    v = (l[0] + 2 * t[-1] + t[0] + 2) >> 2;
+                } else {
+                    int i = x - 2 * y;   /* z <= -2 ⇒ i >= 2 */
+                    int p0 = (i - 3 >= 0) ? t[i - 3] : t[-1];
+                    v = (p0 + 2 * t[i - 2] + t[i - 1] + 2) >> 2;
+                }
+                dst[(size_t)y * stride + (size_t)x] = (uint8_t)v;
+            }
+        }
+        return 0;
+    case 7:                                   /* Vertical-left */
+        if (!avail_top) return -1;
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                int i = x + (y >> 1);
+                int v;
+                if ((y & 1) == 0) {
+                    v = (t[i] + t[i + 1] + 1) >> 1;
+                } else {
+                    v = (t[i] + 2 * t[i + 1] + t[i + 2] + 2) >> 2;
+                }
+                dst[(size_t)y * stride + (size_t)x] = (uint8_t)v;
+            }
+        }
+        return 0;
+    case 8:                                   /* Horizontal-up */
+        if (!avail_left) return -1;
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                int z = x + 2 * y;
+                int v;
+                if (z > 13) {
+                    v = l[7];
+                } else if (z == 13) {
+                    v = (l[6] + 3 * l[7] + 2) >> 2;
+                } else if ((z & 1) == 0) {
+                    int i = y + (x >> 1);
+                    v = (l[i] + l[i + 1] + 1) >> 1;
+                } else {
+                    int i = y + (x >> 1);
+                    v = (l[i] + 2 * l[i + 1] + l[i + 2] + 2) >> 2;
+                }
+                dst[(size_t)y * stride + (size_t)x] = (uint8_t)v;
+            }
+        }
+        return 0;
+    default:
+        return -1;
+    }
+}

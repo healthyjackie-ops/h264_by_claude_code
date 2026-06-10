@@ -26,4 +26,9 @@ void h264_chroma_dc_dequant(const int16_t c[4], int qp, int32_t out[4]);
  * (r+32)>>6 rounded residual onto dst with clipping. */
 void h264_idct4x4_add(uint8_t *dst, size_t stride, const int32_t d[16]);
 
+/* High profile 8x8 transform path (8.5.13). */
+extern const uint8_t h264_zigzag8x8[64];
+void h264_dequant8x8(const int16_t c[64], int qp, int32_t d[64]);
+void h264_idct8x8_add(uint8_t *dst, size_t stride, const int32_t d[64]);
+
 #endif

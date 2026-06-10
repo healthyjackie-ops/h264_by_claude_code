@@ -105,17 +105,20 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         size_t ls, size_t cs,
                         uint32_t mb_w, uint32_t mb_h,
                         const uint8_t *mb_qp,
-                        int chroma_qp_offset,
+                        const uint8_t *mb_t8,
+                        int chroma_qp_offset, int second_chroma_qp_offset,
                         int alpha_off, int beta_off) {
     for (uint32_t mby = 0; mby < mb_h; mby++) {
     for (uint32_t mbx = 0; mbx < mb_w; mbx++) {
         int qp = mb_qp[mby * mb_w + mbx];
-        int qpc = h264_chroma_qp(clip3(0, 51, qp + chroma_qp_offset));
+        int t8 = mb_t8[mby * mb_w + mbx];
 
         /* ---- luma vertical edges (left to right), then horizontal ---- */
         for (int dir = 0; dir < 2; dir++) {
             for (int e = 0; e < 4; e++) {
                 if (e == 0 && (dir == 0 ? mbx == 0 : mby == 0)) continue;
+                if (t8 && (e == 1 || e == 3)) continue;   /* 8x8 transform:
+                                                no internal 4x4 edges */
                 int qpav = qp;
                 if (e == 0) {
                     int qpn = dir == 0 ? mb_qp[mby * mb_w + mbx - 1]
@@ -134,21 +137,23 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                             dir == 0 ? (ptrdiff_t)ls : 1,
                             16, ALPHA[ia], BETA[ib], bs, tc0, 0);
             }
-            /* chroma: edges at chroma x/y 0 and 4 (luma 0 and 8). */
+            /* chroma: edges at chroma x/y 0 and 4 (luma 0 and 8); each
+             * component averages its own QPc (Cr uses the second offset). */
             for (int e = 0; e < 2; e++) {
                 if (e == 0 && (dir == 0 ? mbx == 0 : mby == 0)) continue;
-                int qpcav = qpc;
-                if (e == 0) {
-                    int qpn = dir == 0 ? mb_qp[mby * mb_w + mbx - 1]
-                                       : mb_qp[(mby - 1) * mb_w + mbx];
-                    int qpcn = h264_chroma_qp(clip3(0, 51, qpn + chroma_qp_offset));
-                    qpcav = (qpc + qpcn + 1) >> 1;
-                }
-                int ia = clip3(0, 51, qpcav + alpha_off);
-                int ib = clip3(0, 51, qpcav + beta_off);
                 int bs = (e == 0) ? 4 : 3;
-                int tc0 = (bs < 4) ? TC0[ia][bs - 1] : 0;
                 for (int comp = 0; comp < 2; comp++) {
+                    int off = comp ? second_chroma_qp_offset : chroma_qp_offset;
+                    int qpcav = h264_chroma_qp(clip3(0, 51, qp + off));
+                    if (e == 0) {
+                        int qpn = dir == 0 ? mb_qp[mby * mb_w + mbx - 1]
+                                           : mb_qp[(mby - 1) * mb_w + mbx];
+                        int qpcn = h264_chroma_qp(clip3(0, 51, qpn + off));
+                        qpcav = (qpcav + qpcn + 1) >> 1;
+                    }
+                    int ia = clip3(0, 51, qpcav + alpha_off);
+                    int ib = clip3(0, 51, qpcav + beta_off);
+                    int tc0 = (bs < 4) ? TC0[ia][bs - 1] : 0;
                     uint8_t *plane = comp ? V : U;
                     uint8_t *base = (dir == 0)
                         ? plane + (size_t)mby * 8 * cs + (size_t)mbx * 8 + (size_t)e * 4

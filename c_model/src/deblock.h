@@ -13,7 +13,8 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         size_t ls, size_t cs,
                         uint32_t mb_w, uint32_t mb_h,
                         const uint8_t *mb_qp,
-                        int chroma_qp_offset,
+                        const uint8_t *mb_t8,
+                        int chroma_qp_offset, int second_chroma_qp_offset,
                         int alpha_off, int beta_off);
 
 #endif

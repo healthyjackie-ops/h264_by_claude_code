@@ -10,17 +10,18 @@ bit-exact → 全量回归 + 错误路径测试**。
 | 维度 | 支持 |
 |---|---|
 | 码流 | Annex-B，单 IDR I 帧，EPB 去转义 |
-| Profile | Baseline / Main I 帧（CAVLC **和 CABAC**） |
-| 宏块 | I_4x4（9 预测模式）· I_16x16（4 模式 × CBP）· I_PCM |
+| Profile | Baseline / Main / **High** I 帧（CAVLC + CABAC，Intra_8x8 + 8x8 变换） |
+| 宏块 | I_4x4 · **I_8x8（含参考样本滤波）** · I_16x16 · I_PCM |
 | 色度 | 4:2:0，8-bit，DC/H/V/Plane 预测 |
 | 变换 | 4x4 整数反变换 · Intra16x16 luma DC Hadamard · 2x2 chroma DC |
 | 环路滤波 | 完整 deblocking（bS 3/4、强/弱滤波、α/β/tc0、FilterOffsetA/B） |
 | 尺寸 | 任意偶数尺寸（SPS frame cropping），16×16 .. 4096 宽 |
 | 错误处理 | 失败统一释放输出平面；6 类损坏流全部干净拒绝，0 泄漏 |
 
-**验证：66/66 向量对 ffmpeg (libavcodec 8.1) 逐字节 bit-exact**
-（CAVLC 40 个 + CABAC 20 个，覆盖 deblock on/off、α/β offset、qp 4..51、
-非对齐尺寸；另 6 个 expect-fail 错误用例全拒零泄漏），外加真实照片帧抽查。
+**验证：84/84 向量对 ffmpeg (libavcodec 8.1) 逐字节 bit-exact**
+（CAVLC/CABAC × baseline/main/high 共 78 个 + 6 个 expect-fail 错误用例
+全拒零泄漏；覆盖 deblock on/off、α/β offset、qp 4..51、非对齐尺寸、
+8x8 变换占比至 100% 的用例），外加真实照片帧抽查。
 `-Wall -Wextra -Wpedantic -Wshadow -Wconversion -Werror` 零告警。
 CABAC 引擎经 JM 参考解码器 TRACE=2 逐 bin 对拍。
 
@@ -71,9 +72,9 @@ c_model/src/
 路径与 >>4 相消、在 DC 路径不消 —— luma/chroma DC 反量化差 16 倍，修正后
 全矩阵一次通过。
 
-## 下一步（docs/roadmap.md Wave 3+）
+## 下一步（docs/roadmap.md Wave 4+）
 
-High profile（Intra_8x8 + scaling list）→ 多 slice → P 帧 → RTL。
+scaling list（非 flat CQM）→ 多 slice → P 帧 → RTL。
 I_PCM 已实现（CAVLC 路径）但 x264 不产 PCM 流，待 JM 编码器补向量；
 CABAC+PCM 的引擎重初始化交接同样待 JM 向量后落地。
 
