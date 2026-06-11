@@ -130,8 +130,13 @@ cabac_init 漏选 PB 表；(6) colocated L0 无效需 L1 fallback。
 
 ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
 
-| 项 | 备注 |
-|---|---|
-| RTL | I 帧子集起步（仿 JPEG ASIC 路线） |
+## Wave 13 — RTL（进行中）
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **R0** ✅ | RTL 规格冻结（docs/rtl_spec.md）：baseline I 帧 CAVLC 子集、MB 级三段流水（cavlc→recon→deblock）、行缓冲、四层中间值对拍验证策略 | — |
+| R1 | c_model dump 接口 + bitreader + cavlc_dec RTL | 逐 MB 系数对拍 |
+| R2 | dequant/idct + intra_pred + recon | 重建块对拍 |
+| R3 | deblock + wb + 帧级集成 | 帧 bit-exact + ASAP7 综合 |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |
 | RTL | C model 收敛后按 jpeg Wave 节奏移植 |
