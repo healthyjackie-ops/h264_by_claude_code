@@ -109,3 +109,13 @@ recon:
 	@echo "built; run: ./obj_dir_recon/Vmb_recon <coef> <rec> <mb_w> <cqp>"
 
 .PHONY: recon
+
+dbe:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module deblock_edge \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_dbe \
+	  -I$(REPO)/rtl/include \
+	  $(RTL_DIR)/deblock_edge.sv \
+	  tb_deblock_edge.cpp $(CMODEL_BUILD)/deblock.o $(CMODEL_BUILD)/transform.o
+	./obj_dir_dbe/Vdeblock_edge
+
+.PHONY: dbe

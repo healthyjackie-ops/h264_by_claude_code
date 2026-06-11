@@ -176,6 +176,15 @@ static int edge_bs(uint32_t mb_w, const uint8_t *mb_cat, const uint8_t *nzL,
     return (pair_a || pair_b) ? 0 : 1;
 }
 
+/* Test export (RTL differential bench): one edge, explicit params. */
+void h264_filter_edge_test(uint8_t *q0p, ptrdiff_t pstep, ptrdiff_t lstep,
+                           int len, int alpha, int beta,
+                           const int bs4[4], const int tc04[4], int seg,
+                           int chroma) {
+    filter_edge(q0p, pstep, lstep, len, alpha, beta, bs4, tc04, seg,
+                chroma);
+}
+
 void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         size_t ls, size_t cs,
                         uint32_t mb_w, uint32_t mb_h,

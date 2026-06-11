@@ -142,6 +142,8 @@ ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
 | **R2b** ✅ | intra4x4_pred.sv（9 模式含 z≤−2 角替换）+ intra16_pred/chroma_pred（V/H/DC/Plane、chroma 象限 DC 规则） | 40000+20000 trials bit-exact |
 | **R2c** ✅ | mb_recon.sv（MB 重建 FSM：I16 luma DC→预测→16 AC / I4 逐块预测-重建反馈环 / chroma 象限预测+DC+AC、邻样本行缓冲 + TL 角寄存链、chroma QP LUT）+ C 端重建层 dump（H264_RTL_DUMP_REC 384B/MB） | **40/40 向量逐 MB 像素 bit-exact**（phase05+06） |
 | R2 | dequant/idct + intra_pred + recon | 重建块对拍 |
-| R3 | deblock + wb + 帧级集成 | 帧 bit-exact + ASAP7 综合 |
+| **R3a** ✅ | deblock_edge.sv（强/弱滤波线核 + α/β/tc0 表自动生成）+ C filter_edge 测试出口 | 200000 随机线 bit-exact |
+| R3b | deblock 边调度 + 行缓冲 + mb_dec↔mb_recon 握手集成 | 帧级 yuv bit-exact |
+| R3c | ASAP7 综合 PPA | 主频/面积报告 |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |
 | RTL | C model 收敛后按 jpeg Wave 节奏移植 |

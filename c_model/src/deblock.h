@@ -29,4 +29,9 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         const int32_t *ref_poc0, const int32_t *ref_poc1,
                         int chroma_qp_offset, int second_chroma_qp_offset);
 
+void h264_filter_edge_test(uint8_t *q0p, ptrdiff_t pstep, ptrdiff_t lstep,
+                           int len, int alpha, int beta,
+                           const int bs4[4], const int tc04[4], int seg,
+                           int chroma);
+
 #endif
