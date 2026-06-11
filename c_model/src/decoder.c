@@ -69,6 +69,28 @@ static void rtl_dump_mb(uint32_t mbx, uint32_t mby, int cat, uint32_t cbp,
     fwrite(cres, sizeof(int16_t), 2 * 4 * 16, f);
 }
 
+/* Reconstruction-layer dump (R2c): per-MB pixels before deblocking,
+ * 384 bytes (256 luma + 64 + 64 chroma), same gating as rtl_dump_mb. */
+static FILE *rtl_dump_rec_file(void) {
+    static FILE *f;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        const char *path = getenv("H264_RTL_DUMP_REC");
+        if (path) f = fopen(path, "wb");
+    }
+    return f;
+}
+
+static void rtl_dump_rec(const uint8_t *y, size_t ls, const uint8_t *u,
+                         const uint8_t *v, size_t cs) {
+    FILE *f = rtl_dump_rec_file();
+    if (!f) return;
+    for (int r = 0; r < 16; r++) fwrite(y + (size_t)r * ls, 1, 16, f);
+    for (int r = 0; r < 8; r++) fwrite(u + (size_t)r * cs, 1, 8, f);
+    for (int r = 0; r < 8; r++) fwrite(v + (size_t)r * cs, 1, 8, f);
+}
+
 /* A reference frame: padded planes + motion field (for B direct). */
 typedef struct {
     uint8_t *Y, *U, *V;
@@ -2418,6 +2440,10 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 d[0] = cdcd[k];
                 h264_idct4x4_add(bdst, c.cs, d);
             }
+        }
+
+        if (!use_cabac && !t8 && !sh->is_p && !sh->is_b) {
+            rtl_dump_rec(ydst, c.ls, udst, vdst, c.cs);
         }
 
 mb_done:

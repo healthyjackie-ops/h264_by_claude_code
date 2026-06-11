@@ -98,3 +98,14 @@ ifull:
 	./obj_dir_ifull/Vintra_wrap
 
 .PHONY: ifull
+
+recon:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module mb_recon \
+	  -CFLAGS "-O2" -Mdir obj_dir_recon \
+	  -I$(RTL_DIR) \
+	  $(RTL_DIR)/mb_recon.sv $(RTL_DIR)/intra4x4_pred.sv \
+	  $(RTL_DIR)/intra_full_pred.sv \
+	  tb_mb_recon.cpp
+	@echo "built; run: ./obj_dir_recon/Vmb_recon <coef> <rec> <mb_w> <cqp>"
+
+.PHONY: recon
