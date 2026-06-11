@@ -42,9 +42,34 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
             *err = H264_ERR_UNSUP;
             return -1;
         }
+        for (int i = 0; i < 8; i++) {              /* identity defaults */
+            sh->lw[i] = 1; sh->lo[i] = 0;
+            sh->cw[i][0] = sh->cw[i][1] = 1;
+            sh->co[i][0] = sh->co[i][1] = 0;
+        }
         if (pps->weighted_pred) {                  /* pred_weight_table */
-            *err = H264_ERR_UNSUP;
-            return -1;
+            sh->wp = 1;
+            sh->luma_log2_denom = (int)bs_ue(bs);
+            sh->chroma_log2_denom = (int)bs_ue(bs);
+            if (sh->luma_log2_denom > 7 || sh->chroma_log2_denom > 7) {
+                *err = H264_ERR_BAD_STREAM;
+                return -1;
+            }
+            for (uint32_t i = 0; i < sh->num_ref_l0; i++) {
+                sh->lw[i] = (int16_t)(1 << sh->luma_log2_denom);
+                sh->cw[i][0] = sh->cw[i][1] =
+                    (int16_t)(1 << sh->chroma_log2_denom);
+                if (bs_u1(bs)) {                   /* luma_weight_l0_flag */
+                    sh->lw[i] = (int16_t)bs_se(bs);
+                    sh->lo[i] = (int16_t)bs_se(bs);
+                }
+                if (bs_u1(bs)) {                   /* chroma_weight_l0_flag */
+                    for (int j = 0; j < 2; j++) {
+                        sh->cw[i][j] = (int16_t)bs_se(bs);
+                        sh->co[i][j] = (int16_t)bs_se(bs);
+                    }
+                }
+            }
         }
     }
     /* No pred-weight table for I; marking below. */

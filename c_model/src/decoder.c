@@ -59,6 +59,7 @@ typedef struct {
     int8_t *mb_ref;            /* per 4x4: 0 = ref0, -1 = intra/none */
     uint8_t *mb_skip;          /* per MB: decoded as skipped (CABAC ctx) */
     int n_refs;                /* list0 length (most recent first) */
+    const slice_hdr_t *wp_sh;  /* active slice (weighted prediction) */
     uint8_t *mvd_ax, *mvd_ay;  /* per 4x4: |mvd| clipped to 70 (mvd ctxInc) */
     const uint8_t * const *refsY;        /* list0 planes, [0] = most recent */
     const uint8_t * const *refsU;
@@ -508,6 +509,23 @@ static void mv_pred(const ictx_t *c, int sid, int gx, int gy, int w4,
 
 /* Motion-compensate one partition: (gx,gy) in 4x4 units, w4*h4 size,
  * write mv/ref bookkeeping and predict into the current frame. */
+/* 8.4.2.3.2 single-direction explicit weighting, in place. */
+static void wp_apply(uint8_t *dst, size_t stride, int bw, int bh,
+                     int w, int o, int logwd) {
+    for (int j = 0; j < bh; j++) {
+        for (int i = 0; i < bw; i++) {
+            uint8_t *px = dst + (size_t)j * stride + (size_t)i;
+            int v;
+            if (logwd >= 1) {
+                v = (((int)*px * w + (1 << (logwd - 1))) >> logwd) + o;
+            } else {
+                v = (int)*px * w + o;
+            }
+            *px = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+    }
+}
+
 static void inter_pred_part(ictx_t *c, int ref, int gx, int gy,
                             int w4, int h4, int16_t mvx, int16_t mvy) {
     uint32_t bw = c->mb_w * 4;
@@ -534,6 +552,18 @@ static void inter_pred_part(ictx_t *c, int ref, int gx, int gy,
                    cx + (mvx >> 3), cy + (mvy >> 3), mvx & 7, mvy & 7,
                    c->V + (size_t)cy * c->cs + (size_t)cx, c->cs,
                    w4 * 2, h4 * 2);
+    const slice_hdr_t *sh = c->wp_sh;
+    if (sh && sh->wp) {
+        wp_apply(c->Y + (size_t)ly * c->ls + (size_t)lx, c->ls,
+                 w4 * 4, h4 * 4, sh->lw[ref], sh->lo[ref],
+                 sh->luma_log2_denom);
+        wp_apply(c->U + (size_t)cy * c->cs + (size_t)cx, c->cs,
+                 w4 * 2, h4 * 2, sh->cw[ref][0], sh->co[ref][0],
+                 sh->chroma_log2_denom);
+        wp_apply(c->V + (size_t)cy * c->cs + (size_t)cx, c->cs,
+                 w4 * 2, h4 * 2, sh->cw[ref][1], sh->co[ref][1],
+                 sh->chroma_log2_denom);
+    }
 }
 
 /* P_Skip (8.4.1.1): 16x16 prediction with the zero-forcing conditions. */
@@ -733,6 +763,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     bs->bit = ents[sid].bit;
 
     int qp = (int)sh->slice_qp;
+    c.wp_sh = sh;
     int last_qpd_nz = 0;
     int skip_run = -1;
     cabac_t cbx;
@@ -840,6 +871,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             int16_t pmx, pmy;
             int16_t dx, dy;
             int adx, ady;
+            int all_sub8x8 = 1;
             int nref = (int)sh->num_ref_l0;
             if (mb_type == 0) {                    /* 16x16 */
                 int r0 = read_ref_idx(bs, &cbx, use_cabac, &c, sid,
@@ -894,6 +926,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 for (int b = 0; b < 4; b++) {
                     sub[b] = use_cabac ? cabac_p_sub_type(&cbx) : bs_ue(bs);
                     if (sub[b] > 3) { out->err = H264_ERR_BAD_STREAM; goto fail; }
+                    if (sub[b] != 0) all_sub8x8 = 0;
                 }
                 for (int b = 0; b < 4; b++) {
                     int bx0 = gx0 + (b & 1) * 2, by0 = gy0 + (b >> 1) * 2;
@@ -952,6 +985,23 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             }
             uint32_t cbp_luma = cbp & 15, cbp_chroma = cbp >> 4;
             if (cbp_chroma > 2) { out->err = H264_ERR_BAD_STREAM; goto fail; }
+            int t8i = 0;
+            {
+                int parts_ok = (mb_type <= 2) || all_sub8x8;
+                if (pps->transform_8x8 && cbp_luma != 0 && parts_ok) {
+                    if (use_cabac) {
+                        int inc = 0;
+                        if (mb_avail(&c, sid, (int)mbx - 1, (int)mby) &&
+                            c.mb_t8[mby * c.mb_w + mbx - 1]) inc++;
+                        if (mb_avail(&c, sid, (int)mbx, (int)mby - 1) &&
+                            c.mb_t8[(mby - 1) * c.mb_w + mbx]) inc++;
+                        t8i = cabac_decision(&cbx, 399 + inc);
+                    } else {
+                        t8i = (int)bs_u1(bs);
+                    }
+                }
+            }
+            c.mb_t8[mby * c.mb_w + mbx] = (uint8_t)t8i;
             c.mb_cat[mby * c.mb_w + mbx] = 3;
             c.mb_cbp[mby * c.mb_w + mbx] =
                 (uint8_t)((cbp_chroma << 4) | cbp_luma);
@@ -980,10 +1030,61 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             }
             c.mb_qp[mby * c.mb_w + mbx] = (uint8_t)qp;
 
-            /* Inter residuals: 4x4 CAVLC, inter scaling lists. */
+            /* Inter residuals on the inter scaling lists. */
             int16_t scan[16];
             int16_t resid[16][16];
+            int16_t iresid8[4][64];
             memset(resid, 0, sizeof(resid));
+            memset(iresid8, 0, sizeof(iresid8));
+            if (t8i) {
+                int16_t scan64[64];
+                for (int b = 0; b < 4; b++) {
+                    int bx0 = (int)(mbx * 4 + (uint32_t)(b & 1) * 2);
+                    int by0 = (int)(mby * 4 + (uint32_t)(b >> 1) * 2);
+                    if (cbp_luma & (1u << b)) {
+                        if (use_cabac) {
+                            int tc = cabac_residual8x8(&cbx, scan64,
+                                                       &out->err);
+                            if (tc < 0) goto fail;
+                            for (int k = 0; k < 64; k++)
+                                iresid8[b][h264_zigzag8x8[k]] = scan64[k];
+                            for (int dy2 = 0; dy2 < 2; dy2++)
+                                for (int dx2 = 0; dx2 < 2; dx2++) {
+                                    uint32_t gi =
+                                        ((uint32_t)(by0 + dy2)) * bw +
+                                        (uint32_t)(bx0 + dx2);
+                                    c.nzL[gi] = (uint8_t)(tc > 16 ? 16 : tc);
+                                    c.cbf_l[gi] = (tc != 0);
+                                }
+                        } else {
+                            for (int j = 0; j < 4; j++) {
+                                int gx = bx0 + (j & 1);
+                                int gy = by0 + (j >> 1);
+                                int nc = derive_nc(c.nzL, bw, gx, gy,
+                                    blk4_avail(&c, sid, gx - 1, gy),
+                                    blk4_avail(&c, sid, gx, gy - 1));
+                                int tc = cavlc_residual_block(bs, nc, 16,
+                                                              scan, &out->err);
+                                if (tc < 0) goto fail;
+                                uint32_t gi = (uint32_t)gy * bw + (uint32_t)gx;
+                                c.nzL[gi] = (uint8_t)tc;
+                                c.cbf_l[gi] = (tc != 0);
+                                for (int k = 0; k < 16; k++)
+                                    iresid8[b][h264_zigzag8x8[4 * k + j]] =
+                                        scan[k];
+                            }
+                        }
+                    } else {
+                        for (int dy2 = 0; dy2 < 2; dy2++)
+                            for (int dx2 = 0; dx2 < 2; dx2++) {
+                                uint32_t gi = ((uint32_t)(by0 + dy2)) * bw +
+                                              (uint32_t)(bx0 + dx2);
+                                c.nzL[gi] = 0;
+                                c.cbf_l[gi] = 0;
+                            }
+                    }
+                }
+            } else
             for (int k = 0; k < 16; k++) {
                 int gx = (int)(mbx * 4 + zscan_x[k]);
                 int gy = (int)(mby * 4 + zscan_y[k]);
@@ -1073,6 +1174,15 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             /* Add residuals onto the MC prediction. */
             int32_t d[16];
             uint8_t *ydst2 = c.Y + (size_t)mby * 16 * c.ls + (size_t)mbx * 16;
+            if (t8i) {
+                int32_t d64[64];
+                for (int b = 0; b < 4; b++) {
+                    if (!(cbp_luma & (1u << b))) continue;
+                    h264_dequant8x8(iresid8[b], qp, aw8[1], d64);
+                    h264_idct8x8_add(ydst2 + (size_t)(b >> 1) * 8 * c.ls
+                                           + (size_t)(b & 1) * 8, c.ls, d64);
+                }
+            } else
             for (int k = 0; k < 16; k++) {
                 if (!(cbp_luma & (1u << (k >> 2)))) continue;
                 uint32_t x4 = zscan_x[k], y4 = zscan_y[k];

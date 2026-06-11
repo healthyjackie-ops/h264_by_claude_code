@@ -17,6 +17,12 @@ typedef struct {
     int32_t beta_offset;
     int cabac_init_idc;         /* P slices, CABAC only */
     uint32_t num_ref_l0;        /* active list0 size (P) */
+    /* Explicit weighted prediction (pred_weight_table). When wp==0 the
+     * defaults below are identity. */
+    int wp;
+    int luma_log2_denom, chroma_log2_denom;
+    int16_t lw[8], lo[8];                /* luma weight/offset per ref */
+    int16_t cw[8][2], co[8][2];          /* chroma, [ref][Cb/Cr] */
 } slice_hdr_t;
 
 /* Parse an I/IDR slice header (everything before slice_data). Returns 0 on

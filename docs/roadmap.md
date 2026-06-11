@@ -75,6 +75,12 @@ padded 尺寸。
 |---|---|---|
 | **15** ✅ | 多参考 P（--ref ≤8）：DPB 滑窗（最新在前 = list0 初始化序、IDR 清空）、ref_idx 语法（CAVLC te(v) / CABAC ctx54+condA+2condB→58→59）、P MB 语法序（全部 ref 先于全部 mvd，分区 ref 预写供 ctxInc）、MV 预测真实 ref 匹配 | 10/10 phase15（振荡运动 + 生成器断言 ref>0 ≥10%，实测 35-96%）；全语料 145/145 |
 
+## Wave 8 — 加权预测 + high P
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **16** ✅ | 显式加权预测（pred_weight_table 解析 + 8.4.2.3.2 单向加权应用于 MC 输出，per-ref luma/chroma w/o）；high profile P 的 inter 8x8 变换（transform_size_8x8_flag 条件 = 分区全 ≥8x8 且 cbp_luma≠0，CAVLC interleave / CABAC cat5，dequant 走 w8[1] inter 列表） | 10/10 phase16（渐隐序列断言 weighted Y >0%，实测全 100%）；全语料 155/155 |
+
 | 项 | 备注 |
 |---|---|
 | B 帧 | list1 + POC 输出重排 + direct 模式 + 双向平均 |
