@@ -38,3 +38,35 @@ cavlc:
 	./obj_dir_cavlc/Vcavlc_top /tmp/cavlc.log
 
 .PHONY: cavlc
+
+MB_OBJS := $(CMODEL_BUILD)/bitstream.o $(CMODEL_BUILD)/nal.o \
+           $(CMODEL_BUILD)/params.o $(CMODEL_BUILD)/slice.o \
+           $(CMODEL_BUILD)/transform.o
+
+mb: $(CMODEL_OBJS)
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module mb_top \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_mb \
+	  -I$(REPO)/rtl/include \
+	  $(RTL_DIR)/mb_top.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/bitreader.sv \
+	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/expgolomb.sv \
+	  tb_mb_dec.cpp $(MB_OBJS)
+	@echo "built; run: ./obj_dir_mb/Vmb_top <stream> <dump>"
+
+# full R1c regression: every baseline-I CAVLC vector through mb_top
+mb-regress: mb
+	@pass=0; fail=0; \
+	for V in $(REPO)/verification/vectors/phase05/*.264 \
+	         $(REPO)/verification/vectors/phase06/*.264; do \
+	  H264_RTL_DUMP=/tmp/mb_r.dump $(CMODEL_BUILD)/h264_decode $$V /dev/null \
+	      > /dev/null 2>&1; \
+	  r=$$(./obj_dir_mb/Vmb_top $$V /tmp/mb_r.dump 2>&1 | tail -1); \
+	  case "$$r" in \
+	    \[PASS\]*) pass=$$((pass+1));; \
+	    *) fail=$$((fail+1)); echo "$$(basename $$V): $$r";; \
+	  esac; \
+	  rm -f /tmp/mb_r.dump; \
+	done; \
+	echo "=== mb-regress: $$pass pass, $$fail fail ==="; \
+	test $$fail -eq 0
+
+.PHONY: mb mb-regress
