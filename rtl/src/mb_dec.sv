@@ -60,7 +60,11 @@ module mb_dec #(
     output logic signed [15:0] coef_data,
 
     output logic        slice_done,
-    output logic        err
+    output logic        err,
+
+    // reconstruction handshake: after the header pulse, parsing stalls
+    // until the consumer signals completion (tie high when unused)
+    input  logic        rec_done
 );
 
     // z-scan position of 4x4 block k within the MB
@@ -79,7 +83,7 @@ module mb_dec #(
     typedef enum logic [3:0] {
         S_IDLE, S_MBTYPE, S_I4MODE, S_CMODE, S_CBP, S_QPD,
         S_LDC_GO, S_LAC_GO, S_RES_WAIT, S_CDC_GO, S_CAC_GO,
-        S_EMIT, S_DONE, S_ERR
+        S_EMIT, S_WAIT_REC, S_DONE, S_ERR
     } state_e;
     state_e st_q, ret_q;               // ret_q: state after S_RES_WAIT
 
@@ -464,6 +468,10 @@ module mb_dec #(
                                                : 5'd0;
                     end
                 end
+                st_q <= S_WAIT_REC;
+            end
+
+            S_WAIT_REC: if (rec_done) begin
                 if (mbx_q + 8'd1 == cfg_mb_w) begin
                     have_left <= 1'b0;
                     mbx_q <= '0;

@@ -129,3 +129,32 @@ dbf:
 	@echo "built; run with args"
 
 .PHONY: dbf
+
+top:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module h264_top \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_top \
+	  -I$(REPO)/rtl/include -I$(RTL_DIR) \
+	  $(RTL_DIR)/h264_top.sv $(RTL_DIR)/bitreader.sv $(RTL_DIR)/expgolomb.sv \
+	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/mb_recon.sv \
+	  $(RTL_DIR)/intra4x4_pred.sv $(RTL_DIR)/intra_full_pred.sv \
+	  $(RTL_DIR)/deblock_frame.sv $(RTL_DIR)/deblock_edge.sv \
+	  tb_h264_top.cpp $(MB_OBJS)
+	@echo "built; run: ./obj_dir_top/Vh264_top <stream> <golden.yuv>"
+
+# full-chain frame regression: every baseline-I vector <=320 wide
+top-regress: top
+	@pass=0; fail=0; \
+	for V in $(REPO)/verification/vectors/phase05/*.264 \
+	         $(REPO)/verification/vectors/phase06/*.264; do \
+	  W=$$(basename $$V | sed 's/.*_\([0-9]*\)x[0-9]*_.*/\1/'); \
+	  [ $$W -gt 320 ] && continue; \
+	  r=$$(./obj_dir_top/Vh264_top $$V $${V%.264}.yuv 2>&1 | tail -1); \
+	  case "$$r" in \
+	    \[PASS\]*) pass=$$((pass+1));; \
+	    *) fail=$$((fail+1)); echo "$$(basename $$V): $$r";; \
+	  esac; \
+	done; \
+	echo "=== top-regress: $$pass pass, $$fail fail ==="; \
+	test $$fail -eq 0
+
+.PHONY: top top-regress
