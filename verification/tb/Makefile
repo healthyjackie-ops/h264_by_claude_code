@@ -70,3 +70,13 @@ mb-regress: mb
 	test $$fail -eq 0
 
 .PHONY: mb mb-regress
+
+xf:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module transform_top \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_xf \
+	  -I$(RTL_DIR) \
+	  $(RTL_DIR)/transform_top.sv \
+	  tb_transform.cpp $(CMODEL_BUILD)/transform.o
+	./obj_dir_xf/Vtransform_top
+
+.PHONY: xf
