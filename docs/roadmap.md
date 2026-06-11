@@ -122,7 +122,16 @@ cabac_init 漏选 PB 表；(6) colocated L0 无效需 L1 fallback。
 |---|---|---|
 | **19** ✅ | temporal direct（8.4.1.2.3）：colocated mv 按 POC 距离缩放（tx=(16384+\|td/2\|)/td、DSF=(tb·tx+32)>>6 clip ±1024、mvL0=(DSF·mvCol+128)>>8、mvL1=mvL0−mvCol、等距直拷）、col ref→当前 list0 映射（dpb_ent 存解码时 ref2poc 表）、intra colocated → ref0/mv0 | 14/14 phase19（含 B-pyramid 的 Bref colocated）；全语料 193/193 |
 | 加权预测 | pred_weight_table |
-| ASO | first_mb 乱序（mb_avail 已就绪，解析序需重排） |
-| RTL | I 帧子集起步 |
+## Wave 12 — 鲁棒性
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **20** ✅ | ASan+UBSan 构建（make asan）+ 变异 fuzz（make fuzz：位翻转/截断/替换/重复 ×40/种子）；修 4 处 dequant 负值左移 UB（改 ×2^n 乘法） | 7960 变异零 crash/零 sanitizer/全干净收拒 |
+
+ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
+
+| 项 | 备注 |
+|---|---|
+| RTL | I 帧子集起步（仿 JPEG ASIC 路线） |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |
 | RTL | C model 收敛后按 jpeg Wave 节奏移植 |

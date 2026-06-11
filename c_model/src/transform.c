@@ -37,7 +37,7 @@ void h264_dequant4x4(const int16_t c[16], int qp, const uint8_t w[16],
     int shift = qp / 6, rem = qp % 6;
     for (int i = 0; i < 16; i++) {
         int64_t v = (int64_t)c[i] * w[i] * dequant_v[rem][vclass(i)];
-        d[i] = (int32_t)(((v << shift) + 8) >> 4);
+        d[i] = (int32_t)((v * ((int64_t)1 << shift) + 8) >> 4);
     }
 }
 
@@ -69,7 +69,7 @@ void h264_luma_dc_dequant(const int16_t c[16], int qp, int w0,
     int sh = qp / 6;
     for (int i = 0; i < 16; i++) {
         int64_t v = (int64_t)f[i] * w0 * v0;
-        out[i] = (int32_t)(((v << sh) + 32) >> 6);
+        out[i] = (int32_t)((v * ((int64_t)1 << sh) + 32) >> 6);
     }
 }
 
@@ -86,7 +86,7 @@ void h264_chroma_dc_dequant(const int16_t c[4], int qp, int w0,
     int32_t f[4] = { f0, f1, f2, f3 };
     for (int i = 0; i < 4; i++) {
         int64_t v = (int64_t)f[i] * w0 * v0;
-        out[i] = (int32_t)((v << sh) >> 5);
+        out[i] = (int32_t)((v * ((int64_t)1 << sh)) >> 5);
     }
 }
 
@@ -149,7 +149,7 @@ void h264_dequant8x8(const int16_t c[64], int qp, const uint8_t w[64],
     for (int i = 0; i < 64; i++) {
         int y = i >> 3, x = i & 7;
         int64_t v = (int64_t)c[i] * w[i] * dequant8_v[rem][y & 3][x & 3];
-        d[i] = (int32_t)(((v << per) + 32) >> 6);
+        d[i] = (int32_t)((v * ((int64_t)1 << per) + 32) >> 6);
     }
 }
 

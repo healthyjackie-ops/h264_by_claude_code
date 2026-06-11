@@ -3,3 +3,5 @@ build/
 *.o
 *.dSYM/
 .tmp*
+c_model/fuzz_failures/
+c_model/build_asan/

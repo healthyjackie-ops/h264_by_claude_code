@@ -78,3 +78,14 @@ golden: $(GOLDEN_BIN)
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+# ---- sanitizer build + mutation fuzz ----
+ASAN_DIR := build_asan
+asan:
+	@mkdir -p $(ASAN_DIR)
+	$(CC) $(filter-out -O2,$(CFLAGS)) -O1 -fsanitize=address,undefined \
+	  -fno-omit-frame-pointer $(SRC_DIR)/*.c -o $(ASAN_DIR)/h264_decode_asan
+	@echo "[asan] built $(ASAN_DIR)/h264_decode_asan"
+
+fuzz: asan
+	python3 ../tools/fuzz_mutate.py $(ASAN_DIR)/h264_decode_asan
