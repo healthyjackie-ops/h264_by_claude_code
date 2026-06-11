@@ -35,7 +35,7 @@ cavlc:
 	  -I$(REPO)/rtl/include \
 	  $(RTL_DIR)/cavlc_top.sv $(RTL_DIR)/bitreader.sv $(RTL_DIR)/cavlc_block.sv \
 	  tb_cavlc_block.cpp
-	./obj_dir_cavlc/Vcavlc_top /tmp/cavlc.log
+	./obj_dir_cavlc/Vcavlc_top $(if $(CAVLC_LOG),$(CAVLC_LOG),/tmp/cavlc.log)
 
 .PHONY: cavlc
 
@@ -158,3 +158,16 @@ top-regress: top
 	test $$fail -eq 0
 
 .PHONY: top top-regress
+
+# one-shot RTL regression: every unit bench + both integration sweeps
+rtl-regress: br cavlc-regen i4 ifull xf dbe mb-regress top-regress
+	@echo "=== rtl-regress: all suites passed ==="
+
+# cavlc replay needs a fresh log from the current c_model
+cavlc-regen:
+	H264_CAVLC_LOG=/tmp/cavlc_rr.log $(CMODEL_BUILD)/h264_decode \
+	  $(REPO)/verification/vectors/phase05/p05_grad_100x76_q28.264 \
+	  /dev/null > /dev/null 2>&1
+	$(MAKE) cavlc CAVLC_LOG=/tmp/cavlc_rr.log
+
+.PHONY: rtl-regress cavlc-regen

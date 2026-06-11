@@ -1,0 +1,37 @@
+# yosys synthesis for h264_core targeting ASAP7 7.5T RVT TT cells.
+#
+# Source is SystemVerilog converted by sv2v into ../sv2v_out.v (run
+# `make -C .. sv2v` first). Memories (mb_recon/mb_dec line buffers,
+# coefficient RAM) stay as $mem_v2 via memory -nomap and are costed
+# separately with asap7_mem_area.py, same flow as jpeg_by_claude_code.
+# Target period: 3333 ps (300 MHz) for the serial baseline — the
+# all-combinational dequant+idct and intra-plane chains bound Fmax;
+# pipelining is the next optimization pass.
+
+read_verilog ../sv2v_out.v
+
+hierarchy -top h264_core -check
+
+proc
+flatten
+opt -fast
+fsm
+opt
+memory -nomap
+opt
+wreduce
+opt_expr -mux_undef
+opt_clean -purge
+techmap
+opt -fast
+
+dfflibmap -liberty ../asap7/asap7_merged_RVT_TT.lib
+abc -liberty ../asap7/asap7_merged_RVT_TT.lib -D 3333 \
+    -script "+strash;map -D 3333;topo;buffer -N 16;upsize -D 3333;dnsize -D 3333;stime -p -c"
+
+setundef -zero -undriven
+opt_clean -purge
+
+stat -width -liberty ../asap7/asap7_merged_RVT_TT.lib
+
+write_verilog -noattr ../reports/h264_core_netlist.v

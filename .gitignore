@@ -6,3 +6,6 @@ build/
 c_model/fuzz_failures/
 c_model/build_asan/
 verification/tb/obj_dir*
+syn/asap7/*.lib
+syn/sv2v_out.v
+syn/reports/h264_core_netlist.v
