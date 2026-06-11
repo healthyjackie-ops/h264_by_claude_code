@@ -116,9 +116,11 @@ cabac_init 漏选 PB 表；(6) colocated L0 无效需 L1 fallback。
 弯路；JM 文本 trace 的 @ 位与 bits 字段不可信（与真值冲突），python
 直读位流仲裁才定案。
 
-| 项 | 备注 |
-|---|---|
-| temporal direct | colocated MV 按 POC 距离缩放 |
+## Wave 11 — temporal direct
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **19** ✅ | temporal direct（8.4.1.2.3）：colocated mv 按 POC 距离缩放（tx=(16384+\|td/2\|)/td、DSF=(tb·tx+32)>>6 clip ±1024、mvL0=(DSF·mvCol+128)>>8、mvL1=mvL0−mvCol、等距直拷）、col ref→当前 list0 映射（dpb_ent 存解码时 ref2poc 表）、intra colocated → ref0/mv0 | 14/14 phase19（含 B-pyramid 的 Bref colocated）；全语料 193/193 |
 | 加权预测 | pred_weight_table |
 | ASO | first_mb 乱序（mb_avail 已就绪，解析序需重排） |
 | RTL | I 帧子集起步 |

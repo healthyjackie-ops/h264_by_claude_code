@@ -44,6 +44,8 @@ typedef struct {
     int8_t *ref1;
     int32_t poc;
     uint32_t frame_num;
+    int32_t ref2poc[8];        /* POC per list0 ref idx at decode time */
+    int n_ref2poc;
 } dpb_ent_t;
 
 static void dpb_ent_free(dpb_ent_t *e) {
@@ -783,6 +785,68 @@ static void b_spatial_direct(ictx_t *c, int sid, uint32_t mbx, uint32_t mby,
     }
 }
 
+/* B temporal direct (8.4.1.2.3, direct_8x8_inference=1): colocated
+ * motion scaled by POC distance; refIdxL0 maps the colocated reference
+ * picture into the current list0, refIdxL1 = 0. */
+static void b_temporal_direct(ictx_t *c, int32_t cur_poc,
+                              int gx, int gy, int w4, int h4) {
+    const dpb_ent_t *col = c->list1[0];
+    uint32_t bw = c->mb_w * 4;
+    int gx0 = (gx >> 2) << 2, gy0 = (gy >> 2) << 2;
+    for (int by = gy; by < gy + h4; by += 2)
+    for (int bx2 = gx; bx2 < gx + w4; bx2 += 2) {
+        int ccx = gx0 + (((bx2 - gx0) >> 1) ? 3 : 0);
+        int ccy = gy0 + (((by - gy0) >> 1) ? 3 : 0);
+        uint32_t ci = (uint32_t)ccy * bw + (uint32_t)ccx;
+        int16_t cmx, cmy;
+        int cref;
+        if (col->ref[ci] >= 0) {
+            cref = col->ref[ci]; cmx = col->mvx[ci]; cmy = col->mvy[ci];
+        } else {
+            cref = col->ref1 ? col->ref1[ci] : -1;
+            cmx = col->mv1x ? col->mv1x[ci] : 0;
+            cmy = col->mv1y ? col->mv1y[ci] : 0;
+        }
+        int r0 = 0;
+        int16_t m0x = 0, m0y = 0, m1x = 0, m1y = 0;
+        if (cref >= 0) {
+            int32_t col_ref_poc = (cref < col->n_ref2poc)
+                                      ? col->ref2poc[cref] : POC_NONE;
+            for (int i = 0; i < c->n_refs; i++) {
+                if (c->list0[i]->poc == col_ref_poc) { r0 = i; break; }
+            }
+            int32_t poc0 = c->list0[r0]->poc;
+            int32_t poc1 = col->poc;
+            if (poc0 == poc1) {
+                m0x = cmx; m0y = cmy;          /* same distance: copy */
+            } else {
+                int td = poc1 - poc0;
+                if (td > 127) td = 127;
+                if (td < -128) td = -128;
+                int tb = (int)(cur_poc - poc0);
+                if (tb > 127) tb = 127;
+                if (tb < -128) tb = -128;
+                int ad = td < 0 ? -td : td;
+                int tx = (16384 + (ad >> 1)) / td;
+                int dsf = (tb * tx + 32) >> 6;
+                if (dsf > 1023) dsf = 1023;
+                if (dsf < -1024) dsf = -1024;
+                m0x = (int16_t)((dsf * cmx + 128) >> 8);
+                m0y = (int16_t)((dsf * cmy + 128) >> 8);
+                m1x = (int16_t)(m0x - cmx);
+                m1y = (int16_t)(m0y - cmy);
+            }
+        }
+        inter_pred_lx(c, 3, r0, 0, bx2, by, 2, 2, m0x, m0y, m1x, m1y);
+        for (int j = 0; j < 2; j++)
+            for (int i = 0; i < 2; i++)
+                c->blk_direct[(uint32_t)(by + j) * bw +
+                              (uint32_t)(bx2 + i)] = 1;
+        store_mvd(c, 0, bx2, by, 2, 2, 0, 0);
+        store_mvd(c, 1, bx2, by, 2, 2, 0, 0);
+    }
+}
+
 /* P_Skip (8.4.1.1): 16x16 prediction with the zero-forcing conditions. */
 static void p_skip_mv(const ictx_t *c, int sid, uint32_t mbx, uint32_t mby,
                       int16_t *mx, int16_t *my) {
@@ -1065,10 +1129,6 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             goto fail;
         }
         if (ents[s].sh.is_b) {
-            if (!ents[s].sh.direct_spatial) {  /* temporal direct: later */
-                out->err = H264_ERR_UNSUP;
-                goto fail;
-            }
             if (c.n_refs < 1 || c.n_l1 < 1) {
                 out->err = H264_ERR_BAD_STREAM;
                 goto fail;
@@ -1172,8 +1232,12 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         if (this_skip) {
             if (dbg >= 2) fprintf(stderr, "SKIP %u,%u\n", mbx, mby);
             if (sh->is_b) {
-                b_spatial_direct(&c, sid, mbx, mby,
-                                 (int)(mbx * 4), (int)(mby * 4), 4, 4);
+                if (sh->direct_spatial)
+                    b_spatial_direct(&c, sid, mbx, mby,
+                                     (int)(mbx * 4), (int)(mby * 4), 4, 4);
+                else
+                    b_temporal_direct(&c, poc,
+                                      (int)(mbx * 4), (int)(mby * 4), 4, 4);
                 c.mb_bdirect[mby * c.mb_w + mbx] = 1;
             } else {
                 int16_t smx, smy;
@@ -1259,7 +1323,10 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                     {1,1},{2,2},{1,2},{2,1},{1,3},{2,3},{3,1},{3,2},{3,3}
                 };
                 if (mb_type == 0) {                /* B_Direct_16x16 */
-                    b_spatial_direct(&c, sid, mbx, mby, gx0, gy0, 4, 4);
+                    if (sh->direct_spatial)
+                        b_spatial_direct(&c, sid, mbx, mby, gx0, gy0, 4, 4);
+                    else
+                        b_temporal_direct(&c, poc, gx0, gy0, 4, 4);
                     c.mb_bdirect[mby * c.mb_w + mbx] = 1;
                 } else if (mb_type <= 3) {         /* 16x16 L0/L1/Bi */
                     int mode = (int)mb_type;       /* 1,2,3 */
@@ -1448,7 +1515,11 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                         if (sub[b] != 0) continue;
                         int bx0 = gx0 + (b & 1) * 2;
                         int by0 = gy0 + (b >> 1) * 2;
-                        b_spatial_direct(&c, sid, mbx, mby, bx0, by0, 2, 2);
+                        if (sh->direct_spatial)
+                            b_spatial_direct(&c, sid, mbx, mby,
+                                             bx0, by0, 2, 2);
+                        else
+                            b_temporal_direct(&c, poc, bx0, by0, 2, 2);
                     }
                     int16_t smv[2][4][4][2];       /* [list][8x8][sub] */
                     memset(smv, 0, sizeof(smv));
@@ -2430,6 +2501,9 @@ mb_done:
     keep->ref = c.mb_ref;
     keep->poc = poc;
     keep->frame_num = ents[0].sh.frame_num;
+    keep->n_ref2poc = c.n_refs < 8 ? c.n_refs : 8;
+    for (int i = 0; i < keep->n_ref2poc; i++)
+        keep->ref2poc[i] = c.list0[i]->poc;
     out->err = 0;
     return 0;
 
