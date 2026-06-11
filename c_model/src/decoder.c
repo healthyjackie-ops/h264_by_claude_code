@@ -35,6 +35,40 @@ static const uint8_t raster_to_z[16] = {
     10, 11, 14, 15
 };
 
+/* RTL golden-intermediate dump (docs/rtl_spec.md R1): per-MB records
+ * of the coefficient layer for cavlc_dec testbench comparison. Only
+ * the RTL subset (baseline I, CAVLC, no t8) is recorded. */
+static FILE *rtl_dump_file(void) {
+    static FILE *f;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        const char *path = getenv("H264_RTL_DUMP");
+        if (path) f = fopen(path, "wb");
+    }
+    return f;
+}
+
+static void rtl_dump_mb(uint32_t mbx, uint32_t mby, int cat, uint32_t cbp,
+                        int qp, int i16_mode, uint32_t cmode,
+                        const uint8_t *i4m, const int16_t resid[16][16],
+                        const int16_t dcraw[16], const int16_t cdc[2][4],
+                        const int16_t cres[2][4][16]) {
+    FILE *f = rtl_dump_file();
+    if (!f) return;
+    uint8_t hdr[8] = {
+        (uint8_t)mbx, (uint8_t)(mbx >> 8) /* mb_w<=120 fits, keep u16 */,
+        (uint8_t)mby, (uint8_t)cat, (uint8_t)cbp, (uint8_t)qp,
+        (uint8_t)i16_mode, (uint8_t)cmode
+    };
+    fwrite(hdr, 1, 8, f);
+    fwrite(i4m, 1, 16, f);
+    fwrite(resid, sizeof(int16_t), 16 * 16, f);
+    fwrite(dcraw, sizeof(int16_t), 16, f);
+    fwrite(cdc, sizeof(int16_t), 8, f);
+    fwrite(cres, sizeof(int16_t), 2 * 4 * 16, f);
+}
+
 /* A reference frame: padded planes + motion field (for B direct). */
 typedef struct {
     uint8_t *Y, *U, *V;
@@ -2122,10 +2156,10 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         /* ---- residual parsing ---- */
         int16_t scan[16];
         int32_t luma_dc[16];
+        int16_t dcraw[16];
         memset(luma_dc, 0, sizeof(luma_dc));
+        memset(dcraw, 0, sizeof(dcraw));
         if (!intra4x4) {
-            int16_t dcraw[16];
-            memset(dcraw, 0, sizeof(dcraw));
             if (use_cabac) {
                 int ca = cbf_cond_lumadc(&c, 1, sid, mbx, mby, -1, 0);
                 int cbn = cbf_cond_lumadc(&c, 1, sid, mbx, mby, 0, -1);
@@ -2282,6 +2316,20 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                     c.cbf_c[comp][(uint32_t)gy * (bw / 2) + (uint32_t)gx] = 0;
                 }
             }
+        }
+
+        if (!use_cabac && !t8 && !sh->is_p && !sh->is_b) {
+            uint8_t i4m[16];
+            for (int k = 0; k < 16; k++) {
+                i4m[k] = (uint8_t)c.i4_mode[(mby * 4 + zscan_y[k]) * bw +
+                                            mbx * 4 + zscan_x[k]];
+            }
+            rtl_dump_mb(mbx, mby, intra4x4 ? 0 : 1,
+                        (uint32_t)((cbp_chroma << 4) | cbp_luma), qp, i16_mode,
+                        chroma_mode, i4m,
+                        (const int16_t (*)[16])resid, dcraw,
+                        (const int16_t (*)[4])cdc,
+                        (const int16_t (*)[4][16])cres);
         }
 
         /* ---- reconstruction ---- */
