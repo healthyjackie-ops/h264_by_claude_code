@@ -99,7 +99,8 @@ module mb_top #(
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
         .coef_we(coef_we), .coef_blk(coef_blk), .coef_addr(coef_addr),
         .coef_data(coef_data),
-        .slice_done(slice_done), .err(err)
+        .slice_done(slice_done), .err(err),
+        .rec_done(1'b1)
     );
 
 endmodule

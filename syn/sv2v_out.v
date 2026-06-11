@@ -2340,8 +2340,8 @@ module mb_recon (
 	reg [4:0] k_q;
 	reg comp_q;
 	assign busy = st_q != 4'd0;
-	assign rec_valid = st_q == 4'd8;
-	assign err = st_q == 4'd9;
+	assign rec_valid = st_q == 4'd10;
+	assign err = st_q == 4'd11;
 	reg signed [255:0] ldc_in;
 	wire signed [511:0] ldc_out;
 	always @(*) begin : sv2v_autoblock_1
@@ -2393,18 +2393,20 @@ module mb_recon (
 	reg signed [255:0] dq_in;
 	wire signed [511:0] dq_out;
 	wire [5:0] dq_qp;
-	assign dq_qp = (st_q == 4'd6 ? qpc : qp_q);
+	assign dq_qp = ((st_q == 4'd7) || (st_q == 4'd8) ? qpc : qp_q);
 	dequant4x4 u_dq(
 		.c(dq_in),
 		.qp(dq_qp),
 		.d(dq_out)
 	);
-	reg signed [511:0] id_in;
-	reg [127:0] id_pred;
+	reg signed [31:0] id_in [0:15];
+	reg [7:0] id_pred [0:15];
+	reg signed [511:0] id_in_q;
+	reg [127:0] id_pred_q;
 	wire [127:0] id_out;
 	idct4x4_add u_id(
-		.d(id_in),
-		.pred(id_pred),
+		.d(id_in_q),
+		.pred(id_pred_q),
 		.out(id_out)
 	);
 	wire [1:0] bx4;
@@ -2556,10 +2558,10 @@ module mb_recon (
 			for (i = 0; i < 16; i = i + 1)
 				begin
 					dq_in[(15 - i) * 16+:16] = 1'sb0;
-					id_pred[(15 - i) * 8+:8] = 1'sb0;
+					id_pred[i] = 1'sb0;
 				end
 		end
-		if (st_q == 4'd3) begin : sv2v_autoblock_12
+		if ((st_q == 4'd3) || (st_q == 4'd4)) begin : sv2v_autoblock_12
 			reg signed [31:0] px;
 			reg signed [31:0] py;
 			px = sv2v_cast_32_signed(bx4) * 4;
@@ -2575,11 +2577,11 @@ module mb_recon (
 					begin : sv2v_autoblock_15
 						reg signed [31:0] x;
 						for (x = 0; x < 4; x = x + 1)
-							id_pred[(15 - ((y * 4) + x)) * 8+:8] = (i16_q ? rec_y[(255 - ((((py + y) * 16) + px) + x)) * 8+:8] : p4[(15 - ((y * 4) + x)) * 8+:8]);
+							id_pred[(y * 4) + x] = (i16_q ? rec_y[(255 - ((((py + y) * 16) + px) + x)) * 8+:8] : p4[(15 - ((y * 4) + x)) * 8+:8]);
 					end
 			end
 		end
-		else if (st_q == 4'd6) begin : sv2v_autoblock_16
+		else if ((st_q == 4'd7) || (st_q == 4'd8)) begin : sv2v_autoblock_16
 			reg signed [31:0] px;
 			reg signed [31:0] py;
 			px = (sv2v_cast_32_signed(k_q) & 1) * 4;
@@ -2595,7 +2597,7 @@ module mb_recon (
 					begin : sv2v_autoblock_19
 						reg signed [31:0] x;
 						for (x = 0; x < 4; x = x + 1)
-							id_pred[(15 - ((y * 4) + x)) * 8+:8] = (comp_q ? rec_v[(63 - ((((py + y) * 8) + px) + x)) * 8+:8] : rec_u[(63 - ((((py + y) * 8) + px) + x)) * 8+:8]);
+							id_pred[(y * 4) + x] = (comp_q ? rec_v[(63 - ((((py + y) * 8) + px) + x)) * 8+:8] : rec_u[(63 - ((((py + y) * 8) + px) + x)) * 8+:8]);
 					end
 			end
 		end
@@ -2606,12 +2608,12 @@ module mb_recon (
 		begin : sv2v_autoblock_20
 			reg signed [31:0] i;
 			for (i = 0; i < 16; i = i + 1)
-				id_in[(15 - i) * 32+:32] = dq_out[(15 - i) * 32+:32];
+				id_in[i] = dq_out[(15 - i) * 32+:32];
 		end
-		if ((st_q == 4'd3) && i16_q)
-			id_in[480+:32] = ldc_q[{by4, bx4}];
-		if (st_q == 4'd6)
-			id_in[480+:32] = cdc_q[k_q & 5'd3];
+		if (((st_q == 4'd3) || (st_q == 4'd4)) && i16_q)
+			id_in[0] = ldc_q[{by4, bx4}];
+		if ((st_q == 4'd7) || (st_q == 4'd8))
+			id_in[0] = cdc_q[k_q & 5'd3];
 	end
 	always @(posedge clk or negedge rst_n)
 		if (!rst_n) begin
@@ -2674,7 +2676,7 @@ module mb_recon (
 				end
 				4'd2:
 					if (!p16_ok)
-						st_q <= 4'd9;
+						st_q <= 4'd11;
 					else begin
 						begin : sv2v_autoblock_23
 							reg signed [31:0] i;
@@ -2683,37 +2685,49 @@ module mb_recon (
 						end
 						st_q <= 4'd3;
 					end
-				4'd3: begin : sv2v_autoblock_24
+				4'd3:
+					if (!i16_q && !p4_ok)
+						st_q <= 4'd11;
+					else begin
+						begin : sv2v_autoblock_24
+							reg signed [31:0] i;
+							for (i = 0; i < 16; i = i + 1)
+								begin
+									id_in_q[(15 - i) * 32+:32] <= id_in[i];
+									id_pred_q[(15 - i) * 8+:8] <= id_pred[i];
+								end
+						end
+						st_q <= 4'd4;
+					end
+				4'd4: begin : sv2v_autoblock_25
 					reg signed [31:0] px;
 					reg signed [31:0] py;
 					px = sv2v_cast_32_signed(bx4) * 4;
 					py = sv2v_cast_32_signed(by4) * 4;
-					if (!i16_q && !p4_ok)
-						st_q <= 4'd9;
+					begin : sv2v_autoblock_26
+						reg signed [31:0] y;
+						for (y = 0; y < 4; y = y + 1)
+							begin : sv2v_autoblock_27
+								reg signed [31:0] x;
+								for (x = 0; x < 4; x = x + 1)
+									rec_y[(255 - ((((py + y) * 16) + px) + x)) * 8+:8] <= id_out[(15 - ((y * 4) + x)) * 8+:8];
+							end
+					end
+					if (k_q == 5'd15) begin
+						k_q <= 1'sb0;
+						comp_q <= 1'b0;
+						st_q <= 4'd5;
+					end
 					else begin
-						begin : sv2v_autoblock_25
-							reg signed [31:0] y;
-							for (y = 0; y < 4; y = y + 1)
-								begin : sv2v_autoblock_26
-									reg signed [31:0] x;
-									for (x = 0; x < 4; x = x + 1)
-										rec_y[(255 - ((((py + y) * 16) + px) + x)) * 8+:8] <= id_out[(15 - ((y * 4) + x)) * 8+:8];
-								end
-						end
-						if (k_q == 5'd15) begin
-							k_q <= 1'sb0;
-							comp_q <= 1'b0;
-							st_q <= 4'd4;
-						end
-						else
-							k_q <= k_q + 5'd1;
+						k_q <= k_q + 5'd1;
+						st_q <= 4'd3;
 					end
 				end
-				4'd4:
+				4'd5:
 					if (!pch_ok)
-						st_q <= 4'd9;
+						st_q <= 4'd11;
 					else if (!comp_q) begin
-						begin : sv2v_autoblock_27
+						begin : sv2v_autoblock_28
 							reg signed [31:0] i;
 							for (i = 0; i < 64; i = i + 1)
 								rec_u[(63 - i) * 8+:8] <= pch[(63 - i) * 8+:8];
@@ -2721,42 +2735,53 @@ module mb_recon (
 						comp_q <= 1'b1;
 					end
 					else begin
-						begin : sv2v_autoblock_28
+						begin : sv2v_autoblock_29
 							reg signed [31:0] i;
 							for (i = 0; i < 64; i = i + 1)
 								rec_v[(63 - i) * 8+:8] <= pch[(63 - i) * 8+:8];
 						end
 						comp_q <= 1'b0;
 						k_q <= 1'sb0;
-						st_q <= (cbp_q[5:4] != 2'd0 ? 4'd5 : 4'd7);
+						st_q <= (cbp_q[5:4] != 2'd0 ? 4'd6 : 4'd9);
 					end
-				4'd5: begin
-					begin : sv2v_autoblock_29
+				4'd6: begin
+					begin : sv2v_autoblock_30
 						reg signed [31:0] i;
 						for (i = 0; i < 4; i = i + 1)
 							cdc_q[i] <= cdc_out[(3 - i) * 32+:32];
 					end
 					k_q <= 1'sb0;
-					st_q <= 4'd6;
+					st_q <= 4'd7;
 				end
-				4'd6: begin : sv2v_autoblock_30
+				4'd7: begin
+					begin : sv2v_autoblock_31
+						reg signed [31:0] i;
+						for (i = 0; i < 16; i = i + 1)
+							begin
+								id_in_q[(15 - i) * 32+:32] <= id_in[i];
+								id_pred_q[(15 - i) * 8+:8] <= id_pred[i];
+							end
+					end
+					st_q <= 4'd8;
+				end
+				4'd8: begin : sv2v_autoblock_32
 					reg signed [31:0] px;
 					reg signed [31:0] py;
 					px = (sv2v_cast_32_signed(k_q) & 1) * 4;
 					py = ((sv2v_cast_32_signed(k_q) >> 1) & 1) * 4;
-					if (comp_q) begin : sv2v_autoblock_31
+					if (comp_q) begin : sv2v_autoblock_33
 						reg signed [31:0] y;
 						for (y = 0; y < 4; y = y + 1)
-							begin : sv2v_autoblock_32
+							begin : sv2v_autoblock_34
 								reg signed [31:0] x;
 								for (x = 0; x < 4; x = x + 1)
 									rec_v[(63 - ((((py + y) * 8) + px) + x)) * 8+:8] <= id_out[(15 - ((y * 4) + x)) * 8+:8];
 							end
 					end
-					else begin : sv2v_autoblock_33
+					else begin : sv2v_autoblock_35
 						reg signed [31:0] y;
 						for (y = 0; y < 4; y = y + 1)
-							begin : sv2v_autoblock_34
+							begin : sv2v_autoblock_36
 								reg signed [31:0] x;
 								for (x = 0; x < 4; x = x + 1)
 									rec_u[(63 - ((((py + y) * 8) + px) + x)) * 8+:8] <= id_out[(15 - ((y * 4) + x)) * 8+:8];
@@ -2764,17 +2789,19 @@ module mb_recon (
 					end
 					if (k_q == 5'd3) begin
 						if (comp_q)
-							st_q <= 4'd7;
+							st_q <= 4'd9;
 						else begin
 							comp_q <= 1'b1;
-							st_q <= 4'd5;
+							st_q <= 4'd6;
 						end
 					end
-					else
+					else begin
 						k_q <= k_q + 5'd1;
+						st_q <= 4'd7;
+					end
 				end
-				4'd7: begin
-					begin : sv2v_autoblock_35
+				4'd9: begin
+					begin : sv2v_autoblock_37
 						reg signed [31:0] i;
 						for (i = 0; i < 16; i = i + 1)
 							begin
@@ -2782,7 +2809,7 @@ module mb_recon (
 								left_y[i] <= rec_y[(255 - ((i * 16) + 15)) * 8+:8];
 							end
 					end
-					begin : sv2v_autoblock_36
+					begin : sv2v_autoblock_38
 						reg signed [31:0] i;
 						for (i = 0; i < 8; i = i + 1)
 							begin
@@ -2792,13 +2819,13 @@ module mb_recon (
 								left_v[i] <= rec_v[(63 - ((i * 8) + 7)) * 8+:8];
 							end
 					end
-					st_q <= 4'd8;
+					st_q <= 4'd10;
 				end
-				4'd8: begin
-					begin : sv2v_autoblock_37
+				4'd10: begin
+					begin : sv2v_autoblock_39
 						reg signed [31:0] b;
 						for (b = 0; b < 27; b = b + 1)
-							begin : sv2v_autoblock_38
+							begin : sv2v_autoblock_40
 								reg signed [31:0] i;
 								for (i = 0; i < 16; i = i + 1)
 									cram[b][i] <= 1'sb0;
@@ -2806,8 +2833,8 @@ module mb_recon (
 					end
 					st_q <= 4'd0;
 				end
-				4'd9: st_q <= 4'd9;
-				default: st_q <= 4'd9;
+				4'd11: st_q <= 4'd11;
+				default: st_q <= 4'd11;
 			endcase
 		end
 	initial _sv2v_0 = 0;

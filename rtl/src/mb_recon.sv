@@ -92,8 +92,8 @@ module mb_recon #(
     logic       have_left, have_top;
 
     typedef enum logic [3:0] {
-        S_IDLE, S_LDC, S_YPRED16, S_YBLK, S_CPRED, S_CDC, S_CBLK,
-        S_UPD, S_OUT, S_ERR
+        S_IDLE, S_LDC, S_YPRED16, S_YBLK, S_YBLK_WR, S_CPRED, S_CDC,
+        S_CBLK, S_CBLK_WR, S_UPD, S_OUT, S_ERR
     } state_e;
     state_e st_q;
     logic [4:0] k_q;
@@ -130,13 +130,17 @@ module mb_recon #(
     logic signed [15:0] dq_in [16];
     logic signed [31:0] dq_out [16];
     logic [5:0] dq_qp;
-    assign dq_qp = (st_q == S_CBLK) ? qpc : qp_q;
+    assign dq_qp = (st_q == S_CBLK || st_q == S_CBLK_WR) ? qpc : qp_q;
     dequant4x4 u_dq (.c(dq_in), .qp(dq_qp), .d(dq_out));
 
+    // R4a pipeline cut: dequant/prediction results latch one cycle
+    // before the IDCT+clip-add stage, halving the critical path.
     logic signed [31:0] id_in [16];
     logic [7:0] id_pred [16];
+    logic signed [31:0] id_in_q [16];
+    logic [7:0] id_pred_q [16];
     logic [7:0] id_out [16];
-    idct4x4_add u_id (.d(id_in), .pred(id_pred), .out(id_out));
+    idct4x4_add u_id (.d(id_in_q), .pred(id_pred_q), .out(id_out));
 
     // ---- intra predictors ----
     // I4x4 neighbors for block k_q, from rec_y / line buffers
@@ -240,7 +244,7 @@ module mb_recon #(
             dq_in[i] = '0;
             id_pred[i] = '0;
         end
-        if (st_q == S_YBLK) begin
+        if (st_q == S_YBLK || st_q == S_YBLK_WR) begin
             int px, py;
             px = int'(bx4) * 4;
             py = int'(by4) * 4;
@@ -250,7 +254,7 @@ module mb_recon #(
                 for (int x = 0; x < 4; x++)
                     id_pred[y*4+x] = i16_q ? rec_y[(py+y)*16 + px+x]
                                            : p4[y*4+x];
-        end else if (st_q == S_CBLK) begin
+        end else if (st_q == S_CBLK || st_q == S_CBLK_WR) begin
             int px, py;
             px = (int'(k_q) & 1) * 4;
             py = ((int'(k_q) >> 1) & 1) * 4;
@@ -264,9 +268,9 @@ module mb_recon #(
     end
     always_comb begin
         for (int i = 0; i < 16; i++) id_in[i] = dq_out[i];
-        if (st_q == S_YBLK && i16_q)
+        if ((st_q == S_YBLK || st_q == S_YBLK_WR) && i16_q)
             id_in[0] = ldc_q[{by4, bx4}];          // raster DC position
-        if (st_q == S_CBLK)
+        if (st_q == S_CBLK || st_q == S_CBLK_WR)
             id_in[0] = cdc_q[k_q & 5'd3];
     end
 
@@ -327,24 +331,33 @@ module mb_recon #(
             end
 
             S_YBLK: begin
-                // every luma block runs through idct_add: a no-cbp block
-                // has an all-zero cram (cleared at S_OUT), so the add is
-                // identity for I4x4 and DC-only for I16.
+                // latch phase: dequant + prediction registered for the
+                // IDCT stage (every block passes through; zero cram makes
+                // the add identity for I4x4, DC-only for I16)
+                if (!i16_q && !p4_ok) st_q <= S_ERR;
+                else begin
+                    for (int i = 0; i < 16; i++) begin
+                        id_in_q[i] <= id_in[i];
+                        id_pred_q[i] <= id_pred[i];
+                    end
+                    st_q <= S_YBLK_WR;
+                end
+            end
+
+            S_YBLK_WR: begin
                 int px, py;
                 px = int'(bx4) * 4;
                 py = int'(by4) * 4;
-                if (!i16_q && !p4_ok) st_q <= S_ERR;
-                else begin
-                    for (int y = 0; y < 4; y++)
-                        for (int x = 0; x < 4; x++)
-                            rec_y[(py+y)*16 + px+x] <= id_out[y*4+x];
-                    if (k_q == 5'd15) begin
-                        k_q <= '0;
-                        comp_q <= 1'b0;
-                        st_q <= S_CPRED;
-                    end else begin
-                        k_q <= k_q + 5'd1;
-                    end
+                for (int y = 0; y < 4; y++)
+                    for (int x = 0; x < 4; x++)
+                        rec_y[(py+y)*16 + px+x] <= id_out[y*4+x];
+                if (k_q == 5'd15) begin
+                    k_q <= '0;
+                    comp_q <= 1'b0;
+                    st_q <= S_CPRED;
+                end else begin
+                    k_q <= k_q + 5'd1;
+                    st_q <= S_YBLK;
                 end
             end
 
@@ -368,6 +381,14 @@ module mb_recon #(
             end
 
             S_CBLK: begin
+                for (int i = 0; i < 16; i++) begin
+                    id_in_q[i] <= id_in[i];
+                    id_pred_q[i] <= id_pred[i];
+                end
+                st_q <= S_CBLK_WR;
+            end
+
+            S_CBLK_WR: begin
                 int px, py;
                 px = (int'(k_q) & 1) * 4;
                 py = ((int'(k_q) >> 1) & 1) * 4;
@@ -387,6 +408,7 @@ module mb_recon #(
                     end
                 end else begin
                     k_q <= k_q + 5'd1;
+                    st_q <= S_CBLK;
                 end
             end
 

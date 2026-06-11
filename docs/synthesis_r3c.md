@@ -34,9 +34,22 @@ cd syn && make sv2v && make synth
 ```
 （.lib 不入库：从 jpeg_by_claude_code/syn/asap7/ 拷贝，见 syn/README.md）
 
-## 下一步（R4 候选）
+## R4a — IDCT 流水级（已完成）
 
-1. 行缓冲/cram SRAM 化 + FF 削减
-2. dequant→IDCT 一级流水（300 MHz+ 收敛）
-3. cavlc_block 每拍一语法元素（去 `!req_valid` 等待拍）
-4. deblock_frame 流式行缓冲重构 + 并入综合
+dequant/intra 预测结果在进入 IDCT+clip-add 前打一级寄存
+（S_YBLK/S_CBLK 拆 latch+write 两拍），把关键路径从
+cram→dequant→IDCT→clip 全组合链切成两半：
+
+| 指标 | R3c 基线 | R4a 流水 |
+|---|---|---|
+| 关键路径 | 3491 ps（286 MHz） | **3332.6 ps（300 MHz，WNS +0.4 ps）** |
+| 面积 | 44,680 µm² | 44,830 µm²（+0.3%） |
+| 周期代价 | — | +1 拍/4x4 块（~24 拍/MB） |
+
+回归零退步：mb-regress 40/40、top-regress 38/38。
+
+## 下一步（R4 余项）
+
+1. 行缓冲/cram SRAM 化 + FF 削减（49K FF 的大头）
+2. cavlc_block 每拍一语法元素（去 `!req_valid` 等待拍，吞吐 ×2）
+3. deblock_frame 流式行缓冲重构 + 并入综合
