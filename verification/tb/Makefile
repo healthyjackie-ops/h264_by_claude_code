@@ -119,3 +119,13 @@ dbe:
 	./obj_dir_dbe/Vdeblock_edge
 
 .PHONY: dbe
+
+dbf:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module deblock_frame \
+	  -CFLAGS "-O2" -Mdir obj_dir_dbf \
+	  -I$(REPO)/rtl/include -I$(RTL_DIR) \
+	  $(RTL_DIR)/deblock_frame.sv $(RTL_DIR)/deblock_edge.sv \
+	  tb_deblock_frame.cpp
+	@echo "built; run with args"
+
+.PHONY: dbf
