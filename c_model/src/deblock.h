@@ -25,7 +25,8 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         const uint8_t *mb_cat,
                         const uint8_t *nzL,
                         const int16_t *mv_x, const int16_t *mv_y,
-                        const int8_t *mb_ref,
+                        const int16_t *mv1_x, const int16_t *mv1_y,
+                        const int32_t *ref_poc0, const int32_t *ref_poc1,
                         int chroma_qp_offset, int second_chroma_qp_offset);
 
 #endif

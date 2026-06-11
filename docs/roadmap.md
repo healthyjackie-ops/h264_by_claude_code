@@ -81,9 +81,22 @@ padded 尺寸。
 |---|---|---|
 | **16** ✅ | 显式加权预测（pred_weight_table 解析 + 8.4.2.3.2 单向加权应用于 MC 输出，per-ref luma/chroma w/o）；high profile P 的 inter 8x8 变换（transform_size_8x8_flag 条件 = 分区全 ≥8x8 且 cbp_luma≠0，CAVLC interleave / CABAC cat5，dequant 走 w8[1] inter 列表） | 10/10 phase16（渐隐序列断言 weighted Y >0%，实测全 100%）；全语料 155/155 |
 
+## Wave 9 — B 帧
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **17a** ✅ | POC（8.2.1.1 MSB 滚动/IDR 重置）、输出按 POC 重排、DPB 带运动场 + POC、B slice header、list0/list1 按 POC 分组（8.2.4.2） | 155/155 恒等回归 |
+| **17b** ✅ | B MB 层：B/sub mb_type 全表（双熵，CABAC ctx27-32/36-39、intra 后缀 base32）、双向 MC 平均、spatial direct（min-ref/colZero corner/directZero，inference=1）、B_Skip（ctx24）、deblock bS 改 POC 集合比较（双预测两种配对） | 14/14 phase17；全语料 169/169 |
+
+范围钉：--b-pyramid none、--direct spatial（temporal 拒）、--no-weightb。
+
+教训：(1) B 的 cabac_init 也要选 PB 表（只判 is_p 漏了 B → 首 decision 状态错）；
+(2) 16x8/8x16/B_8x8 的 L1-only 分区在 list0 mvd pass 不写运动 → 第二分区
+的 list1 预测把它当"未解码"——跳过分支必须落定哨兵（mb_ref -2 → -1）。
+
 | 项 | 备注 |
 |---|---|
-| B 帧 | list1 + POC 输出重排 + direct 模式 + 双向平均 |
+| temporal direct / b-pyramid | colocated MV 缩放 + B 参考帧 |
 | 加权预测 | pred_weight_table |
 | ASO | first_mb 乱序（mb_avail 已就绪，解析序需重排） |
 | RTL | I 帧子集起步 |

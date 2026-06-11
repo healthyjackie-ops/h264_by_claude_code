@@ -106,11 +106,23 @@ static void filter_edge(uint8_t *q0p, ptrdiff_t pstep, ptrdiff_t lstep,
     }
 }
 
-/* Boundary strength for the edge between 4x4 blocks p=(px,py), q=(qx,qy)
- * (8.7.2.1, frame coding, single reference). */
+#define DB_POC_NONE INT32_MIN
+
+static int mv_far(int16_t ax, int16_t ay, int16_t bx, int16_t by) {
+    int dx = ax - bx, dy = ay - by;
+    if (dx < 0) dx = -dx;
+    if (dy < 0) dy = -dy;
+    return dx >= 4 || dy >= 4;
+}
+
+/* Boundary strength for the edge between 4x4 blocks p and q (8.7.2.1).
+ * Each block carries up to two predictions identified by reference POC;
+ * different reference sets give 1, equal sets compare motion (with both
+ * pairings tried when a block predicts twice from the same picture). */
 static int edge_bs(uint32_t mb_w, const uint8_t *mb_cat, const uint8_t *nzL,
                    const int16_t *mv_x, const int16_t *mv_y,
-                   const int8_t *mb_ref,
+                   const int16_t *mv1_x, const int16_t *mv1_y,
+                   const int32_t *poc0, const int32_t *poc1,
                    int px, int py, int qx, int qy, int mb_edge) {
     uint32_t bw = mb_w * 4;
     uint32_t pi = (uint32_t)py * bw + (uint32_t)px;
@@ -119,13 +131,49 @@ static int edge_bs(uint32_t mb_w, const uint8_t *mb_cat, const uint8_t *nzL,
     int q_intra = mb_cat[((uint32_t)qy >> 2) * mb_w + ((uint32_t)qx >> 2)] < 3;
     if (p_intra || q_intra) return mb_edge ? 4 : 3;
     if (nzL[pi] || nzL[qi]) return 2;
-    if (mb_ref[pi] != mb_ref[qi]) return 1;
-    int dx = mv_x[pi] - mv_x[qi];
-    int dy = mv_y[pi] - mv_y[qi];
-    if (dx < 0) dx = -dx;
-    if (dy < 0) dy = -dy;
-    if (dx >= 4 || dy >= 4) return 1;
-    return 0;
+
+    int32_t ppoc[2];
+    int16_t pmx[2], pmy[2];
+    int np = 0;
+    if (poc0[pi] != DB_POC_NONE) {
+        ppoc[np] = poc0[pi]; pmx[np] = mv_x[pi]; pmy[np] = mv_y[pi]; np++;
+    }
+    if (poc1[pi] != DB_POC_NONE) {
+        ppoc[np] = poc1[pi]; pmx[np] = mv1_x[pi]; pmy[np] = mv1_y[pi]; np++;
+    }
+    int32_t qpoc[2];
+    int16_t qmx[2], qmy[2];
+    int nq = 0;
+    if (poc0[qi] != DB_POC_NONE) {
+        qpoc[nq] = poc0[qi]; qmx[nq] = mv_x[qi]; qmy[nq] = mv_y[qi]; nq++;
+    }
+    if (poc1[qi] != DB_POC_NONE) {
+        qpoc[nq] = poc1[qi]; qmx[nq] = mv1_x[qi]; qmy[nq] = mv1_y[qi]; nq++;
+    }
+    if (np != nq) return 1;
+    if (np == 1) {
+        if (ppoc[0] != qpoc[0]) return 1;
+        return mv_far(pmx[0], pmy[0], qmx[0], qmy[0]) ? 1 : 0;
+    }
+    /* two predictions each: sets must match */
+    int direct_set = (ppoc[0] == qpoc[0] && ppoc[1] == qpoc[1]);
+    int cross_set = (ppoc[0] == qpoc[1] && ppoc[1] == qpoc[0]);
+    if (!direct_set && !cross_set) return 1;
+    if (ppoc[0] != ppoc[1]) {
+        /* distinct pictures: exactly one valid pairing */
+        if (direct_set) {
+            return (mv_far(pmx[0], pmy[0], qmx[0], qmy[0]) ||
+                    mv_far(pmx[1], pmy[1], qmx[1], qmy[1])) ? 1 : 0;
+        }
+        return (mv_far(pmx[0], pmy[0], qmx[1], qmy[1]) ||
+                mv_far(pmx[1], pmy[1], qmx[0], qmy[0])) ? 1 : 0;
+    }
+    /* same picture twice: either pairing may pass */
+    int pair_a = !(mv_far(pmx[0], pmy[0], qmx[0], qmy[0]) ||
+                   mv_far(pmx[1], pmy[1], qmx[1], qmy[1]));
+    int pair_b = !(mv_far(pmx[0], pmy[0], qmx[1], qmy[1]) ||
+                   mv_far(pmx[1], pmy[1], qmx[0], qmy[0]));
+    return (pair_a || pair_b) ? 0 : 1;
 }
 
 void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
@@ -139,7 +187,8 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         const uint8_t *mb_cat,
                         const uint8_t *nzL,
                         const int16_t *mv_x, const int16_t *mv_y,
-                        const int8_t *mb_ref,
+                        const int16_t *mv1_x, const int16_t *mv1_y,
+                        const int32_t *ref_poc0, const int32_t *ref_poc1,
                         int chroma_qp_offset, int second_chroma_qp_offset) {
     for (uint32_t mby = 0; mby < mb_h; mby++) {
     for (uint32_t mbx = 0; mbx < mb_w; mbx++) {
@@ -182,7 +231,8 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         px = qx;
                         py = qy - 1;
                     }
-                    bs4[s] = edge_bs(mb_w, mb_cat, nzL, mv_x, mv_y, mb_ref,
+                    bs4[s] = edge_bs(mb_w, mb_cat, nzL, mv_x, mv_y,
+                                     mv1_x, mv1_y, ref_poc0, ref_poc1,
                                      px, py, qx, qy, e == 0);
                     tc04[s] = (bs4[s] > 0 && bs4[s] < 4)
                                   ? TC0[ia][bs4[s] - 1] : 0;
@@ -216,7 +266,8 @@ void h264_deblock_frame(uint8_t *Y, uint8_t *U, uint8_t *V,
                         px = qx;
                         py = qy - 1;
                     }
-                    cbs4[s] = edge_bs(mb_w, mb_cat, nzL, mv_x, mv_y, mb_ref,
+                    cbs4[s] = edge_bs(mb_w, mb_cat, nzL, mv_x, mv_y,
+                                      mv1_x, mv1_y, ref_poc0, ref_poc1,
                                       px, py, qx, qy, e == 0);
                 }
                 for (int comp = 0; comp < 2; comp++) {

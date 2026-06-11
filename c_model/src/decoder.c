@@ -69,12 +69,19 @@ typedef struct {
     uint8_t *cbf_cdc[2];       /* chroma DC cbf per MB */
     uint8_t *mb_t8;            /* transform_size_8x8_flag per MB */
     uint16_t *mb_slice;        /* owning slice index per MB (0xFFFF = none) */
-    int16_t *mv_x, *mv_y;      /* per 4x4 block, quarter-pel */
-    int8_t *mb_ref;            /* per 4x4: 0 = ref0, -1 = intra/none */
+    int16_t *mv_x, *mv_y;      /* per 4x4 block, quarter-pel (list0) */
+    int8_t *mb_ref;            /* per 4x4: list0 ref, -1 = intra/none */
+    int16_t *mv1_x, *mv1_y;    /* list1 motion (B) */
+    int8_t *mb_ref1;
+    uint8_t *blk_direct;       /* per 4x4: decoded via direct (B ctxInc) */
+    int32_t *ref_poc0, *ref_poc1; /* per 4x4 POC of each prediction, or
+                                   * POC_NONE — deblock bS compares these */
     uint8_t *mb_skip;          /* per MB: decoded as skipped (CABAC ctx) */
+    uint8_t *mb_bdirect;       /* per MB: B_Skip/B_Direct_16x16 (ctxInc) */
     int n_refs;                /* list0 length (most recent first) */
     const slice_hdr_t *wp_sh;  /* active slice (weighted prediction) */
     uint8_t *mvd_ax, *mvd_ay;  /* per 4x4: |mvd| clipped to 70 (mvd ctxInc) */
+    uint8_t *mvd1_ax, *mvd1_ay;
     const dpb_ent_t *list0[8];           /* ordered reference lists */
     const dpb_ent_t *list1[8];
     int n_l1;
@@ -86,6 +93,8 @@ typedef struct {
 static int clip3(int lo, int hi, int v) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
+
+#define POC_NONE INT32_MIN
 
 /* An MB neighbor is available iff it is inside the picture AND belongs to
  * the same slice (6.4.9; raster order makes decoded-before implicit). */
@@ -207,29 +216,29 @@ static uint32_t cabac_cbp(cabac_t *cb, const ictx_t *c, int sid,
 }
 
 /* mb_skip_flag (P): ctx 11 + available-and-not-skipped neighbors. */
-static int cabac_mb_skip(cabac_t *cb, const ictx_t *c, int sid,
+static int cabac_mb_skip(cabac_t *cb, const ictx_t *c, int sid, int is_b,
                          uint32_t mbx, uint32_t mby) {
     int inc = 0;
     if (mb_avail(c, sid, (int)mbx - 1, (int)mby) &&
         !c->mb_skip[mby * c->mb_w + mbx - 1]) inc++;
     if (mb_avail(c, sid, (int)mbx, (int)mby - 1) &&
         !c->mb_skip[(mby - 1) * c->mb_w + mbx]) inc++;
-    return cabac_decision(cb, 11 + inc);
+    return cabac_decision(cb, (is_b ? 24 : 11) + inc);
 }
 
 /* Intra mb_type suffix at base ctx 17 (P slices): bin0@17, terminate for
  * PCM, cbpL@18, cbpC@19/19, pred@20/20 — per ffmpeg
  * decode_cabac_intra_mb_type(ctx_base=17, intra_slice=0). */
-static uint32_t cabac_mb_type_I_suffix17(cabac_t *cb) {
-    if (cabac_decision(cb, 17) == 0) return 0;     /* I_4x4 */
+static uint32_t cabac_mb_type_I_suffix(cabac_t *cb, int base) {
+    if (cabac_decision(cb, base) == 0) return 0;   /* I_4x4 */
     if (cabac_terminate(cb)) return 25;            /* I_PCM */
     uint32_t mt = 1;
-    mt += 12u * (uint32_t)cabac_decision(cb, 18);
-    if (cabac_decision(cb, 19)) {
-        mt += 4u * (1u + (uint32_t)cabac_decision(cb, 19));
+    mt += 12u * (uint32_t)cabac_decision(cb, base + 1);
+    if (cabac_decision(cb, base + 2)) {
+        mt += 4u * (1u + (uint32_t)cabac_decision(cb, base + 2));
     }
-    mt += 2u * (uint32_t)cabac_decision(cb, 20);
-    mt += (uint32_t)cabac_decision(cb, 20);
+    mt += 2u * (uint32_t)cabac_decision(cb, base + 3);
+    mt += (uint32_t)cabac_decision(cb, base + 3);
     return mt;
 }
 
@@ -237,12 +246,55 @@ static uint32_t cabac_mb_type_I_suffix17(cabac_t *cb) {
  * inter (4 = P_8x8ref0 never produced), >=5 means 5 + intra mb_type. */
 static uint32_t cabac_p_mb_type(cabac_t *cb) {
     if (cabac_decision(cb, 14)) {
-        return 5 + cabac_mb_type_I_suffix17(cb);
+        return 5 + cabac_mb_type_I_suffix(cb, 17);
     }
     if (cabac_decision(cb, 15) == 0) {
         return cabac_decision(cb, 16) ? 3u : 0u;   /* P_8x8 : 16x16 */
     }
     return cabac_decision(cb, 17) ? 1u : 2u;       /* 16x8 : 8x16 */
+}
+
+/* B mb_type tree (ctx 27..32); >=23 means 23 + intra mb_type. */
+static uint32_t cabac_b_mb_type(cabac_t *cb, const ictx_t *c, int sid,
+                                uint32_t mbx, uint32_t mby) {
+    int inc = 0;
+    if (mb_avail(c, sid, (int)mbx - 1, (int)mby) &&
+        !c->mb_bdirect[mby * c->mb_w + mbx - 1]) inc++;
+    if (mb_avail(c, sid, (int)mbx, (int)mby - 1) &&
+        !c->mb_bdirect[(mby - 1) * c->mb_w + mbx]) inc++;
+    if (!cabac_decision(cb, 27 + inc)) return 0;   /* B_Direct_16x16 */
+    if (!cabac_decision(cb, 30)) {
+        return 1 + (uint32_t)cabac_decision(cb, 32);
+    }
+    uint32_t bits;
+    bits = (uint32_t)cabac_decision(cb, 31) << 3;
+    bits |= (uint32_t)cabac_decision(cb, 32) << 2;
+    bits |= (uint32_t)cabac_decision(cb, 32) << 1;
+    bits |= (uint32_t)cabac_decision(cb, 32);
+    if (bits < 8) return bits + 3;
+    if (bits == 13) return 23 + cabac_mb_type_I_suffix(cb, 32);
+    if (bits == 14) return 11;
+    if (bits == 15) return 22;
+    bits = (bits << 1) | (uint32_t)cabac_decision(cb, 32);
+    return bits - 4;
+}
+
+/* B sub_mb_type (ctx 36..39), Table 7-18 indices. */
+static uint32_t cabac_b_sub_type(cabac_t *cb) {
+    if (!cabac_decision(cb, 36)) return 0;         /* B_Direct_8x8 */
+    if (!cabac_decision(cb, 37)) {
+        return 1 + (uint32_t)cabac_decision(cb, 39);
+    }
+    uint32_t type = 3;
+    if (cabac_decision(cb, 38)) {
+        if (cabac_decision(cb, 39)) {
+            return 11 + (uint32_t)cabac_decision(cb, 39);
+        }
+        type += 4;
+    }
+    type += 2u * (uint32_t)cabac_decision(cb, 39);
+    type += (uint32_t)cabac_decision(cb, 39);
+    return type;
 }
 
 /* sub_mb_type (P): ctx 21..23. */
@@ -469,16 +521,22 @@ static const uint8_t golomb_to_inter_cbp[48] = {
  * with mv/ref when the block is available AND already decoded; intra
  * blocks yield mv=(0,0) ref=-1. ref==-2 marks not-yet-decoded blocks of
  * the current MB. */
-static int mv_nbr(const ictx_t *c, int sid, int gx, int gy,
+static int mv_nbr(const ictx_t *c, int list, int sid, int gx, int gy,
                   int16_t *mx, int16_t *my, int *ref) {
     *mx = 0; *my = 0; *ref = -1;
     if (!blk4_avail(c, sid, gx, gy)) return 0;
     uint32_t bw = c->mb_w * 4;
     uint32_t gi = (uint32_t)gy * bw + (uint32_t)gx;
     if (c->mb_ref[gi] == -2) return 0;             /* undecoded (this MB) */
-    *mx = c->mv_x[gi];
-    *my = c->mv_y[gi];
-    *ref = c->mb_ref[gi];
+    if (list == 0) {
+        *mx = c->mv_x[gi];
+        *my = c->mv_y[gi];
+        *ref = c->mb_ref[gi];
+    } else {
+        *mx = c->mv1_x[gi];
+        *my = c->mv1_y[gi];
+        *ref = c->mb_ref1[gi];
+    }
     return 1;
 }
 
@@ -490,15 +548,16 @@ static int med3(int a, int b, int cc) {
 
 /* Luma MV prediction (8.4.1.3): partition at (gx,gy) of w4*h4 4x4 units.
  * ptype: 0 normal, 1/2 = 16x8 top/bottom, 3/4 = 8x16 left/right. */
-static void mv_pred(const ictx_t *c, int sid, int gx, int gy, int w4,
-                    int ptype, int cur_ref, int16_t *pmx, int16_t *pmy) {
+static void mv_pred(const ictx_t *c, int list, int sid, int gx, int gy,
+                    int w4, int ptype, int cur_ref,
+                    int16_t *pmx, int16_t *pmy) {
     int16_t ax, ay, bx, by, cx, cy;
     int ar, br, cr;
-    int has_a = mv_nbr(c, sid, gx - 1, gy, &ax, &ay, &ar);
-    int has_b = mv_nbr(c, sid, gx, gy - 1, &bx, &by, &br);
-    int has_c = mv_nbr(c, sid, gx + w4, gy - 1, &cx, &cy, &cr);
+    int has_a = mv_nbr(c, list, sid, gx - 1, gy, &ax, &ay, &ar);
+    int has_b = mv_nbr(c, list, sid, gx, gy - 1, &bx, &by, &br);
+    int has_c = mv_nbr(c, list, sid, gx + w4, gy - 1, &cx, &cy, &cr);
     if (!has_c) {
-        has_c = mv_nbr(c, sid, gx - 1, gy - 1, &cx, &cy, &cr);   /* D */
+        has_c = mv_nbr(c, list, sid, gx - 1, gy - 1, &cx, &cy, &cr);
     }
 
     /* Directional special cases (8.4.1.3, matching reference). */
@@ -540,34 +599,81 @@ static void wp_apply(uint8_t *dst, size_t stride, int bw, int bh,
     }
 }
 
-static void inter_pred_part(ictx_t *c, int ref, int gx, int gy,
-                            int w4, int h4, int16_t mvx, int16_t mvy) {
+/* MC one direction of one partition into dst planes (frame or temp). */
+static void mc_one(const ictx_t *c, const dpb_ent_t *rf, int gx, int gy,
+                   int w4, int h4, int16_t mvx, int16_t mvy,
+                   uint8_t *dy, size_t dys, uint8_t *du, uint8_t *dv,
+                   size_t dcs) {
+    int lx = gx * 4, ly = gy * 4;
+    int pw = (int)c->ls, phh = (int)(c->mb_h * 16);
+    h264_mc_luma(rf->Y, c->ls, pw, phh,
+                 lx + (mvx >> 2), ly + (mvy >> 2), mvx & 3, mvy & 3,
+                 dy, dys, w4 * 4, h4 * 4);
+    int cx = gx * 2, cy = gy * 2;
+    int cw = (int)c->cs, chh = (int)(c->mb_h * 8);
+    h264_mc_chroma(rf->U, c->cs, cw, chh,
+                   cx + (mvx >> 3), cy + (mvy >> 3), mvx & 7, mvy & 7,
+                   du, dcs, w4 * 2, h4 * 2);
+    h264_mc_chroma(rf->V, c->cs, cw, chh,
+                   cx + (mvx >> 3), cy + (mvy >> 3), mvx & 7, mvy & 7,
+                   dv, dcs, w4 * 2, h4 * 2);
+}
+
+static void avg_block(uint8_t *dst, size_t ds, const uint8_t *src,
+                      size_t ss, int w, int h) {
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) {
+            uint8_t *d = dst + (size_t)j * ds + (size_t)i;
+            *d = (uint8_t)((*d + src[(size_t)j * ss + (size_t)i] + 1) >> 1);
+        }
+}
+
+/* Predict one partition. mode: 1 = L0, 2 = L1, 3 = Bi (default average).
+ * Writes both lists' motion bookkeeping and the per-block POCs. */
+static void inter_pred_lx(ictx_t *c, int mode, int r0, int r1,
+                          int gx, int gy, int w4, int h4,
+                          int16_t m0x, int16_t m0y,
+                          int16_t m1x, int16_t m1y) {
     uint32_t bw = c->mb_w * 4;
     for (int j = 0; j < h4; j++)
         for (int i = 0; i < w4; i++) {
             uint32_t gi = (uint32_t)(gy + j) * bw + (uint32_t)(gx + i);
-            c->mv_x[gi] = mvx;
-            c->mv_y[gi] = mvy;
-            c->mb_ref[gi] = (int8_t)ref;
+            c->mv_x[gi] = (mode & 1) ? m0x : 0;
+            c->mv_y[gi] = (mode & 1) ? m0y : 0;
+            c->mb_ref[gi] = (mode & 1) ? (int8_t)r0 : -1;
+            c->mv1_x[gi] = (mode & 2) ? m1x : 0;
+            c->mv1_y[gi] = (mode & 2) ? m1y : 0;
+            c->mb_ref1[gi] = (mode & 2) ? (int8_t)r1 : -1;
+            c->ref_poc0[gi] = (mode & 1) ? c->list0[r0]->poc : POC_NONE;
+            c->ref_poc1[gi] = (mode & 2) ? c->list1[r1]->poc : POC_NONE;
         }
-    int lx = gx * 4, ly = gy * 4;
-    int pw = (int)c->ls, phh = (int)(c->mb_h * 16);
-    h264_mc_luma(c->list0[ref]->Y, c->ls, pw, phh,
-                 lx + (mvx >> 2), ly + (mvy >> 2), mvx & 3, mvy & 3,
-                 c->Y + (size_t)ly * c->ls + (size_t)lx, c->ls,
-                 w4 * 4, h4 * 4);
-    int cx = gx * 2, cy = gy * 2;
-    int cw = (int)c->cs, chh = (int)(c->mb_h * 8);
-    h264_mc_chroma(c->list0[ref]->U, c->cs, cw, chh,
-                   cx + (mvx >> 3), cy + (mvy >> 3), mvx & 7, mvy & 7,
-                   c->U + (size_t)cy * c->cs + (size_t)cx, c->cs,
-                   w4 * 2, h4 * 2);
-    h264_mc_chroma(c->list0[ref]->V, c->cs, cw, chh,
-                   cx + (mvx >> 3), cy + (mvy >> 3), mvx & 7, mvy & 7,
-                   c->V + (size_t)cy * c->cs + (size_t)cx, c->cs,
-                   w4 * 2, h4 * 2);
+    uint8_t *fy = c->Y + (size_t)gy * 4 * c->ls + (size_t)gx * 4;
+    uint8_t *fu = c->U + (size_t)gy * 2 * c->cs + (size_t)gx * 2;
+    uint8_t *fv = c->V + (size_t)gy * 2 * c->cs + (size_t)gx * 2;
+    if (mode == 1 || mode == 3) {
+        mc_one(c, c->list0[r0], gx, gy, w4, h4, m0x, m0y,
+               fy, c->ls, fu, fv, c->cs);
+    } else {
+        mc_one(c, c->list1[r1], gx, gy, w4, h4, m1x, m1y,
+               fy, c->ls, fu, fv, c->cs);
+    }
+    if (mode == 3) {
+        uint8_t ty[256], tu[64], tv[64];
+        mc_one(c, c->list1[r1], gx, gy, w4, h4, m1x, m1y,
+               ty, 16, tu, tv, 8);
+        avg_block(fy, c->ls, ty, 16, w4 * 4, h4 * 4);
+        avg_block(fu, c->cs, tu, 8, w4 * 2, h4 * 2);
+        avg_block(fv, c->cs, tv, 8, w4 * 2, h4 * 2);
+    }
+}
+
+/* P-path wrapper: list0 only, with explicit weighting. */
+static void inter_pred_part(ictx_t *c, int ref, int gx, int gy,
+                            int w4, int h4, int16_t mvx, int16_t mvy) {
+    inter_pred_lx(c, 1, ref, 0, gx, gy, w4, h4, mvx, mvy, 0, 0);
     const slice_hdr_t *sh = c->wp_sh;
     if (sh && sh->wp) {
+        int lx = gx * 4, ly = gy * 4, cx = gx * 2, cy = gy * 2;
         wp_apply(c->Y + (size_t)ly * c->ls + (size_t)lx, c->ls,
                  w4 * 4, h4 * 4, sh->lw[ref], sh->lo[ref],
                  sh->luma_log2_denom);
@@ -580,14 +686,78 @@ static void inter_pred_part(ictx_t *c, int ref, int gx, int gy,
     }
 }
 
+static void store_mvd(ictx_t *c, int list, int gx, int gy, int w4, int h4,
+                      int adx, int ady);
+
+/* B spatial direct (8.4.1.2.2, direct_8x8_inference=1): one ref/mv pair
+ * per list from 16x16 neighbors, per-8x8 colZero from the colocated
+ * corner block of list1[0]. Marks blocks direct with zero mvd. */
+static void b_spatial_direct(ictx_t *c, int sid, uint32_t mbx, uint32_t mby,
+                             int gx, int gy, int w4, int h4) {
+    (void)mbx; (void)mby;
+    int gx0 = (gx >> 2) << 2, gy0 = (gy >> 2) << 2;   /* MB origin */
+    int r0 = -1, r1 = -1;
+    for (int list = 0; list < 2; list++) {
+        int rmin = -1;
+        int16_t nx, ny;
+        int nr;
+        mv_nbr(c, list, sid, gx0 - 1, gy0, &nx, &ny, &nr);
+        if (nr >= 0) rmin = nr;
+        mv_nbr(c, list, sid, gx0, gy0 - 1, &nx, &ny, &nr);
+        if (nr >= 0 && (rmin < 0 || nr < rmin)) rmin = nr;
+        if (!mv_nbr(c, list, sid, gx0 + 4, gy0 - 1, &nx, &ny, &nr)) {
+            mv_nbr(c, list, sid, gx0 - 1, gy0 - 1, &nx, &ny, &nr);
+        }
+        if (nr >= 0 && (rmin < 0 || nr < rmin)) rmin = nr;
+        if (list == 0) r0 = rmin; else r1 = rmin;
+    }
+    int direct_zero = (r0 < 0 && r1 < 0);
+    int16_t m0x = 0, m0y = 0, m1x = 0, m1y = 0;
+    int mode;
+    if (direct_zero) {
+        r0 = 0; r1 = 0;
+        mode = 3;
+    } else {
+        if (r0 >= 0) mv_pred(c, 0, sid, gx0, gy0, 4, 0, r0, &m0x, &m0y);
+        if (r1 >= 0) mv_pred(c, 1, sid, gx0, gy0, 4, 0, r1, &m1x, &m1y);
+        mode = (r0 >= 0 ? 1 : 0) | (r1 >= 0 ? 2 : 0);
+    }
+    const dpb_ent_t *col = c->list1[0];
+    uint32_t bw = c->mb_w * 4;
+    /* Cover the requested area in 8x8 quanta (16x16 direct: 4 of them;
+     * B_Direct_8x8: exactly one). */
+    for (int by = gy; by < gy + h4; by += 2)
+    for (int bx2 = gx; bx2 < gx + w4; bx2 += 2) {
+        int ccx = gx0 + (((bx2 - gx0) >> 1) ? 3 : 0);
+        int ccy = gy0 + (((by - gy0) >> 1) ? 3 : 0);
+        uint32_t ci = (uint32_t)ccy * bw + (uint32_t)ccx;
+        int16_t cmx = col->mvx[ci], cmy = col->mvy[ci];
+        int colzero = col->ref[ci] == 0 &&
+                      cmx >= -1 && cmx <= 1 && cmy >= -1 && cmy <= 1;
+        int16_t b0x = m0x, b0y = m0y, b1x = m1x, b1y = m1y;
+        if (!direct_zero && colzero) {
+            if (r0 == 0) { b0x = 0; b0y = 0; }
+            if (r1 == 0) { b1x = 0; b1y = 0; }
+        }
+        inter_pred_lx(c, mode, r0 < 0 ? 0 : r0, r1 < 0 ? 0 : r1,
+                      bx2, by, 2, 2, b0x, b0y, b1x, b1y);
+        for (int j = 0; j < 2; j++)
+            for (int i = 0; i < 2; i++)
+                c->blk_direct[(uint32_t)(by + j) * bw +
+                              (uint32_t)(bx2 + i)] = 1;
+        store_mvd(c, 0, bx2, by, 2, 2, 0, 0);
+        store_mvd(c, 1, bx2, by, 2, 2, 0, 0);
+    }
+}
+
 /* P_Skip (8.4.1.1): 16x16 prediction with the zero-forcing conditions. */
 static void p_skip_mv(const ictx_t *c, int sid, uint32_t mbx, uint32_t mby,
                       int16_t *mx, int16_t *my) {
     int gx = (int)(mbx * 4), gy = (int)(mby * 4);
     int16_t ax, ay, bx, by;
     int ar, br;
-    int has_a = mv_nbr(c, sid, gx - 1, gy, &ax, &ay, &ar);
-    int has_b = mv_nbr(c, sid, gx, gy - 1, &bx, &by, &br);
+    int has_a = mv_nbr(c, 0, sid, gx - 1, gy, &ax, &ay, &ar);
+    int has_b = mv_nbr(c, 0, sid, gx, gy - 1, &bx, &by, &br);
     if (!has_a || !has_b ||
         (ar == 0 && ax == 0 && ay == 0) ||
         (br == 0 && bx == 0 && by == 0)) {
@@ -595,13 +765,13 @@ static void p_skip_mv(const ictx_t *c, int sid, uint32_t mbx, uint32_t mby,
         *my = 0;
         return;
     }
-    mv_pred(c, sid, gx, gy, 4, 0, 0, mx, my);
+    mv_pred(c, 0, sid, gx, gy, 4, 0, 0, mx, my);
 }
 
 /* ref_idx_l0 (9.3.3.1.1.6 / te(v)). CABAC: bin0 at ctx 54 + condA +
  * 2*condB (cond = neighbor ref > 0), unary continuation at 58 then 59. */
 static int read_ref_idx(bs_t *bs, cabac_t *cb, int use_cabac,
-                        const ictx_t *c, int sid, int gx, int gy,
+                        const ictx_t *c, int list, int sid, int gx, int gy,
                         int num_ref, uint32_t *err) {
     if (num_ref <= 1) return 0;
     if (!use_cabac) {
@@ -611,11 +781,14 @@ static int read_ref_idx(bs_t *bs, cabac_t *cb, int use_cabac,
         return (int)v;
     }
     uint32_t bw = c->mb_w * 4;
+    const int8_t *refs = (list == 0) ? c->mb_ref : c->mb_ref1;
     int inc = 0;
     if (blk4_avail(c, sid, gx - 1, gy) &&
-        c->mb_ref[(uint32_t)gy * bw + (uint32_t)(gx - 1)] > 0) inc += 1;
+        refs[(uint32_t)gy * bw + (uint32_t)(gx - 1)] > 0 &&
+        !c->blk_direct[(uint32_t)gy * bw + (uint32_t)(gx - 1)]) inc += 1;
     if (blk4_avail(c, sid, gx, gy - 1) &&
-        c->mb_ref[(uint32_t)(gy - 1) * bw + (uint32_t)gx] > 0) inc += 2;
+        refs[(uint32_t)(gy - 1) * bw + (uint32_t)gx] > 0 &&
+        !c->blk_direct[(uint32_t)(gy - 1) * bw + (uint32_t)gx]) inc += 2;
     if (!cabac_decision(cb, 54 + inc)) return 0;
     int v = 1;
     if (cabac_decision(cb, 58)) {
@@ -632,7 +805,7 @@ static int read_ref_idx(bs_t *bs, cabac_t *cb, int use_cabac,
  * decoded clipped magnitudes are stored over the partition area by the
  * caller via store_mvd(). */
 static int read_mvd_pair(bs_t *bs, cabac_t *cb, int use_cabac,
-                         const ictx_t *c, int sid, int gx, int gy,
+                         const ictx_t *c, int list, int sid, int gx, int gy,
                          int16_t *dx, int16_t *dy, int *adx, int *ady,
                          uint32_t *err) {
     if (!use_cabac) {
@@ -644,16 +817,18 @@ static int read_mvd_pair(bs_t *bs, cabac_t *cb, int use_cabac,
         return 0;
     }
     uint32_t bw = c->mb_w * 4;
+    const uint8_t *max_ = (list == 0) ? c->mvd_ax : c->mvd1_ax;
+    const uint8_t *may_ = (list == 0) ? c->mvd_ay : c->mvd1_ay;
     int ax = 0, ay = 0, bx2 = 0, by2 = 0;
     if (blk4_avail(c, sid, gx - 1, gy) &&
         c->mb_ref[(uint32_t)gy * bw + (uint32_t)(gx - 1)] != -2) {
-        ax = c->mvd_ax[(uint32_t)gy * bw + (uint32_t)(gx - 1)];
-        ay = c->mvd_ay[(uint32_t)gy * bw + (uint32_t)(gx - 1)];
+        ax = max_[(uint32_t)gy * bw + (uint32_t)(gx - 1)];
+        ay = may_[(uint32_t)gy * bw + (uint32_t)(gx - 1)];
     }
     if (blk4_avail(c, sid, gx, gy - 1) &&
         c->mb_ref[(uint32_t)(gy - 1) * bw + (uint32_t)gx] != -2) {
-        bx2 = c->mvd_ax[(uint32_t)(gy - 1) * bw + (uint32_t)gx];
-        by2 = c->mvd_ay[(uint32_t)(gy - 1) * bw + (uint32_t)gx];
+        bx2 = max_[(uint32_t)(gy - 1) * bw + (uint32_t)gx];
+        by2 = may_[(uint32_t)(gy - 1) * bw + (uint32_t)gx];
     }
     int r1 = cabac_mvd(cb, 40, ax + bx2, dx, err);
     if (r1 < 0) return -1;
@@ -664,14 +839,16 @@ static int read_mvd_pair(bs_t *bs, cabac_t *cb, int use_cabac,
     return 0;
 }
 
-static void store_mvd(ictx_t *c, int gx, int gy, int w4, int h4,
+static void store_mvd(ictx_t *c, int list, int gx, int gy, int w4, int h4,
                       int adx, int ady) {
     uint32_t bw = c->mb_w * 4;
+    uint8_t *max_ = (list == 0) ? c->mvd_ax : c->mvd1_ax;
+    uint8_t *may_ = (list == 0) ? c->mvd_ay : c->mvd1_ay;
     for (int j = 0; j < h4; j++)
         for (int i = 0; i < w4; i++) {
             uint32_t gi = (uint32_t)(gy + j) * bw + (uint32_t)(gx + i);
-            c->mvd_ax[gi] = (uint8_t)adx;
-            c->mvd_ay[gi] = (uint8_t)ady;
+            max_[gi] = (uint8_t)adx;
+            may_[gi] = (uint8_t)ady;
         }
 }
 
@@ -729,8 +906,17 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     c.mv_y = (int16_t *)calloc((size_t)bw * bh, sizeof(int16_t));
     c.mb_ref = (int8_t *)malloc((size_t)bw * bh);
     c.mb_skip = (uint8_t *)calloc(nmbs, 1);
+    c.mb_bdirect = (uint8_t *)calloc(nmbs, 1);
     c.mvd_ax = (uint8_t *)calloc((size_t)bw * bh, 1);
     c.mvd_ay = (uint8_t *)calloc((size_t)bw * bh, 1);
+    c.mv1_x = (int16_t *)calloc((size_t)bw * bh, sizeof(int16_t));
+    c.mv1_y = (int16_t *)calloc((size_t)bw * bh, sizeof(int16_t));
+    c.mb_ref1 = (int8_t *)malloc((size_t)bw * bh);
+    c.blk_direct = (uint8_t *)calloc((size_t)bw * bh, 1);
+    c.ref_poc0 = (int32_t *)malloc((size_t)bw * bh * sizeof(int32_t));
+    c.ref_poc1 = (int32_t *)malloc((size_t)bw * bh * sizeof(int32_t));
+    c.mvd1_ax = (uint8_t *)calloc((size_t)bw * bh, 1);
+    c.mvd1_ay = (uint8_t *)calloc((size_t)bw * bh, 1);
     /* Reference list initialization. P list0: most recent first — the
      * DPB order. B list0: POC < cur descending, then POC > cur
      * ascending; list1 mirrored (8.2.4.2). */
@@ -755,8 +941,10 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             c.n_l1 = n1;
         }
     }
-    int ok = c.mv_x && c.mv_y && c.mb_ref && c.mb_skip && c.mvd_ax &&
-             c.mvd_ay &&
+    int ok = c.mv_x && c.mv_y && c.mb_ref && c.mb_skip && c.mb_bdirect &&
+             c.mvd_ax &&
+             c.mvd_ay && c.mv1_x && c.mv1_y && c.mb_ref1 && c.blk_direct &&
+             c.ref_poc0 && c.ref_poc1 && c.mvd1_ax && c.mvd1_ay &&
              c.Y && c.U && c.V && c.i4_mode && c.nzL && c.nzC[0] &&
              c.nzC[1] && c.mb_qp && c.mb_cat && c.mb_cmode && c.mb_cbp &&
              c.cbf_l && c.cbf_ldc && c.cbf_c[0] && c.cbf_c[1] &&
@@ -765,6 +953,11 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     if (ok) {
         memset(c.mb_slice, 0xFF, nmbs * sizeof(uint16_t));
         memset(c.mb_ref, 0xFF, (size_t)bw * bh);   /* -1 = intra/none */
+        memset(c.mb_ref1, 0xFF, (size_t)bw * bh);
+        for (uint32_t i = 0; i < (size_t)bw * bh; i++) {
+            c.ref_poc0[i] = POC_NONE;
+            c.ref_poc1[i] = POC_NONE;
+        }
     }
     if (!ok) {
         out->err = H264_ERR_INTERNAL;
@@ -779,14 +972,22 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     uint32_t total_mbs = c.mb_w * c.mb_h;
     uint32_t mbs_done = 0;
     for (int s = 0; s < nslices; s++) {
-        if (ents[s].sh.is_b) {                /* B slices arrive in 17b */
-            out->err = H264_ERR_UNSUP;
-            goto fail;
-        }
         if (ents[s].sh.is_p &&
             (c.n_refs < 1 || ents[s].sh.num_ref_l0 > (uint32_t)c.n_refs)) {
             out->err = H264_ERR_BAD_STREAM;   /* P needs its references */
             goto fail;
+        }
+        if (ents[s].sh.is_b) {
+            if (!ents[s].sh.direct_spatial) {  /* temporal direct: later */
+                out->err = H264_ERR_UNSUP;
+                goto fail;
+            }
+            if (c.n_refs < 1 || c.n_l1 < 1 ||
+                ents[s].sh.num_ref_l0 > (uint32_t)c.n_refs ||
+                ents[s].sh.num_ref_l1 > (uint32_t)c.n_l1) {
+                out->err = H264_ERR_BAD_STREAM;
+                goto fail;
+            }
         }
     }
 
@@ -807,7 +1008,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     if (use_cabac) {
         bs_byte_align(bs);             /* cabac_alignment_one_bit(s) */
         cabac_init(&cbx, bs->data, bs->size, bs->byte, qp,
-                   sh->is_p ? sh->cabac_init_idc : -1);
+                   (sh->is_p || sh->is_b) ? sh->cabac_init_idc : -1);
     }
 
     uint32_t addr = sh->first_mb;
@@ -829,10 +1030,10 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         }
 
         int this_skip = 0;
-        if (sh->is_p && use_cabac) {
-            this_skip = cabac_mb_skip(&cbx, &c, sid, mbx, mby);
+        if ((sh->is_p || sh->is_b) && use_cabac) {
+            this_skip = cabac_mb_skip(&cbx, &c, sid, sh->is_b, mbx, mby);
             if (cbx.error) { out->err = H264_ERR_TRUNC; goto fail; }
-        } else if (sh->is_p) {
+        } else if (sh->is_p || sh->is_b) {
             if (skip_run < 0) skip_run = (int)bs_ue(bs);
             if (bs->error) { out->err = H264_ERR_TRUNC; goto fail; }
             if (skip_run > 0) {
@@ -843,10 +1044,16 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             }
         }
         if (this_skip) {
-            int16_t smx, smy;
-            p_skip_mv(&c, sid, mbx, mby, &smx, &smy);
-            inter_pred_part(&c, 0, (int)(mbx * 4), (int)(mby * 4), 4, 4,
-                            smx, smy);
+            if (sh->is_b) {
+                b_spatial_direct(&c, sid, mbx, mby,
+                                 (int)(mbx * 4), (int)(mby * 4), 4, 4);
+                c.mb_bdirect[mby * c.mb_w + mbx] = 1;
+            } else {
+                int16_t smx, smy;
+                p_skip_mv(&c, sid, mbx, mby, &smx, &smy);
+                inter_pred_part(&c, 0, (int)(mbx * 4), (int)(mby * 4), 4, 4,
+                                smx, smy);
+            }
             for (int k = 0; k < 16; k++) {
                 uint32_t gx2 = mbx * 4 + zscan_x[k];
                 uint32_t gy2 = mby * 4 + zscan_y[k];
@@ -871,9 +1078,13 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             goto mb_done;
         }
         uint32_t mb_type;
-        int is_inter = 0;
+        int is_inter = 0;                  /* 1 = P inter, 2 = B inter */
         if (use_cabac) {
-            if (sh->is_p) {
+            if (sh->is_b) {
+                mb_type = cabac_b_mb_type(&cbx, &c, sid, mbx, mby);
+                if (mb_type < 23) is_inter = 2;
+                else mb_type -= 23;
+            } else if (sh->is_p) {
                 mb_type = cabac_p_mb_type(&cbx);
                 if (mb_type < 5) {
                     is_inter = 1;
@@ -887,7 +1098,10 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         } else {
             mb_type = bs_ue(bs);
             if (bs->error) { out->err = H264_ERR_TRUNC; goto fail; }
-            if (sh->is_p) {
+            if (sh->is_b) {
+                if (mb_type < 23) is_inter = 2;
+                else mb_type -= 23;
+            } else if (sh->is_p) {
                 if (mb_type < 5) {
                     is_inter = 1;
                 } else {
@@ -909,16 +1123,281 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             int adx, ady;
             int all_sub8x8 = 1;
             int nref = (int)sh->num_ref_l0;
+            if (is_inter == 2) {
+                /* ---- B macroblock (Table 7-14) ---- */
+                int nref1 = (int)sh->num_ref_l1;
+                static const uint8_t bpair[9][2] = {
+                    {1,1},{2,2},{1,2},{2,1},{1,3},{2,3},{3,1},{3,2},{3,3}
+                };
+                if (mb_type == 0) {                /* B_Direct_16x16 */
+                    b_spatial_direct(&c, sid, mbx, mby, gx0, gy0, 4, 4);
+                    c.mb_bdirect[mby * c.mb_w + mbx] = 1;
+                } else if (mb_type <= 3) {         /* 16x16 L0/L1/Bi */
+                    int mode = (int)mb_type;       /* 1,2,3 */
+                    int r0 = 0, r1 = 0;
+                    int16_t m0x = 0, m0y = 0, m1x = 0, m1y = 0;
+                    if (mode & 1) {
+                        r0 = read_ref_idx(bs, &cbx, use_cabac, &c, 0, sid,
+                                          gx0, gy0, nref, &out->err);
+                        if (r0 < 0) goto fail;
+                    }
+                    if (mode & 2) {
+                        r1 = read_ref_idx(bs, &cbx, use_cabac, &c, 1, sid,
+                                          gx0, gy0, nref1, &out->err);
+                        if (r1 < 0) goto fail;
+                    }
+                    int16_t pmx2, pmy2;
+                    if (mode & 1) {
+                        if (read_mvd_pair(bs, &cbx, use_cabac, &c, 0, sid,
+                                          gx0, gy0, &dx, &dy, &adx, &ady,
+                                          &out->err)) goto fail;
+                        mv_pred(&c, 0, sid, gx0, gy0, 4, 0, r0, &pmx2, &pmy2);
+                        m0x = (int16_t)(pmx2 + dx);
+                        m0y = (int16_t)(pmy2 + dy);
+                        store_mvd(&c, 0, gx0, gy0, 4, 4, adx, ady);
+                    } else {
+                        store_mvd(&c, 0, gx0, gy0, 4, 4, 0, 0);
+                    }
+                    if (mode & 2) {
+                        if (read_mvd_pair(bs, &cbx, use_cabac, &c, 1, sid,
+                                          gx0, gy0, &dx, &dy, &adx, &ady,
+                                          &out->err)) goto fail;
+                        mv_pred(&c, 1, sid, gx0, gy0, 4, 0, r1, &pmx2, &pmy2);
+                        m1x = (int16_t)(pmx2 + dx);
+                        m1y = (int16_t)(pmy2 + dy);
+                        store_mvd(&c, 1, gx0, gy0, 4, 4, adx, ady);
+                    } else {
+                        store_mvd(&c, 1, gx0, gy0, 4, 4, 0, 0);
+                    }
+                    inter_pred_lx(&c, mode, r0, r1, gx0, gy0, 4, 4,
+                                  m0x, m0y, m1x, m1y);
+                } else if (mb_type <= 21) {        /* two partitions */
+                    int pair = (int)(mb_type - 4) >> 1;
+                    int is8x16 = (int)(mb_type - 4) & 1;
+                    int w4 = is8x16 ? 2 : 4, h4 = is8x16 ? 4 : 2;
+                    int rr[2][2] = {{0, 0}, {0, 0}};
+                    /* refs: l0 both parts, then l1 both parts (7.3.5.1) */
+                    for (int list = 0; list < 2; list++) {
+                        for (int part = 0; part < 2; part++) {
+                            int mode = bpair[pair][part];
+                            if (!(mode & (1 << list))) continue;
+                            int px = is8x16 ? gx0 + part * 2 : gx0;
+                            int py = is8x16 ? gy0 : gy0 + part * 2;
+                            int rv = read_ref_idx(bs, &cbx, use_cabac, &c,
+                                                  list, sid, px, py,
+                                                  list ? nref1 : nref,
+                                                  &out->err);
+                            if (rv < 0) goto fail;
+                            rr[list][part] = rv;
+                        }
+                    }
+                    /* mvds in the same list-major order; remember both
+                     * partitions' mvs, predict as we go per list. */
+                    int16_t mv[2][2][2];
+                    memset(mv, 0, sizeof(mv));
+                    for (int list = 0; list < 2; list++) {
+                        for (int part = 0; part < 2; part++) {
+                            int mode = bpair[pair][part];
+                            int px = is8x16 ? gx0 + part * 2 : gx0;
+                            int py = is8x16 ? gy0 : gy0 + part * 2;
+                            if (!(mode & (1 << list))) {
+                                store_mvd(&c, list, px, py, w4, h4, 0, 0);
+                                if (list == 0) {
+                                    /* settle the undecoded sentinel: this
+                                     * partition has no L0 prediction but IS
+                                     * decoded — the second partition's L1
+                                     * prediction must see it */
+                                    for (int j = 0; j < h4; j++)
+                                        for (int i = 0; i < w4; i++) {
+                                            uint32_t gi =
+                                                (uint32_t)(py + j) * bw +
+                                                (uint32_t)(px + i);
+                                            c.mb_ref[gi] = -1;
+                                            c.mv_x[gi] = 0;
+                                            c.mv_y[gi] = 0;
+                                        }
+                                }
+                                continue;
+                            }
+                            if (read_mvd_pair(bs, &cbx, use_cabac, &c, list,
+                                              sid, px, py, &dx, &dy,
+                                              &adx, &ady, &out->err))
+                                goto fail;
+                            int16_t pmx2, pmy2;
+                            mv_pred(&c, list, sid, px, py, w4,
+                                    (is8x16 ? 3 : 1) + part, rr[list][part],
+                                    &pmx2, &pmy2);
+                            mv[list][part][0] = (int16_t)(pmx2 + dx);
+                            mv[list][part][1] = (int16_t)(pmy2 + dy);
+                            store_mvd(&c, list, px, py, w4, h4, adx, ady);
+                            /* partial motion write so the second
+                             * partition's prediction sees this one */
+                            for (int j = 0; j < h4; j++)
+                                for (int i = 0; i < w4; i++) {
+                                    uint32_t gi =
+                                        (uint32_t)(py + j) * bw +
+                                        (uint32_t)(px + i);
+                                    if (list == 0) {
+                                        c.mv_x[gi] = mv[0][part][0];
+                                        c.mv_y[gi] = mv[0][part][1];
+                                        c.mb_ref[gi] = (int8_t)rr[0][part];
+                                    } else {
+                                        c.mv1_x[gi] = mv[1][part][0];
+                                        c.mv1_y[gi] = mv[1][part][1];
+                                        c.mb_ref1[gi] = (int8_t)rr[1][part];
+                                    }
+                                }
+                        }
+                    }
+                    for (int part = 0; part < 2; part++) {
+                        int mode = bpair[pair][part];
+                        int px = is8x16 ? gx0 + part * 2 : gx0;
+                        int py = is8x16 ? gy0 : gy0 + part * 2;
+                        inter_pred_lx(&c, mode, rr[0][part], rr[1][part],
+                                      px, py, w4, h4,
+                                      mv[0][part][0], mv[0][part][1],
+                                      mv[1][part][0], mv[1][part][1]);
+                    }
+                } else {                           /* B_8x8 */
+                    static const struct { uint8_t mode, w4, h4, nsub; }
+                    bsub[13] = {
+                        {0, 2, 2, 1}, {1, 2, 2, 1}, {2, 2, 2, 1},
+                        {3, 2, 2, 1}, {1, 2, 1, 2}, {1, 1, 2, 2},
+                        {2, 2, 1, 2}, {2, 1, 2, 2}, {3, 2, 1, 2},
+                        {3, 1, 2, 2}, {1, 1, 1, 4}, {2, 1, 1, 4},
+                        {3, 1, 1, 4}
+                    };
+                    uint32_t sub[4];
+                    int r8b[2][4] = {{0}, {0}};
+                    for (int b = 0; b < 4; b++) {
+                        sub[b] = use_cabac ? cabac_b_sub_type(&cbx)
+                                           : bs_ue(bs);
+                        if (sub[b] > 12) {
+                            out->err = H264_ERR_BAD_STREAM;
+                            goto fail;
+                        }
+                        if (sub[b] >= 4) all_sub8x8 = 0;
+                    }
+                    for (int list = 0; list < 2; list++) {
+                        for (int b = 0; b < 4; b++) {
+                            if (sub[b] == 0) continue;
+                            if (!(bsub[sub[b]].mode & (1 << list))) continue;
+                            int bx0 = gx0 + (b & 1) * 2;
+                            int by0 = gy0 + (b >> 1) * 2;
+                            int rv = read_ref_idx(bs, &cbx, use_cabac, &c,
+                                                  list, sid, bx0, by0,
+                                                  list ? nref1 : nref,
+                                                  &out->err);
+                            if (rv < 0) goto fail;
+                            r8b[list][b] = rv;
+                            for (int j = 0; j < 2; j++)
+                                for (int i = 0; i < 2; i++) {
+                                    uint32_t gi =
+                                        (uint32_t)(by0 + j) * bw +
+                                        (uint32_t)(bx0 + i);
+                                    if (list == 0)
+                                        c.mb_ref[gi] = (int8_t)rv;
+                                    else
+                                        c.mb_ref1[gi] = (int8_t)rv;
+                                }
+                        }
+                    }
+                    /* direct sub-blocks predict first (no syntax) */
+                    for (int b = 0; b < 4; b++) {
+                        if (sub[b] != 0) continue;
+                        int bx0 = gx0 + (b & 1) * 2;
+                        int by0 = gy0 + (b >> 1) * 2;
+                        b_spatial_direct(&c, sid, mbx, mby, bx0, by0, 2, 2);
+                    }
+                    int16_t smv[2][4][4][2];       /* [list][8x8][sub] */
+                    memset(smv, 0, sizeof(smv));
+                    for (int list = 0; list < 2; list++) {
+                        for (int b = 0; b < 4; b++) {
+                            if (sub[b] == 0) continue;
+                            int mode = bsub[sub[b]].mode;
+                            int w4 = bsub[sub[b]].w4, h4 = bsub[sub[b]].h4;
+                            int nsub = bsub[sub[b]].nsub;
+                            int bx0 = gx0 + (b & 1) * 2;
+                            int by0 = gy0 + (b >> 1) * 2;
+                            for (int s = 0; s < nsub; s++) {
+                                int sx = bx0 + ((w4 == 1) ? (s & 1) : 0);
+                                int sy = by0;
+                                if (h4 == 1) sy += s;
+                                else if (w4 == 1 && h4 == 2) sy += 0;
+                                if (w4 == 1 && h4 == 1) sy = by0 + (s >> 1);
+                                if (!(mode & (1 << list))) {
+                                    store_mvd(&c, list, sx, sy, w4, h4, 0, 0);
+                                    if (list == 0) {
+                                        for (int j = 0; j < h4; j++)
+                                            for (int i = 0; i < w4; i++) {
+                                                uint32_t gi =
+                                                    (uint32_t)(sy + j) * bw +
+                                                    (uint32_t)(sx + i);
+                                                c.mb_ref[gi] = -1;
+                                                c.mv_x[gi] = 0;
+                                                c.mv_y[gi] = 0;
+                                            }
+                                    }
+                                    continue;
+                                }
+                                if (read_mvd_pair(bs, &cbx, use_cabac, &c,
+                                                  list, sid, sx, sy,
+                                                  &dx, &dy, &adx, &ady,
+                                                  &out->err)) goto fail;
+                                int16_t pmx2, pmy2;
+                                mv_pred(&c, list, sid, sx, sy, w4, 0,
+                                        r8b[list][b], &pmx2, &pmy2);
+                                smv[list][b][s][0] = (int16_t)(pmx2 + dx);
+                                smv[list][b][s][1] = (int16_t)(pmy2 + dy);
+                                store_mvd(&c, list, sx, sy, w4, h4,
+                                          adx, ady);
+                                for (int j = 0; j < h4; j++)
+                                    for (int i = 0; i < w4; i++) {
+                                        uint32_t gi =
+                                            (uint32_t)(sy + j) * bw +
+                                            (uint32_t)(sx + i);
+                                        if (list == 0) {
+                                            c.mv_x[gi] = smv[0][b][s][0];
+                                            c.mv_y[gi] = smv[0][b][s][1];
+                                        } else {
+                                            c.mv1_x[gi] = smv[1][b][s][0];
+                                            c.mv1_y[gi] = smv[1][b][s][1];
+                                        }
+                                    }
+                            }
+                        }
+                    }
+                    for (int b = 0; b < 4; b++) {
+                        if (sub[b] == 0) continue;
+                        int mode = bsub[sub[b]].mode;
+                        int w4 = bsub[sub[b]].w4, h4 = bsub[sub[b]].h4;
+                        int nsub = bsub[sub[b]].nsub;
+                        int bx0 = gx0 + (b & 1) * 2;
+                        int by0 = gy0 + (b >> 1) * 2;
+                        for (int s = 0; s < nsub; s++) {
+                            int sx = bx0 + ((w4 == 1) ? (s & 1) : 0);
+                            int sy = by0;
+                            if (h4 == 1) sy += s;
+                            if (w4 == 1 && h4 == 1) sy = by0 + (s >> 1);
+                            inter_pred_lx(&c, mode,
+                                          r8b[0][b], r8b[1][b],
+                                          sx, sy, w4, h4,
+                                          smv[0][b][s][0], smv[0][b][s][1],
+                                          smv[1][b][s][0], smv[1][b][s][1]);
+                        }
+                    }
+                }
+            } else
             if (mb_type == 0) {                    /* 16x16 */
-                int r0 = read_ref_idx(bs, &cbx, use_cabac, &c, sid,
+                int r0 = read_ref_idx(bs, &cbx, use_cabac, &c, 0, sid,
                                       gx0, gy0, nref, &out->err);
                 if (r0 < 0) goto fail;
-                if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid, gx0, gy0,
+                if (read_mvd_pair(bs, &cbx, use_cabac, &c, 0, sid, gx0, gy0,
                                   &dx, &dy, &adx, &ady, &out->err)) goto fail;
-                mv_pred(&c, sid, gx0, gy0, 4, 0, r0, &pmx, &pmy);
+                mv_pred(&c, 0, sid, gx0, gy0, 4, 0, r0, &pmx, &pmy);
                 inter_pred_part(&c, r0, gx0, gy0, 4, 4,
                                 (int16_t)(pmx + dx), (int16_t)(pmy + dy));
-                store_mvd(&c, gx0, gy0, 4, 4, adx, ady);
+                store_mvd(&c, 0, gx0, gy0, 4, 4, adx, ady);
             } else if (mb_type == 1 || mb_type == 2) {  /* 16x8 / 8x16 */
                 int r[2];
                 /* refs for both partitions precede both mvds (7.3.5.1).
@@ -930,7 +1409,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 for (int part = 0; part < 2; part++) {
                     int px = (mb_type == 1) ? gx0 : gx0 + part * 2;
                     int py = (mb_type == 1) ? gy0 + part * 2 : gy0;
-                    r[part] = read_ref_idx(bs, &cbx, use_cabac, &c, sid,
+                    r[part] = read_ref_idx(bs, &cbx, use_cabac, &c, 0, sid,
                                            px, py, nref, &out->err);
                     if (r[part] < 0) goto fail;
                     int w4 = (mb_type == 1) ? 4 : 2;
@@ -943,17 +1422,18 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 for (int part = 0; part < 2; part++) {
                     int px = (mb_type == 1) ? gx0 : gx0 + part * 2;
                     int py = (mb_type == 1) ? gy0 + part * 2 : gy0;
-                    if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid, px, py,
-                                      &dx, &dy, &adx, &ady, &out->err))
+                    if (read_mvd_pair(bs, &cbx, use_cabac, &c, 0, sid,
+                                      px, py, &dx, &dy, &adx, &ady,
+                                      &out->err))
                         goto fail;
-                    mv_pred(&c, sid, px, py, (mb_type == 1) ? 4 : 2,
+                    mv_pred(&c, 0, sid, px, py, (mb_type == 1) ? 4 : 2,
                             (mb_type == 1 ? 1 : 3) + part, r[part],
                             &pmx, &pmy);
                     inter_pred_part(&c, r[part], px, py,
                                     (mb_type == 1) ? 4 : 2,
                                     (mb_type == 1) ? 2 : 4,
                                     (int16_t)(pmx + dx), (int16_t)(pmy + dy));
-                    store_mvd(&c, px, py, (mb_type == 1) ? 4 : 2,
+                    store_mvd(&c, 0, px, py, (mb_type == 1) ? 4 : 2,
                               (mb_type == 1) ? 2 : 4, adx, ady);
                 }
             } else {                               /* P_8x8 / P_8x8ref0 */
@@ -970,7 +1450,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                         r8[b] = 0;
                         continue;
                     }
-                    r8[b] = read_ref_idx(bs, &cbx, use_cabac, &c, sid,
+                    r8[b] = read_ref_idx(bs, &cbx, use_cabac, &c, 0, sid,
                                          bx0, by0, nref, &out->err);
                     if (r8[b] < 0) goto fail;
                     for (int j = 0; j < 2; j++)
@@ -992,14 +1472,15 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                             sx = bx0 + (s & 1); sy = by0 + (s >> 1);
                             w4 = 1; h4 = 1;
                         }
-                        if (read_mvd_pair(bs, &cbx, use_cabac, &c, sid,
+                        if (read_mvd_pair(bs, &cbx, use_cabac, &c, 0, sid,
                                           sx, sy, &dx, &dy, &adx, &ady,
                                           &out->err)) goto fail;
-                        mv_pred(&c, sid, sx, sy, w4, 0, r8[b], &pmx, &pmy);
+                        mv_pred(&c, 0, sid, sx, sy, w4, 0, r8[b],
+                                &pmx, &pmy);
                         inter_pred_part(&c, r8[b], sx, sy, w4, h4,
                                         (int16_t)(pmx + dx),
                                         (int16_t)(pmy + dy));
-                        store_mvd(&c, sx, sy, w4, h4, adx, ady);
+                        store_mvd(&c, 0, sx, sy, w4, h4, adx, ady);
                     }
                 }
             }
@@ -1688,6 +2169,12 @@ mb_done:
                 c.mb_ref[gi] = -1;
                 c.mv_x[gi] = 0;
                 c.mv_y[gi] = 0;
+                c.mb_ref1[gi] = -1;
+                c.mv1_x[gi] = 0;
+                c.mv1_y[gi] = 0;
+                c.ref_poc0[gi] = POC_NONE;
+                c.ref_poc1[gi] = POC_NONE;
+                c.blk_direct[gi] = 0;
             }
         }
         c.mb_dbf_idc[mby * c.mb_w + mbx] = (int8_t)sh->disable_deblock;
@@ -1715,7 +2202,8 @@ mb_done:
     h264_deblock_frame(c.Y, c.U, c.V, c.ls, c.cs, c.mb_w, c.mb_h,
                        c.mb_qp, c.mb_t8, c.mb_slice,
                        c.mb_dbf_idc, c.mb_dbf_a, c.mb_dbf_b,
-                       c.mb_cat, c.nzL, c.mv_x, c.mv_y, c.mb_ref,
+                       c.mb_cat, c.nzL, c.mv_x, c.mv_y, c.mv1_x, c.mv1_y,
+                       c.ref_poc0, c.ref_poc1,
                        (int)pps->chroma_qp_offset,
                        (int)pps->second_chroma_qp_offset);
 
@@ -1761,7 +2249,9 @@ mb_done:
     free(c.cbf_l); free(c.cbf_ldc); free(c.cbf_c[0]); free(c.cbf_c[1]);
     free(c.cbf_cdc[0]); free(c.cbf_cdc[1]); free(c.mb_t8);
     free(c.mb_slice); free(c.mb_dbf_idc); free(c.mb_dbf_a); free(c.mb_dbf_b);
-    free(c.mb_skip); free(c.mvd_ax); free(c.mvd_ay);
+    free(c.mb_skip); free(c.mb_bdirect); free(c.mvd_ax); free(c.mvd_ay);
+    free(c.mv1_x); free(c.mv1_y); free(c.mb_ref1); free(c.blk_direct);
+    free(c.ref_poc0); free(c.ref_poc1); free(c.mvd1_ax); free(c.mvd1_ay);
     keep->Y = c.Y;                      /* caller keeps the padded frame */
     keep->U = c.U;
     keep->V = c.V;
@@ -1780,7 +2270,9 @@ fail:
     free(c.cbf_cdc[0]); free(c.cbf_cdc[1]); free(c.mb_t8);
     free(c.mb_slice); free(c.mb_dbf_idc); free(c.mb_dbf_a); free(c.mb_dbf_b);
     free(c.mv_x); free(c.mv_y); free(c.mb_ref);
-    free(c.mb_skip); free(c.mvd_ax); free(c.mvd_ay);
+    free(c.mb_skip); free(c.mb_bdirect); free(c.mvd_ax); free(c.mvd_ay);
+    free(c.mv1_x); free(c.mv1_y); free(c.mb_ref1); free(c.blk_direct);
+    free(c.ref_poc0); free(c.ref_poc1); free(c.mvd1_ax); free(c.mvd1_ay);
     return -1;
 }
 
