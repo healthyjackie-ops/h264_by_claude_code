@@ -15,9 +15,6 @@ module expgolomb (
     logic [3:0] lz;
     always_comb begin
         lz = 4'd12;                     // sentinel: no marker found
-        for (int i = 11; i >= 0; i--) begin
-            if (show[23 - i]) lz = 4'(i);
-        end
         // priority: the FIRST set bit from the MSB side
         for (int i = 0; i <= 11; i++) begin
             if (show[23 - i]) begin

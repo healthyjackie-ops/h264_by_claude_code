@@ -1,5 +1,8 @@
 #include "cavlc.h"
 
+#include <stdio.h>
+#include <stdlib.h>
+
 #include <string.h>
 
 #include "decoder.h"
@@ -203,8 +206,58 @@ static int match_vlc(bs_t *bs, const uint8_t *len, const uint8_t *bits,
     return -1;
 }
 
+/* RTL replay log (rtl_spec.md R1b): per-block record of the raw bits
+ * consumed plus the decoded outputs, for the cavlc_block testbench. */
+static FILE *cavlc_log_file(void) {
+    static FILE *f;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        const char *path = getenv("H264_CAVLC_LOG");
+        if (path) f = fopen(path, "wb");
+    }
+    return f;
+}
+
+static int cavlc_residual_block_impl(bs_t *bs, int nC, int max_coeffs,
+                                     int16_t coefs[16], uint32_t *err);
+
 int cavlc_residual_block(bs_t *bs, int nC, int max_coeffs,
                          int16_t coefs[16], uint32_t *err) {
+    FILE *f = cavlc_log_file();
+    if (!f) return cavlc_residual_block_impl(bs, nC, max_coeffs, coefs, err);
+
+    size_t b0 = bs->byte * 8 + (size_t)bs->bit;
+    int tc = cavlc_residual_block_impl(bs, nC, max_coeffs, coefs, err);
+    if (tc < 0) return tc;
+    size_t b1 = bs->byte * 8 + (size_t)bs->bit;
+    size_t nbits = b1 - b0;
+
+    uint8_t hdr[4] = { (uint8_t)nC, (uint8_t)max_coeffs,
+                       (uint8_t)(nbits & 0xFF), (uint8_t)(nbits >> 8) };
+    fwrite(hdr, 1, 4, f);
+    size_t nbytes = (nbits + 7) / 8;
+    for (size_t i = 0; i < nbytes; i++) {
+        uint8_t v = 0;
+        for (int k = 0; k < 8; k++) {
+            size_t bit = b0 + i * 8 + (size_t)k;
+            if (bit < b1) {
+                v = (uint8_t)((v << 1) |
+                    ((bs->data[bit >> 3] >> (7 - (bit & 7))) & 1));
+            } else {
+                v = (uint8_t)(v << 1);
+            }
+        }
+        fwrite(&v, 1, 1, f);
+    }
+    uint8_t tcb = (uint8_t)tc;
+    fwrite(&tcb, 1, 1, f);
+    fwrite(coefs, sizeof(int16_t), 16, f);
+    return tc;
+}
+
+static int cavlc_residual_block_impl(bs_t *bs, int nC, int max_coeffs,
+                                     int16_t coefs[16], uint32_t *err) {
     memset(coefs, 0, 16 * sizeof(coefs[0]));
 
     int tc = 0, t1 = 0;

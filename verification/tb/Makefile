@@ -28,3 +28,13 @@ clean:
 	rm -rf obj_dir_br
 
 .PHONY: br clean
+
+cavlc:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module cavlc_top \
+	  -CFLAGS "-O2" -Mdir obj_dir_cavlc \
+	  -I$(REPO)/rtl/include \
+	  $(RTL_DIR)/cavlc_top.sv $(RTL_DIR)/bitreader.sv $(RTL_DIR)/cavlc_block.sv \
+	  tb_cavlc_block.cpp
+	./obj_dir_cavlc/Vcavlc_top /tmp/cavlc.log
+
+.PHONY: cavlc
