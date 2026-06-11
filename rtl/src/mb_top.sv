@@ -88,7 +88,7 @@ module mb_top #(
         .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_qp(cfg_qp),
         .start(start),
         .req_valid(m_req_valid), .req_bits(m_req_bits),
-        .req_ready(br_req_ready), .show(show),
+        .req_ready(br_req_ready), .show(show), .avail(avail),
         .blk_start(blk_start), .blk_chroma_dc(blk_chroma_dc),
         .blk_nc_class(blk_nc_class), .blk_maxc(blk_maxc),
         .blk_busy(blk_busy), .blk_done(blk_done), .blk_err(blk_err),

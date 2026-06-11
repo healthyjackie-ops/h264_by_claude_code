@@ -68,9 +68,24 @@ cavlc_block 的 req 从寄存输出改为组合（Mealy）：FSM 推进与 bitre
 代价：coeff_token casez → req_bits → bitreader 填充算术成为新关键路径，
 300 MHz 差一档 sizing。回归零退步：74978 块 + 40/40 + 38/38。
 
+## R4c — mb_dec 单拍化（已完成）
+
+R4b 的 Mealy 模式复制到 MB 层（mb_type/i4 模式/cmode/CBP/qp_delta 全
+1 拍，同 avail≥24 gate）。第一发全回归绿——验证模式成熟的标志。
+
+| 指标 | R4b | R4c |
+|---|---|---|
+| 关键路径 | 3353.6 ps | **3352.4 ps（持平，瓶颈仍在 cavlc req 路径）** |
+| 面积 | 44,843 µm² | 44,838 µm² |
+| 64x64 帧周期 | 4598 | 4566 |
+| 48x48 q2 帧周期 | 12728 | 12642 |
+
+头部语法收益被残差块支配（合理）；真正的吞吐余量在输入加宽与
+recon 并行化。
+
 ## 下一步（R4 余项）
 
 1. 行缓冲/cram SRAM 化 + FF 削减（49K FF 的大头）
-2. mb_dec 单拍化（与 R4b 同法）+ req 路径 sizing 收回 300 MHz
-3. 输入加宽（16/32-bit 喂入）解除填充瓶颈
+2. req 路径 sizing 收回 300 MHz
+3. 输入加宽(16/32-bit 喂入)解除填充瓶颈
 4. deblock_frame 流式行缓冲重构 + 并入综合

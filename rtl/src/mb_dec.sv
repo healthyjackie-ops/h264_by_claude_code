@@ -28,6 +28,7 @@ module mb_dec #(
     output logic [4:0]  req_bits,
     input  logic        req_ready,
     input  logic [23:0] show,
+    input  logic [6:0]  avail,
 
     // cavlc_block residual engine
     output logic        blk_start,
@@ -107,6 +108,39 @@ module mb_dec #(
     logic [4:0] nzc_left [2][2];
     logic       have_left;             // mbx>0
     logic [4:0] nzc_q [2][4];          // chroma nz this MB
+
+    // single-cycle syntax (R4c): requests combinational off the state,
+    // gated on a full window like cavlc_block
+    logic win_ok;
+    assign win_ok = (avail >= 7'd24);
+
+    always_comb begin
+        req_valid = 1'b0;
+        req_bits = '0;
+        if (win_ok) unique case (st_q)
+        S_MBTYPE: if (eg_ok) begin
+            req_valid = 1'b1;
+            req_bits = eg_len;
+        end
+        S_I4MODE: begin
+            req_valid = 1'b1;
+            req_bits = show[23] ? 5'd1 : 5'd4;
+        end
+        S_CMODE: if (eg_ok && eg_ue <= 12'd3) begin
+            req_valid = 1'b1;
+            req_bits = eg_len;
+        end
+        S_CBP: if (eg_ok && eg_ue <= 12'd47) begin
+            req_valid = 1'b1;
+            req_bits = eg_len;
+        end
+        S_QPD: if (eg_ok) begin
+            req_valid = 1'b1;
+            req_bits = eg_len;
+        end
+        default: ;
+        endcase
+    end
 
     // exp-golomb view
     logic [11:0]        eg_ue;
@@ -229,8 +263,6 @@ module mb_dec #(
         if (!rst_n) begin
             st_q <= S_IDLE;
             ret_q <= S_IDLE;
-            req_valid <= 1'b0;
-            req_bits <= '0;
             blk_start <= 1'b0;
             blk_chroma_dc <= 1'b0;
             blk_nc_class <= '0;
@@ -243,7 +275,6 @@ module mb_dec #(
             ac15_q <= 1'b0;
             cur_blk_q <= '0;
         end else begin
-            req_valid <= 1'b0;
             blk_start <= 1'b0;
 
             unique case (st_q)
@@ -255,11 +286,9 @@ module mb_dec #(
                 st_q <= S_MBTYPE;
             end
 
-            S_MBTYPE: if (!req_valid) begin
+            S_MBTYPE: if (win_ok) begin
                 if (!eg_ok) st_q <= S_ERR;
                 else begin
-                    req_valid <= 1'b1;
-                    req_bits <= eg_len;
                     if (eg_ue == 12'd0) begin
                         i16_q <= 1'b0;
                         i16m_q <= '0;          // dump field is 0 for I_4x4
@@ -281,53 +310,43 @@ module mb_dec #(
                 end
             end
 
-            S_I4MODE: if (!req_valid) begin
+            S_I4MODE: if (win_ok) begin
                 logic [3:0] mode;
                 if (show[23]) begin            // prev_intra4x4_pred_mode
                     mode = i4_pred;
-                    req_valid <= 1'b1;
-                    req_bits <= 5'd1;
                 end else begin
                     logic [3:0] rem;
                     rem = {1'b0, show[22:20]};
                     mode = (rem < i4_pred) ? rem : rem + 4'd1;
-                    req_valid <= 1'b1;
-                    req_bits <= 5'd4;
                 end
                 i4m_q[k_q] <= mode;
                 if (k_q == 4'd15) st_q <= S_CMODE;
                 k_q <= k_q + 4'd1;
             end
 
-            S_CMODE: if (!req_valid) begin
+            S_CMODE: if (win_ok) begin
                 if (!eg_ok || eg_ue > 12'd3) st_q <= S_ERR;
                 else begin
                     cmode_q <= 2'(eg_ue);
-                    req_valid <= 1'b1;
-                    req_bits <= eg_len;
                     st_q <= i16_q ? S_QPD : S_CBP;
                 end
             end
 
-            S_CBP: if (!req_valid) begin
+            S_CBP: if (win_ok) begin
                 logic [5:0] cbp;
                 cbp = cavlc_intra_cbp(6'(eg_ue));
                 if (!eg_ok || eg_ue > 12'd47 || cbp == 6'd63) st_q <= S_ERR;
                 else begin
                     cbp_q <= cbp;
-                    req_valid <= 1'b1;
-                    req_bits <= eg_len;
                     st_q <= (cbp == 6'd0) ? S_EMIT : S_QPD;
                 end
             end
 
-            S_QPD: if (!req_valid) begin
+            S_QPD: if (win_ok) begin
                 if (!eg_ok) st_q <= S_ERR;
                 else begin
                     qp_q <= 6'((13'($signed({1'b0, qp_q})) +
                                 13'(eg_se) + 13'd52) % 13'd52);
-                    req_valid <= 1'b1;
-                    req_bits <= eg_len;
                     k_q <= '0;
                     st_q <= i16_q ? S_LDC_GO : S_LAC_GO;
                 end

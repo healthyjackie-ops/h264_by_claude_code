@@ -126,6 +126,7 @@ module h264_core (
 		.req_bits(m_req_bits),
 		.req_ready(br_req_ready),
 		.show(show),
+		.avail(avail),
 		.blk_start(blk_start),
 		.blk_chroma_dc(blk_chroma_dc),
 		.blk_nc_class(blk_nc_class),
@@ -1267,6 +1268,7 @@ module mb_dec (
 	req_bits,
 	req_ready,
 	show,
+	avail,
 	blk_start,
 	blk_chroma_dc,
 	blk_nc_class,
@@ -1307,6 +1309,7 @@ module mb_dec (
 	output reg [4:0] req_bits;
 	input wire req_ready;
 	input wire [23:0] show;
+	input wire [6:0] avail;
 	output reg blk_start;
 	output reg blk_chroma_dc;
 	output reg [1:0] blk_nc_class;
@@ -1368,10 +1371,48 @@ module mb_dec (
 	reg [4:0] nzc_left [0:1][0:1];
 	reg have_left;
 	reg [4:0] nzc_q [0:1][0:3];
-	wire [11:0] eg_ue;
-	wire signed [11:0] eg_se;
+	wire win_ok;
+	assign win_ok = avail >= 7'd24;
 	wire [4:0] eg_len;
 	wire eg_ok;
+	wire [11:0] eg_ue;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		req_valid = 1'b0;
+		req_bits = 1'sb0;
+		if (win_ok)
+			(* full_case, parallel_case *)
+			case (st_q)
+				4'd1:
+					if (eg_ok) begin
+						req_valid = 1'b1;
+						req_bits = eg_len;
+					end
+				4'd2: begin
+					req_valid = 1'b1;
+					req_bits = (show[23] ? 5'd1 : 5'd4);
+				end
+				4'd3:
+					if (eg_ok && (eg_ue <= 12'd3)) begin
+						req_valid = 1'b1;
+						req_bits = eg_len;
+					end
+				4'd4:
+					if (eg_ok && (eg_ue <= 12'd47)) begin
+						req_valid = 1'b1;
+						req_bits = eg_len;
+					end
+				4'd5:
+					if (eg_ok) begin
+						req_valid = 1'b1;
+						req_bits = eg_len;
+					end
+				default:
+					;
+			endcase
+	end
+	wire signed [11:0] eg_se;
 	expgolomb u_eg(
 		.show(show),
 		.ue_val(eg_ue),
@@ -1602,8 +1643,6 @@ module mb_dec (
 		if (!rst_n) begin
 			st_q <= 4'd0;
 			ret_q <= 4'd0;
-			req_valid <= 1'b0;
-			req_bits <= 1'sb0;
 			blk_start <= 1'b0;
 			blk_chroma_dc <= 1'b0;
 			blk_nc_class <= 1'sb0;
@@ -1622,7 +1661,6 @@ module mb_dec (
 			cur_blk_q <= 1'sb0;
 		end
 		else begin
-			req_valid <= 1'b0;
 			blk_start <= 1'b0;
 			(* full_case, parallel_case *)
 			case (st_q)
@@ -1635,51 +1673,42 @@ module mb_dec (
 						st_q <= 4'd1;
 					end
 				4'd1:
-					if (!req_valid) begin
+					if (win_ok) begin
 						if (!eg_ok)
 							st_q <= 4'd14;
-						else begin
-							req_valid <= 1'b1;
-							req_bits <= eg_len;
-							if (eg_ue == 12'd0) begin
-								i16_q <= 1'b0;
-								i16m_q <= 1'sb0;
-								k_q <= 1'sb0;
-								st_q <= 4'd2;
-							end
-							else if (eg_ue <= 12'd24) begin : sv2v_autoblock_5
-								reg [11:0] m;
-								reg [1:0] cc;
-								m = eg_ue - 12'd1;
-								cc = sv2v_cast_2((m >> 2) % 12'd3);
-								i16_q <= 1'b1;
-								i16m_q <= sv2v_cast_2(m & 12'd3);
-								cbp_q <= {cc, (m >= 12'd12 ? 4'hf : 4'h0)};
-								begin : sv2v_autoblock_6
-									reg signed [31:0] i;
-									for (i = 0; i < 16; i = i + 1)
-										i4m_q[i] <= 4'd2;
-								end
-								st_q <= 4'd3;
-							end
-							else
-								st_q <= 4'd14;
+						else if (eg_ue == 12'd0) begin
+							i16_q <= 1'b0;
+							i16m_q <= 1'sb0;
+							k_q <= 1'sb0;
+							st_q <= 4'd2;
 						end
+						else if (eg_ue <= 12'd24) begin : sv2v_autoblock_5
+							reg [11:0] m;
+							reg [1:0] cc;
+							m = eg_ue - 12'd1;
+							cc = sv2v_cast_2((m >> 2) % 12'd3);
+							i16_q <= 1'b1;
+							i16m_q <= sv2v_cast_2(m & 12'd3);
+							cbp_q <= {cc, (m >= 12'd12 ? 4'hf : 4'h0)};
+							begin : sv2v_autoblock_6
+								reg signed [31:0] i;
+								for (i = 0; i < 16; i = i + 1)
+									i4m_q[i] <= 4'd2;
+							end
+							st_q <= 4'd3;
+						end
+						else
+							st_q <= 4'd14;
 					end
 				4'd2:
-					if (!req_valid) begin : sv2v_autoblock_7
+					if (win_ok) begin : sv2v_autoblock_7
 						reg [3:0] mode;
-						if (show[23]) begin
+						if (show[23])
 							mode = i4_pred;
-							req_valid <= 1'b1;
-							req_bits <= 5'd1;
-						end
 						else begin : sv2v_autoblock_8
 							reg [3:0] rem;
 							rem = {1'b0, show[22:20]};
 							mode = (rem < i4_pred ? rem : rem + 4'd1);
-							req_valid <= 1'b1;
-							req_bits <= 5'd4;
 						end
 						i4m_q[k_q] <= mode;
 						if (k_q == 4'd15)
@@ -1687,37 +1716,31 @@ module mb_dec (
 						k_q <= k_q + 4'd1;
 					end
 				4'd3:
-					if (!req_valid) begin
+					if (win_ok) begin
 						if (!eg_ok || (eg_ue > 12'd3))
 							st_q <= 4'd14;
 						else begin
 							cmode_q <= sv2v_cast_2(eg_ue);
-							req_valid <= 1'b1;
-							req_bits <= eg_len;
 							st_q <= (i16_q ? 4'd5 : 4'd4);
 						end
 					end
 				4'd4:
-					if (!req_valid) begin : sv2v_autoblock_9
+					if (win_ok) begin : sv2v_autoblock_9
 						reg [5:0] cbp;
 						cbp = cavlc_intra_cbp(sv2v_cast_6(eg_ue));
 						if ((!eg_ok || (eg_ue > 12'd47)) || (cbp == 6'd63))
 							st_q <= 4'd14;
 						else begin
 							cbp_q <= cbp;
-							req_valid <= 1'b1;
-							req_bits <= eg_len;
 							st_q <= (cbp == 6'd0 ? 4'd11 : 4'd5);
 						end
 					end
 				4'd5:
-					if (!req_valid) begin
+					if (win_ok) begin
 						if (!eg_ok)
 							st_q <= 4'd14;
 						else begin
 							qp_q <= sv2v_cast_6(((sv2v_cast_13_signed($signed({1'b0, qp_q})) + sv2v_cast_13_signed(eg_se)) + 13'd52) % 13'd52);
-							req_valid <= 1'b1;
-							req_bits <= eg_len;
 							k_q <= 1'sb0;
 							st_q <= (i16_q ? 4'd6 : 4'd7);
 						end
