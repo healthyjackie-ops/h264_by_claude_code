@@ -21,6 +21,13 @@ typedef struct {
     int32_t beta_offset;
     int cabac_init_idc;         /* P slices, CABAC only */
     uint32_t num_ref_l0;        /* active list0 size (P) */
+    /* ref_pic_list_modification (l0 only in scope): idc 0/1 with
+     * abs_diff_pic_num_minus1, terminated by 3. */
+    int n_mod_l0;
+    uint8_t mod_idc[8];
+    uint32_t mod_val[8];
+    int n_mmco;                 /* MMCO op-1 commands only */
+    uint32_t mmco_diff[8];      /* difference_of_pic_nums_minus1 */
     /* Explicit weighted prediction (pred_weight_table). When wp==0 the
      * defaults below are identity. */
     int wp;

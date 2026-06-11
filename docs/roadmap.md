@@ -94,9 +94,25 @@ padded 尺寸。
 (2) 16x8/8x16/B_8x8 的 L1-only 分区在 list0 mvd pass 不写运动 → 第二分区
 的 list1 预测把它当"未解码"——跳过分支必须落定哨兵（mb_ref -2 → -1）。
 
+## Wave 10 — x264 默认参数全覆盖
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| **18** | implicit weighted bipred（dsf=(tb·tx+32)>>8、w0=64-dsf、对称短路）、b-pyramid（参考 B 进 DPB——POC 真排序列表）、ref_pic_list_modification l0（weightp 2 duplicate refs）、MMCO 1、声称 ref 数 > 实际时复制填充 | 9/10 phase18（x264 无任何兼容参数）；全语料 178/179 |
+
+Phase 18 修复的真 bug：(1) B/P 列表构建靠 DPB 扫描序冒充 POC 序——
+b-pyramid 下解码序≠POC 序，必须真排序；(2) CAVLC skip_run 是 slice 最后
+语法元素时 more_rbsp 提前 false——出口须带 pending skip 守卫；(3) ref_idx
+CABAC 是纯 unary（0 终止），按 num_ref 截断会在值=max 时少读 1 bin；
+(4) B 两分区 ref 循环未预写网格 → 第二分区 ctxInc 失明；(5) B 的
+cabac_init 漏选 PB 表；(6) colocated L0 无效需 L1 fallback。
+
+**开放**：p18_fade_96x96 CAVLC 8 像素 ±1（显示帧 4 P 帧 MB 列 0，
+疑 WP/qpel/deblock 舍入边角，待 JM 中间值对拍）。
+
 | 项 | 备注 |
 |---|---|
-| temporal direct / b-pyramid | colocated MV 缩放 + B 参考帧 |
+| temporal direct | colocated MV 按 POC 距离缩放 |
 | 加权预测 | pred_weight_table |
 | ASO | first_mb 乱序（mb_avail 已就绪，解析序需重排） |
 | RTL | I 帧子集起步 |

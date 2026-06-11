@@ -46,8 +46,18 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
             return -1;
         }
         if (bs_u1(bs)) {                           /* ref_pic_list_modification l0 */
-            *err = H264_ERR_UNSUP;
-            return -1;
+            for (;;) {
+                uint32_t idc = bs_ue(bs);
+                if (idc == 3) break;
+                if (idc > 1 || sh->n_mod_l0 >= 8) {
+                    *err = H264_ERR_UNSUP;         /* long-term unused */
+                    return -1;
+                }
+                sh->mod_idc[sh->n_mod_l0] = (uint8_t)idc;
+                sh->mod_val[sh->n_mod_l0] = bs_ue(bs) + 1;  /* abs_diff */
+                sh->n_mod_l0++;
+            }
+            if (bs->error) { *err = H264_ERR_TRUNC; return -1; }
         }
         if (sh->is_b && bs_u1(bs)) {               /* ...modification l1 */
             *err = H264_ERR_UNSUP;
@@ -58,8 +68,8 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
             sh->cw[i][0] = sh->cw[i][1] = 1;
             sh->co[i][0] = sh->co[i][1] = 0;
         }
-        if (sh->is_b && pps->weighted_bipred != 0) {
-            *err = H264_ERR_UNSUP;                 /* implicit/explicit B WP */
+        if (sh->is_b && pps->weighted_bipred == 1) {
+            *err = H264_ERR_UNSUP;                 /* explicit B WP unused */
             return -1;
         }
         if (pps->weighted_pred && sh->is_p) {      /* pred_weight_table */
@@ -93,8 +103,17 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
         bs_skip(bs, 1);                            /* long_term_reference_flag */
     } else if (nal_ref_idc != 0) {
         if (bs_u1(bs)) {                           /* adaptive_ref_pic_marking */
-            *err = H264_ERR_UNSUP;
-            return -1;
+            /* x264's B-pyramid releases short-term refs via MMCO 1. */
+            for (;;) {
+                uint32_t op = bs_ue(bs);
+                if (op == 0) break;
+                if (op != 1 || sh->n_mmco >= 8) {
+                    *err = H264_ERR_UNSUP;
+                    return -1;
+                }
+                sh->mmco_diff[sh->n_mmco++] = bs_ue(bs);
+            }
+            if (bs->error) { *err = H264_ERR_TRUNC; return -1; }
         }
     }
     if ((sh->is_p || sh->is_b) && pps->entropy_coding_mode) {

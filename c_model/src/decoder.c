@@ -38,14 +38,18 @@ static const uint8_t raster_to_z[16] = {
 /* A reference frame: padded planes + motion field (for B direct). */
 typedef struct {
     uint8_t *Y, *U, *V;
-    int16_t *mvx, *mvy;        /* per 4x4, quarter-pel */
+    int16_t *mvx, *mvy;        /* per 4x4, quarter-pel (list0) */
     int8_t *ref;               /* per 4x4 list0 ref idx, -1 intra */
+    int16_t *mv1x, *mv1y;      /* list1 (colocated L1 fallback, 8.4.1.2.2) */
+    int8_t *ref1;
     int32_t poc;
+    uint32_t frame_num;
 } dpb_ent_t;
 
 static void dpb_ent_free(dpb_ent_t *e) {
     free(e->Y); free(e->U); free(e->V);
     free(e->mvx); free(e->mvy); free(e->ref);
+    free(e->mv1x); free(e->mv1y); free(e->ref1);
     memset(e, 0, sizeof(*e));
 }
 
@@ -80,6 +84,8 @@ typedef struct {
     uint8_t *mb_bdirect;       /* per MB: B_Skip/B_Direct_16x16 (ctxInc) */
     int n_refs;                /* list0 length (most recent first) */
     const slice_hdr_t *wp_sh;  /* active slice (weighted prediction) */
+    int imp_wp;                /* implicit weighted bipred active */
+    uint8_t wimp[8][8];        /* w0 per (ref0,ref1); w1 = 64 - w0 */
     uint8_t *mvd_ax, *mvd_ay;  /* per 4x4: |mvd| clipped to 70 (mvd ctxInc) */
     uint8_t *mvd1_ax, *mvd1_ay;
     const dpb_ent_t *list0[8];           /* ordered reference lists */
@@ -628,6 +634,18 @@ static void avg_block(uint8_t *dst, size_t ds, const uint8_t *src,
         }
 }
 
+/* Implicit weighted bi-prediction: dst = clip((dst*w0 + src*w1 + 32)>>6) */
+static void wavg_block(uint8_t *dst, size_t ds, const uint8_t *src,
+                       size_t ss, int w, int h, int w0, int w1) {
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) {
+            uint8_t *d = dst + (size_t)j * ds + (size_t)i;
+            int v = (*d * w0 + src[(size_t)j * ss + (size_t)i] * w1 + 32)
+                    >> 6;
+            *d = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+}
+
 /* Predict one partition. mode: 1 = L0, 2 = L1, 3 = Bi (default average).
  * Writes both lists' motion bookkeeping and the per-block POCs. */
 static void inter_pred_lx(ictx_t *c, int mode, int r0, int r1,
@@ -661,9 +679,16 @@ static void inter_pred_lx(ictx_t *c, int mode, int r0, int r1,
         uint8_t ty[256], tu[64], tv[64];
         mc_one(c, c->list1[r1], gx, gy, w4, h4, m1x, m1y,
                ty, 16, tu, tv, 8);
-        avg_block(fy, c->ls, ty, 16, w4 * 4, h4 * 4);
-        avg_block(fu, c->cs, tu, 8, w4 * 2, h4 * 2);
-        avg_block(fv, c->cs, tv, 8, w4 * 2, h4 * 2);
+        if (c->imp_wp) {
+            int w0 = c->wimp[r0][r1], w1 = 64 - w0;
+            wavg_block(fy, c->ls, ty, 16, w4 * 4, h4 * 4, w0, w1);
+            wavg_block(fu, c->cs, tu, 8, w4 * 2, h4 * 2, w0, w1);
+            wavg_block(fv, c->cs, tv, 8, w4 * 2, h4 * 2, w0, w1);
+        } else {
+            avg_block(fy, c->ls, ty, 16, w4 * 4, h4 * 4);
+            avg_block(fu, c->cs, tu, 8, w4 * 2, h4 * 2);
+            avg_block(fv, c->cs, tv, 8, w4 * 2, h4 * 2);
+        }
     }
 }
 
@@ -731,8 +756,16 @@ static void b_spatial_direct(ictx_t *c, int sid, uint32_t mbx, uint32_t mby,
         int ccx = gx0 + (((bx2 - gx0) >> 1) ? 3 : 0);
         int ccy = gy0 + (((by - gy0) >> 1) ? 3 : 0);
         uint32_t ci = (uint32_t)ccy * bw + (uint32_t)ccx;
-        int16_t cmx = col->mvx[ci], cmy = col->mvy[ci];
-        int colzero = col->ref[ci] == 0 &&
+        int16_t cmx, cmy;
+        int cref;
+        if (col->ref[ci] >= 0) {
+            cref = col->ref[ci]; cmx = col->mvx[ci]; cmy = col->mvy[ci];
+        } else {                       /* L0 invalid: use colocated L1 */
+            cref = col->ref1 ? col->ref1[ci] : -1;
+            cmx = col->mv1x ? col->mv1x[ci] : 0;
+            cmy = col->mv1y ? col->mv1y[ci] : 0;
+        }
+        int colzero = cref == 0 &&
                       cmx >= -1 && cmx <= 1 && cmy >= -1 && cmy <= 1;
         int16_t b0x = m0x, b0y = m0y, b1x = m1x, b1y = m1y;
         if (!direct_zero && colzero) {
@@ -789,11 +822,14 @@ static int read_ref_idx(bs_t *bs, cabac_t *cb, int use_cabac,
     if (blk4_avail(c, sid, gx, gy - 1) &&
         refs[(uint32_t)(gy - 1) * bw + (uint32_t)gx] > 0 &&
         !c->blk_direct[(uint32_t)(gy - 1) * bw + (uint32_t)gx]) inc += 2;
-    if (!cabac_decision(cb, 54 + inc)) return 0;
-    int v = 1;
-    if (cabac_decision(cb, 58)) {
-        v = 2;
-        while (v < num_ref && cabac_decision(cb, 59)) v++;
+    /* Pure unary (not truncated): bins continue until a 0, whatever
+     * num_ref says — ctx walks inc -> 58 -> 59 (ffmpeg (ctx>>2)+4). */
+    int v = 0;
+    int cw = inc;
+    while (cabac_decision(cb, 54 + cw)) {
+        v++;
+        cw = (cw >> 2) + 4;
+        if (v >= 32) { *err = H264_ERR_BAD_STREAM; return -1; }
     }
     if (cb->error) { *err = H264_ERR_TRUNC; return -1; }
     if (v >= num_ref) { *err = H264_ERR_BAD_STREAM; return -1; }
@@ -927,16 +963,37 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         if (!isb) {
             for (int i = 0; i < ndpb && i < 8; i++) c.list0[i] = &dpb[i];
         } else {
-            int n0 = 0;
-            for (int i = 0; i < ndpb && n0 < 8; i++)       /* past, desc */
-                if (dpb[i].poc < poc) c.list0[n0++] = &dpb[i];
-            for (int i = ndpb - 1; i >= 0 && n0 < 8; i--)  /* future, asc */
-                if (dpb[i].poc > poc) c.list0[n0++] = &dpb[i];
-            int n1 = 0;
-            for (int i = ndpb - 1; i >= 0 && n1 < 8; i--)
-                if (dpb[i].poc > poc) c.list1[n1++] = &dpb[i];
-            for (int i = 0; i < ndpb && n1 < 8; i++)
-                if (dpb[i].poc < poc) c.list1[n1++] = &dpb[i];
+            /* True POC sorts: decode order is NOT POC-monotonic once
+             * B-pyramid reference B frames enter the DPB. */
+            const dpb_ent_t *past[8], *fut[8];
+            int npast = 0, nfut = 0;
+            for (int i = 0; i < ndpb; i++) {
+                if (dpb[i].poc < poc && npast < 8) past[npast++] = &dpb[i];
+                else if (dpb[i].poc > poc && nfut < 8) fut[nfut++] = &dpb[i];
+            }
+            for (int i = 1; i < npast; i++) {      /* poc descending */
+                const dpb_ent_t *e = past[i];
+                int j = i;
+                while (j > 0 && past[j - 1]->poc < e->poc) {
+                    past[j] = past[j - 1];
+                    j--;
+                }
+                past[j] = e;
+            }
+            for (int i = 1; i < nfut; i++) {       /* poc ascending */
+                const dpb_ent_t *e = fut[i];
+                int j = i;
+                while (j > 0 && fut[j - 1]->poc > e->poc) {
+                    fut[j] = fut[j - 1];
+                    j--;
+                }
+                fut[j] = e;
+            }
+            int n0 = 0, n1 = 0;
+            for (int i = 0; i < npast && n0 < 8; i++) c.list0[n0++] = past[i];
+            for (int i = 0; i < nfut && n0 < 8; i++) c.list0[n0++] = fut[i];
+            for (int i = 0; i < nfut && n1 < 8; i++) c.list1[n1++] = fut[i];
+            for (int i = 0; i < npast && n1 < 8; i++) c.list1[n1++] = past[i];
             c.n_refs = n0;
             c.n_l1 = n1;
         }
@@ -971,10 +1028,40 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     int use_cabac = pps->entropy_coding_mode;
     uint32_t total_mbs = c.mb_w * c.mb_h;
     uint32_t mbs_done = 0;
+    /* ref_pic_list_modification l0 (8.2.4.3.1): each command pulls the
+     * picture with the computed picNum to the front of the remaining
+     * list (duplicates allowed — x264 --weightp 2 relies on this). */
+    if (nslices > 0 && ents[0].sh.n_mod_l0 > 0) {
+        const slice_hdr_t *msh = &ents[0].sh;
+        uint32_t max_fn = 1u << sps->log2_max_frame_num;
+        int32_t pred = (int32_t)msh->frame_num;
+        int idx = 0;
+        for (int m = 0; m < msh->n_mod_l0 && idx < 8; m++) {
+            int32_t pn = pred;
+            if (msh->mod_idc[m] == 0) {
+                pn -= (int32_t)msh->mod_val[m];
+                if (pn < 0) pn += (int32_t)max_fn;
+            } else {
+                pn += (int32_t)msh->mod_val[m];
+                if (pn >= (int32_t)max_fn) pn -= (int32_t)max_fn;
+            }
+            pred = pn;
+            const dpb_ent_t *pic = NULL;
+            for (int i = 0; i < ndpb; i++) {
+                if ((int32_t)dpb[i].frame_num == pn) { pic = &dpb[i]; break; }
+            }
+            if (!pic) { out->err = H264_ERR_BAD_STREAM; goto fail; }
+            for (int i = (c.n_refs < 8 ? c.n_refs : 7); i > idx; i--)
+                c.list0[i] = c.list0[i - 1];
+            c.list0[idx] = pic;
+            idx++;
+            if (c.n_refs < 8 && idx > c.n_refs) c.n_refs = idx;
+        }
+    }
+
     for (int s = 0; s < nslices; s++) {
-        if (ents[s].sh.is_p &&
-            (c.n_refs < 1 || ents[s].sh.num_ref_l0 > (uint32_t)c.n_refs)) {
-            out->err = H264_ERR_BAD_STREAM;   /* P needs its references */
+        if (ents[s].sh.is_p && c.n_refs < 1) {
+            out->err = H264_ERR_BAD_STREAM;   /* P needs a reference */
             goto fail;
         }
         if (ents[s].sh.is_b) {
@@ -982,12 +1069,27 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 out->err = H264_ERR_UNSUP;
                 goto fail;
             }
-            if (c.n_refs < 1 || c.n_l1 < 1 ||
-                ents[s].sh.num_ref_l0 > (uint32_t)c.n_refs ||
-                ents[s].sh.num_ref_l1 > (uint32_t)c.n_l1) {
+            if (c.n_refs < 1 || c.n_l1 < 1) {
                 out->err = H264_ERR_BAD_STREAM;
                 goto fail;
             }
+        }
+    }
+    /* The declared active counts may exceed the frames actually present
+     * (x264's first GOP); pad with the last entry so ref_idx values up
+     * to the declared count stay addressable. */
+    if (nslices > 0 && (ents[0].sh.is_p || ents[0].sh.is_b) && c.n_refs > 0) {
+        uint32_t want = ents[0].sh.num_ref_l0;
+        while ((uint32_t)c.n_refs < want && c.n_refs < 8) {
+            c.list0[c.n_refs] = c.list0[c.n_refs - 1];
+            c.n_refs++;
+        }
+    }
+    if (nslices > 0 && ents[0].sh.is_b && c.n_l1 > 0) {
+        uint32_t want = ents[0].sh.num_ref_l1;
+        while ((uint32_t)c.n_l1 < want && c.n_l1 < 8) {
+            c.list1[c.n_l1] = c.list1[c.n_l1 - 1];
+            c.n_l1++;
         }
     }
 
@@ -1001,6 +1103,30 @@ static int decode_picture(slice_ent_t *ents, int nslices,
 
     int qp = (int)sh->slice_qp;
     c.wp_sh = sh;
+    c.imp_wp = 0;
+    if (sh->is_b && pps->weighted_bipred == 2) {
+        /* short-circuit: single refs symmetric around cur_poc -> average */
+        if (!(sh->num_ref_l0 == 1 && sh->num_ref_l1 == 1 &&
+              c.list0[0]->poc + c.list1[0]->poc == 2 * poc)) {
+            c.imp_wp = 1;
+            for (uint32_t i0 = 0; i0 < sh->num_ref_l0 && i0 < 8; i0++) {
+                int32_t poc0 = c.list0[i0]->poc;
+                for (uint32_t i1 = 0; i1 < sh->num_ref_l1 && i1 < 8; i1++) {
+                    int w = 32;
+                    int32_t poc1 = c.list1[i1]->poc;
+                    int td = clip3(-128, 127, (int)(poc1 - poc0));
+                    if (td != 0) {
+                        int tb = clip3(-128, 127, (int)(poc - poc0));
+                        int ad = td < 0 ? -td : td;
+                        int tx = (16384 + (ad >> 1)) / td;
+                        int dsf = (tb * tx + 32) >> 8;
+                        if (dsf >= -64 && dsf <= 128) w = 64 - dsf;
+                    }
+                    c.wimp[i0][i1] = (uint8_t)w;
+                }
+            }
+        }
+    }
     int last_qpd_nz = 0;
     int skip_run = -1;
     cabac_t cbx;
@@ -1044,6 +1170,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             }
         }
         if (this_skip) {
+            if (dbg >= 2) fprintf(stderr, "SKIP %u,%u\n", mbx, mby);
             if (sh->is_b) {
                 b_spatial_direct(&c, sid, mbx, mby,
                                  (int)(mbx * 4), (int)(mby * 4), 4, 4);
@@ -1125,6 +1252,8 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             int nref = (int)sh->num_ref_l0;
             if (is_inter == 2) {
                 /* ---- B macroblock (Table 7-14) ---- */
+                if (dbg >= 2) fprintf(stderr, "BMB %u,%u type=%u\n",
+                                      mbx, mby, mb_type);
                 int nref1 = (int)sh->num_ref_l1;
                 static const uint8_t bpair[9][2] = {
                     {1,1},{2,2},{1,2},{2,1},{1,3},{2,3},{3,1},{3,2},{3,3}
@@ -1189,6 +1318,18 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                                                   &out->err);
                             if (rv < 0) goto fail;
                             rr[list][part] = rv;
+                            /* the second partition's ref_idx ctxInc must
+                             * see this one */
+                            for (int j = 0; j < h4; j++)
+                                for (int i = 0; i < w4; i++) {
+                                    uint32_t gi =
+                                        (uint32_t)(py + j) * bw +
+                                        (uint32_t)(px + i);
+                                    if (list == 0)
+                                        c.mb_ref[gi] = (int8_t)rv;
+                                    else
+                                        c.mb_ref1[gi] = (int8_t)rv;
+                                }
                         }
                     }
                     /* mvds in the same list-major order; remember both
@@ -1274,7 +1415,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                                            : bs_ue(bs);
                         if (sub[b] > 12) {
                             out->err = H264_ERR_BAD_STREAM;
-                            goto fail;
+                goto fail;
                         }
                         if (sub[b] >= 4) all_sub8x8 = 0;
                     }
@@ -2094,7 +2235,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 if (h264_intra8x8_pred(bdst, c.ls, modes8[b],
                                        aL, aT, aTL, aTR)) {
                     out->err = H264_ERR_BAD_STREAM;
-                    goto fail;
+                goto fail;
                 }
                 if (cbp_luma & (1u << b)) {
                     h264_dequant8x8(resid8[b], qp, aw8[0], d64);
@@ -2113,7 +2254,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 int aTR = blk_decoded(&c, sid, mbx, mby, k, gx + 1, gy - 1);
                 if (h264_intra4x4_pred(bdst, c.ls, modes[k], aL, aT, aTL, aTR)) {
                     out->err = H264_ERR_BAD_STREAM;
-                    goto fail;
+                goto fail;
                 }
                 if (cbp_luma & (1u << (k >> 2))) {
                     h264_dequant4x4(resid[k], qp, aw4[0], d);
@@ -2187,14 +2328,16 @@ mb_done:
             if (cbx.error) { out->err = H264_ERR_TRUNC; goto fail; }
             if (eos) break;
         } else {
-            if (!bs_more_rbsp_data(bs)) break;
+            /* a pending skip run keeps the loop alive even when the
+             * RBSP is exhausted — the run was its last syntax element */
+            if (skip_run <= 0 && !bs_more_rbsp_data(bs)) break;
         }
     }
     }                                      /* slice loop */
 
     if (mbs_done != total_mbs) {
         out->err = H264_ERR_BAD_STREAM;
-        goto fail;
+                goto fail;
     }
     }
 
@@ -2250,8 +2393,11 @@ mb_done:
     free(c.cbf_cdc[0]); free(c.cbf_cdc[1]); free(c.mb_t8);
     free(c.mb_slice); free(c.mb_dbf_idc); free(c.mb_dbf_a); free(c.mb_dbf_b);
     free(c.mb_skip); free(c.mb_bdirect); free(c.mvd_ax); free(c.mvd_ay);
-    free(c.mv1_x); free(c.mv1_y); free(c.mb_ref1); free(c.blk_direct);
+    free(c.blk_direct);
     free(c.ref_poc0); free(c.ref_poc1); free(c.mvd1_ax); free(c.mvd1_ay);
+    keep->mv1x = c.mv1_x;
+    keep->mv1y = c.mv1_y;
+    keep->ref1 = c.mb_ref1;
     keep->Y = c.Y;                      /* caller keeps the padded frame */
     keep->U = c.U;
     keep->V = c.V;
@@ -2259,6 +2405,7 @@ mb_done:
     keep->mvy = c.mv_y;
     keep->ref = c.mb_ref;
     keep->poc = poc;
+    keep->frame_num = ents[0].sh.frame_num;
     out->err = 0;
     return 0;
 
@@ -2383,6 +2530,24 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
                         ndpb = 0;
                     }
                     if (ents[0].is_ref) {
+                        /* MMCO 1: release named short-term references */
+                        for (int m = 0; m < ents[0].sh.n_mmco; m++) {
+                            uint32_t max_fn = 1u << sps.log2_max_frame_num;
+                            int32_t pnx = (int32_t)ents[0].sh.frame_num -
+                                (int32_t)(ents[0].sh.mmco_diff[m] + 1);
+                            while (pnx < 0) pnx += (int32_t)max_fn;
+                            for (int i = 0; i < ndpb; i++) {
+                                if ((int32_t)dpb[i].frame_num == pnx) {
+                                    dpb_ent_free(&dpb[i]);
+                                    for (int j = i; j < ndpb - 1; j++)
+                                        dpb[j] = dpb[j + 1];
+                                    memset(&dpb[ndpb - 1], 0,
+                                           sizeof(dpb[0]));
+                                    ndpb--;
+                                    break;
+                                }
+                            }
+                        }
                         /* push front (most recent first) */
                         if (ndpb == MAX_REFS) dpb_ent_free(&dpb[--ndpb]);
                         for (int i = ndpb; i > 0; i--) dpb[i] = dpb[i - 1];
