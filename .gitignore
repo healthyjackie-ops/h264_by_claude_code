@@ -5,3 +5,4 @@ build/
 .tmp*
 c_model/fuzz_failures/
 c_model/build_asan/
+verification/tb/obj_dir*
