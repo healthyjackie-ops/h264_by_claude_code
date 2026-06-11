@@ -18,7 +18,7 @@ bit-exact → 全量回归 + 错误路径测试**。
 | 尺寸 | 任意偶数尺寸（SPS frame cropping），16×16 .. 4096 宽 |
 | 错误处理 | 失败统一释放输出平面；6 类损坏流全部干净拒绝，0 泄漏 |
 
-**验证：184/185 向量对 ffmpeg (libavcodec 8.1) 逐字节 bit-exact**（1 个已知 ±1 开放项）
+**验证：185/185 向量对 ffmpeg (libavcodec 8.1) 逐字节 bit-exact**
 （CAVLC/CABAC × baseline/main/high × 单/多 slice × I/P/B × x264 默认共 179 个
 + 6 个 expect-fail 错误用例全拒零泄漏；覆盖运动序列、场景切换、
 scaling list、deblock on/off、qp 4..51、非对齐尺寸），外加真实照片帧抽查。
@@ -74,7 +74,7 @@ c_model/src/
 
 ## 下一步（docs/roadmap.md Wave 11+）
 
-fade ±1 开放项 → temporal direct → ASO → RTL。
+temporal direct → ASO → RTL。
 I_PCM 已实现（CAVLC 路径）但 x264 不产 PCM 流，待 JM 编码器补向量；
 CABAC+PCM 的引擎重初始化交接同样待 JM 向量后落地。
 

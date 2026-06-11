@@ -2341,6 +2341,30 @@ mb_done:
     }
     }
 
+    /* 8x8-transform MBs: bS "non-zero coefficients" applies to the
+     * TRANSFORM block (8.7.2.1) — promote per-4x4 nz to 8x8-block level
+     * before filtering (nC derivation has already consumed the true
+     * per-4x4 counts during parsing). */
+    for (uint32_t mb = 0; mb < c.mb_w * c.mb_h; mb++) {
+        if (!c.mb_t8[mb]) continue;
+        uint32_t mbx2 = mb % c.mb_w, mby2 = mb / c.mb_w;
+        for (int b = 0; b < 4; b++) {
+            uint32_t bx0 = mbx2 * 4 + (uint32_t)(b & 1) * 2;
+            uint32_t by0 = mby2 * 4 + (uint32_t)(b >> 1) * 2;
+            int any = 0;
+            for (int j = 0; j < 2; j++)
+                for (int i = 0; i < 2; i++)
+                    if (c.nzL[(by0 + (uint32_t)j) * bw + bx0 + (uint32_t)i])
+                        any = 1;
+            if (any) {
+                for (int j = 0; j < 2; j++)
+                    for (int i = 0; i < 2; i++)
+                        c.nzL[(by0 + (uint32_t)j) * bw + bx0 +
+                              (uint32_t)i] = 1;
+            }
+        }
+    }
+
     /* ---- in-loop deblocking (8.7), per-MB slice parameters ---- */
     h264_deblock_frame(c.Y, c.U, c.V, c.ls, c.cs, c.mb_w, c.mb_h,
                        c.mb_qp, c.mb_t8, c.mb_slice,

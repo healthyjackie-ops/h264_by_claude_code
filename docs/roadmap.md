@@ -98,7 +98,7 @@ padded 尺寸。
 
 | Phase | 内容 | 验收 |
 |---|---|---|
-| **18** | implicit weighted bipred（dsf=(tb·tx+32)>>8、w0=64-dsf、对称短路）、b-pyramid（参考 B 进 DPB——POC 真排序列表）、ref_pic_list_modification l0（weightp 2 duplicate refs）、MMCO 1、声称 ref 数 > 实际时复制填充 | 9/10 phase18（x264 无任何兼容参数）；全语料 178/179 |
+| **18** ✅ | implicit weighted bipred（dsf=(tb·tx+32)>>8、w0=64-dsf、对称短路）、b-pyramid（参考 B 进 DPB——POC 真排序列表）、ref_pic_list_modification l0（weightp 2 duplicate refs）、MMCO 1、声称 ref 数 > 实际时复制填充 | 10/10 phase18（x264 无任何兼容参数）；全语料 179/179 |
 
 Phase 18 修复的真 bug：(1) B/P 列表构建靠 DPB 扫描序冒充 POC 序——
 b-pyramid 下解码序≠POC 序，必须真排序；(2) CAVLC skip_run 是 slice 最后
@@ -107,8 +107,14 @@ CABAC 是纯 unary（0 终止），按 num_ref 截断会在值=max 时少读 1 b
 (4) B 两分区 ref 循环未预写网格 → 第二分区 ctxInc 失明；(5) B 的
 cabac_init 漏选 PB 表；(6) colocated L0 无效需 L1 fallback。
 
-**开放**：p18_fade_96x96 CAVLC 8 像素 ±1（显示帧 4 P 帧 MB 列 0，
-疑 WP/qpel/deblock 舍入边角，待 JM 中间值对拍）。
+**已闭环**（曾开放）：p18_fade ±1 根因 = deblock bS 的"非零系数"判定
+粒度——8.7.2.1 作用于**变换块**：8x8 变换 MB 中块内任一系数非零则
+4 个 4x4 全算 nz（ffmpeg 对 8x8DCT 用 cbp 位特判）。CAVLC interleave
+写真实 per-4x4 tc（nC 推导需要）导致部分子块漏判 bS=2。修复：deblock
+前对 t8 MB 把 nz 提升到 8x8 块级（nC 已消费完真值，时机安全）。
+排障教训：差异帧是非参考 B（poc8）而非 P——按显示序号猜帧类型走了
+弯路；JM 文本 trace 的 @ 位与 bits 字段不可信（与真值冲突），python
+直读位流仲裁才定案。
 
 | 项 | 备注 |
 |---|---|
