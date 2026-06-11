@@ -12,8 +12,9 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
     sh->first_mb = bs_ue(bs);
     sh->slice_type = bs_ue(bs);
     sh->is_p = (sh->slice_type % 5 == 0);
-    if (sh->slice_type % 5 != 2 && !sh->is_p) {    /* I and P slices */
-        *err = H264_ERR_UNSUP;
+    sh->is_b = (sh->slice_type % 5 == 1);
+    if (sh->slice_type % 5 != 2 && !sh->is_p && !sh->is_b) {
+        *err = H264_ERR_UNSUP;                     /* SP/SI out of scope */
         return -1;
     }
     sh->pps_id = bs_ue(bs);
@@ -23,22 +24,32 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
         sh->idr_pic_id = bs_ue(bs);
     }
     if (sps->poc_type == 0) {
-        bs_skip(bs, (int)sps->log2_max_poc_lsb);   /* pic_order_cnt_lsb */
+        sh->poc_lsb = bs_u(bs, (int)sps->log2_max_poc_lsb);
         if (pps->bottom_field_poc_present) (void)bs_se(bs);
     } else if (sps->poc_type == 1 && !sps->delta_pic_order_always_zero) {
         (void)bs_se(bs);
         if (pps->bottom_field_poc_present) (void)bs_se(bs);
     }
-    if (sh->is_p) {
+    if (sh->is_b) {
+        sh->direct_spatial = (int)bs_u1(bs);
+    }
+    if (sh->is_p || sh->is_b) {
         sh->num_ref_l0 = pps->num_ref_idx_l0;
+        sh->num_ref_l1 = pps->num_ref_idx_l1;
         if (bs_u1(bs)) {                           /* num_ref_idx_override */
             sh->num_ref_l0 = bs_ue(bs) + 1;
+            if (sh->is_b) sh->num_ref_l1 = bs_ue(bs) + 1;
         }
-        if (sh->num_ref_l0 < 1 || sh->num_ref_l0 > 8) {
+        if (sh->num_ref_l0 < 1 || sh->num_ref_l0 > 8 ||
+            (sh->is_b && (sh->num_ref_l1 < 1 || sh->num_ref_l1 > 8))) {
             *err = H264_ERR_UNSUP;
             return -1;
         }
-        if (bs_u1(bs)) {                           /* ref_pic_list_modification */
+        if (bs_u1(bs)) {                           /* ref_pic_list_modification l0 */
+            *err = H264_ERR_UNSUP;
+            return -1;
+        }
+        if (sh->is_b && bs_u1(bs)) {               /* ...modification l1 */
             *err = H264_ERR_UNSUP;
             return -1;
         }
@@ -47,7 +58,11 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
             sh->cw[i][0] = sh->cw[i][1] = 1;
             sh->co[i][0] = sh->co[i][1] = 0;
         }
-        if (pps->weighted_pred) {                  /* pred_weight_table */
+        if (sh->is_b && pps->weighted_bipred != 0) {
+            *err = H264_ERR_UNSUP;                 /* implicit/explicit B WP */
+            return -1;
+        }
+        if (pps->weighted_pred && sh->is_p) {      /* pred_weight_table */
             sh->wp = 1;
             sh->luma_log2_denom = (int)bs_ue(bs);
             sh->chroma_log2_denom = (int)bs_ue(bs);
@@ -82,7 +97,7 @@ int parse_slice_header(bs_t *bs, const sps_t *sps, const pps_t *pps,
             return -1;
         }
     }
-    if (sh->is_p && pps->entropy_coding_mode) {
+    if ((sh->is_p || sh->is_b) && pps->entropy_coding_mode) {
         uint32_t idc = bs_ue(bs);                  /* cabac_init_idc */
         if (idc > 2) { *err = H264_ERR_BAD_STREAM; return -1; }
         sh->cabac_init_idc = (int)idc;

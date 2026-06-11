@@ -6,8 +6,12 @@
 
 typedef struct {
     uint32_t first_mb;
-    uint32_t slice_type;        /* raw; %5: 2 = I, 0 = P */
+    uint32_t slice_type;        /* raw; %5: 2 = I, 0 = P, 1 = B */
     int is_p;
+    int is_b;
+    uint32_t poc_lsb;           /* poc_type 0 */
+    int direct_spatial;         /* B: direct_spatial_mv_pred_flag */
+    uint32_t num_ref_l1;        /* active list1 size (B) */
     uint32_t pps_id;
     uint32_t frame_num;
     uint32_t idr_pic_id;

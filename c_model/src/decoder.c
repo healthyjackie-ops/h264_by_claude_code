@@ -35,6 +35,20 @@ static const uint8_t raster_to_z[16] = {
     10, 11, 14, 15
 };
 
+/* A reference frame: padded planes + motion field (for B direct). */
+typedef struct {
+    uint8_t *Y, *U, *V;
+    int16_t *mvx, *mvy;        /* per 4x4, quarter-pel */
+    int8_t *ref;               /* per 4x4 list0 ref idx, -1 intra */
+    int32_t poc;
+} dpb_ent_t;
+
+static void dpb_ent_free(dpb_ent_t *e) {
+    free(e->Y); free(e->U); free(e->V);
+    free(e->mvx); free(e->mvy); free(e->ref);
+    memset(e, 0, sizeof(*e));
+}
+
 typedef struct {
     const sps_t *sps;
     const pps_t *pps;
@@ -61,9 +75,9 @@ typedef struct {
     int n_refs;                /* list0 length (most recent first) */
     const slice_hdr_t *wp_sh;  /* active slice (weighted prediction) */
     uint8_t *mvd_ax, *mvd_ay;  /* per 4x4: |mvd| clipped to 70 (mvd ctxInc) */
-    const uint8_t * const *refsY;        /* list0 planes, [0] = most recent */
-    const uint8_t * const *refsU;
-    const uint8_t * const *refsV;
+    const dpb_ent_t *list0[8];           /* ordered reference lists */
+    const dpb_ent_t *list1[8];
+    int n_l1;
 
     int8_t *mb_dbf_idc;        /* per-MB slice deblock params */
     int8_t *mb_dbf_a, *mb_dbf_b;
@@ -538,17 +552,17 @@ static void inter_pred_part(ictx_t *c, int ref, int gx, int gy,
         }
     int lx = gx * 4, ly = gy * 4;
     int pw = (int)c->ls, phh = (int)(c->mb_h * 16);
-    h264_mc_luma(c->refsY[ref], c->ls, pw, phh,
+    h264_mc_luma(c->list0[ref]->Y, c->ls, pw, phh,
                  lx + (mvx >> 2), ly + (mvy >> 2), mvx & 3, mvy & 3,
                  c->Y + (size_t)ly * c->ls + (size_t)lx, c->ls,
                  w4 * 4, h4 * 4);
     int cx = gx * 2, cy = gy * 2;
     int cw = (int)c->cs, chh = (int)(c->mb_h * 8);
-    h264_mc_chroma(c->refsU[ref], c->cs, cw, chh,
+    h264_mc_chroma(c->list0[ref]->U, c->cs, cw, chh,
                    cx + (mvx >> 3), cy + (mvy >> 3), mvx & 7, mvy & 7,
                    c->U + (size_t)cy * c->cs + (size_t)cx, c->cs,
                    w4 * 2, h4 * 2);
-    h264_mc_chroma(c->refsV[ref], c->cs, cw, chh,
+    h264_mc_chroma(c->list0[ref]->V, c->cs, cw, chh,
                    cx + (mvx >> 3), cy + (mvy >> 3), mvx & 7, mvy & 7,
                    c->V + (size_t)cy * c->cs + (size_t)cx, c->cs,
                    w4 * 2, h4 * 2);
@@ -668,16 +682,14 @@ typedef struct {
     size_t byte;               /* slice_data start (CAVLC: bit too) */
     int bit;
     int is_idr;
+    int is_ref;                /* nal_ref_idc != 0 */
     slice_hdr_t sh;
 } slice_ent_t;
 
 static int decode_picture(slice_ent_t *ents, int nslices,
                           const sps_t *sps, const pps_t *pps,
-                          const uint8_t * const *refsY,
-                          const uint8_t * const *refsU,
-                          const uint8_t * const *refsV, int n_refs,
-                          uint8_t **keepY, uint8_t **keepU, uint8_t **keepV,
-                          h264_decoded_t *out) {
+                          const dpb_ent_t *dpb, int ndpb, int32_t poc,
+                          dpb_ent_t *keep, h264_decoded_t *out) {
     ictx_t c;
     memset(&c, 0, sizeof(c));
     c.sps = sps;
@@ -719,10 +731,30 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     c.mb_skip = (uint8_t *)calloc(nmbs, 1);
     c.mvd_ax = (uint8_t *)calloc((size_t)bw * bh, 1);
     c.mvd_ay = (uint8_t *)calloc((size_t)bw * bh, 1);
-    c.refsY = refsY;
-    c.refsU = refsU;
-    c.refsV = refsV;
-    c.n_refs = n_refs;
+    /* Reference list initialization. P list0: most recent first — the
+     * DPB order. B list0: POC < cur descending, then POC > cur
+     * ascending; list1 mirrored (8.2.4.2). */
+    c.n_refs = ndpb;
+    c.n_l1 = 0;
+    {
+        int isb = (nslices > 0 && ents[0].sh.is_b);
+        if (!isb) {
+            for (int i = 0; i < ndpb && i < 8; i++) c.list0[i] = &dpb[i];
+        } else {
+            int n0 = 0;
+            for (int i = 0; i < ndpb && n0 < 8; i++)       /* past, desc */
+                if (dpb[i].poc < poc) c.list0[n0++] = &dpb[i];
+            for (int i = ndpb - 1; i >= 0 && n0 < 8; i--)  /* future, asc */
+                if (dpb[i].poc > poc) c.list0[n0++] = &dpb[i];
+            int n1 = 0;
+            for (int i = ndpb - 1; i >= 0 && n1 < 8; i--)
+                if (dpb[i].poc > poc) c.list1[n1++] = &dpb[i];
+            for (int i = 0; i < ndpb && n1 < 8; i++)
+                if (dpb[i].poc < poc) c.list1[n1++] = &dpb[i];
+            c.n_refs = n0;
+            c.n_l1 = n1;
+        }
+    }
     int ok = c.mv_x && c.mv_y && c.mb_ref && c.mb_skip && c.mvd_ax &&
              c.mvd_ay &&
              c.Y && c.U && c.V && c.i4_mode && c.nzL && c.nzC[0] &&
@@ -747,8 +779,12 @@ static int decode_picture(slice_ent_t *ents, int nslices,
     uint32_t total_mbs = c.mb_w * c.mb_h;
     uint32_t mbs_done = 0;
     for (int s = 0; s < nslices; s++) {
+        if (ents[s].sh.is_b) {                /* B slices arrive in 17b */
+            out->err = H264_ERR_UNSUP;
+            goto fail;
+        }
         if (ents[s].sh.is_p &&
-            (n_refs < 1 || ents[s].sh.num_ref_l0 > (uint32_t)n_refs)) {
+            (c.n_refs < 1 || ents[s].sh.num_ref_l0 > (uint32_t)c.n_refs)) {
             out->err = H264_ERR_BAD_STREAM;   /* P needs its references */
             goto fail;
         }
@@ -1725,11 +1761,14 @@ mb_done:
     free(c.cbf_l); free(c.cbf_ldc); free(c.cbf_c[0]); free(c.cbf_c[1]);
     free(c.cbf_cdc[0]); free(c.cbf_cdc[1]); free(c.mb_t8);
     free(c.mb_slice); free(c.mb_dbf_idc); free(c.mb_dbf_a); free(c.mb_dbf_b);
-    free(c.mv_x); free(c.mv_y); free(c.mb_ref);
     free(c.mb_skip); free(c.mvd_ax); free(c.mvd_ay);
-    *keepY = c.Y;                       /* caller keeps the padded frame */
-    *keepU = c.U;
-    *keepV = c.V;
+    keep->Y = c.Y;                      /* caller keeps the padded frame */
+    keep->U = c.U;
+    keep->V = c.V;
+    keep->mvx = c.mv_x;                 /* ...and the motion field */
+    keep->mvy = c.mv_y;
+    keep->ref = c.mb_ref;
+    keep->poc = poc;
     out->err = 0;
     return 0;
 
@@ -1792,10 +1831,16 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
             slice_ent_t ents[MAX_SLICES];
             int nslices = 0;
             int have_nal = 1;                      /* n holds a slice NAL */
-            enum { MAX_REFS = 8 };
-            uint8_t *dpbY[MAX_REFS] = {0}, *dpbU[MAX_REFS] = {0},
-                    *dpbV[MAX_REFS] = {0};
+            enum { MAX_REFS = 8, MAX_OUT = 512 };
+            dpb_ent_t dpb[MAX_REFS];
+            memset(dpb, 0, sizeof(dpb));
             int ndpb = 0;
+            /* POC state (8.2.1.1) and the output-order map. */
+            int32_t prev_msb = 0;
+            uint32_t prev_lsb = 0;
+            int32_t out_poc[MAX_OUT];
+            int n_out = 0;
+            int32_t dec_idx = 0;
             for (;;) {
                 slice_hdr_t sh;
                 if (parse_slice_header(&bs, &sps, &pps, n.type, n.ref_idc,
@@ -1805,37 +1850,55 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
                 }
                 if (sh.first_mb == 0 && nslices > 0) {
                     /* picture boundary: decode what we have first */
-                    uint8_t *kY, *kU, *kV;
-                    int was_idr = ents[0].is_idr;
+                    int32_t poc;
+                    if (ents[0].is_idr) { prev_msb = 0; prev_lsb = 0; }
+                    if (sps.poc_type == 0) {
+                        uint32_t maxlsb = 1u << sps.log2_max_poc_lsb;
+                        uint32_t lsb = ents[0].sh.poc_lsb;
+                        int32_t msb = prev_msb;
+                        if (lsb < prev_lsb &&
+                            prev_lsb - lsb >= maxlsb / 2) {
+                            msb = prev_msb + (int32_t)maxlsb;
+                        } else if (lsb > prev_lsb &&
+                                   lsb - prev_lsb > maxlsb / 2) {
+                            msb = prev_msb - (int32_t)maxlsb;
+                        }
+                        poc = msb + (int32_t)lsb;
+                        if (ents[0].is_ref) {
+                            prev_msb = msb;
+                            prev_lsb = lsb;
+                        }
+                    } else {
+                        poc = dec_idx;             /* type 2: decode order */
+                    }
+                    dec_idx++;
+                    dpb_ent_t k;
+                    memset(&k, 0, sizeof(k));
                     if (decode_picture(ents, nslices, &sps, &pps,
-                                       (const uint8_t * const *)dpbY,
-                                       (const uint8_t * const *)dpbU,
-                                       (const uint8_t * const *)dpbV, ndpb,
-                                       &kY, &kU, &kV, out)) {
+                                       dpb, ndpb, poc, &k, out)) {
                         nal_free(&n);
                         goto ents_fail;
                     }
-                    if (was_idr) {                 /* IDR empties the DPB */
-                        for (int i = 0; i < ndpb; i++) {
-                            free(dpbY[i]); free(dpbU[i]); free(dpbV[i]);
-                            dpbY[i] = dpbU[i] = dpbV[i] = NULL;
-                        }
+                    if (n_out >= MAX_OUT) {
+                        dpb_ent_free(&k);
+                        out->err = H264_ERR_UNSUP;
+                        nal_free(&n);
+                        goto ents_fail;
+                    }
+                    out_poc[n_out++] = poc;
+                    if (ents[0].is_idr) {          /* IDR empties the DPB */
+                        for (int i = 0; i < ndpb; i++) dpb_ent_free(&dpb[i]);
                         ndpb = 0;
                     }
-                    /* push front (list0 order: most recent first) */
-                    if (ndpb == MAX_REFS) {
-                        free(dpbY[MAX_REFS - 1]);
-                        free(dpbU[MAX_REFS - 1]);
-                        free(dpbV[MAX_REFS - 1]);
-                        ndpb--;
+                    if (ents[0].is_ref) {
+                        /* push front (most recent first) */
+                        if (ndpb == MAX_REFS) dpb_ent_free(&dpb[--ndpb]);
+                        for (int i = ndpb; i > 0; i--) dpb[i] = dpb[i - 1];
+                        dpb[0] = k;
+                        ndpb++;
+                    } else {
+                        dpb_ent_free(&k);          /* non-ref B */
                     }
-                    for (int i = ndpb; i > 0; i--) {
-                        dpbY[i] = dpbY[i - 1];
-                        dpbU[i] = dpbU[i - 1];
-                        dpbV[i] = dpbV[i - 1];
-                    }
-                    dpbY[0] = kY; dpbU[0] = kU; dpbV[0] = kV;
-                    ndpb++;
                     for (int i = 0; i < nslices; i++) free(ents[i].rbsp);
                     nslices = 0;
                 }
@@ -1855,6 +1918,7 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
                 ents[nslices].byte = bs.byte;
                 ents[nslices].bit = bs.bit;
                 ents[nslices].is_idr = (n.type == NAL_SLICE_IDR);
+                ents[nslices].is_ref = (n.ref_idc != 0);
                 ents[nslices].sh = sh;
                 nslices++;
                 n.rbsp = NULL;
@@ -1872,22 +1936,78 @@ static int h264_decode_impl(const uint8_t *data, size_t size,
                 }
                 if (!have_nal) break;
             }
-            uint8_t *kY = NULL, *kU = NULL, *kV = NULL;
-            int rc = decode_picture(ents, nslices, &sps, &pps,
-                                    (const uint8_t * const *)dpbY,
-                                    (const uint8_t * const *)dpbU,
-                                    (const uint8_t * const *)dpbV, ndpb,
-                                    &kY, &kU, &kV, out);
-            free(kY); free(kU); free(kV);
-            for (int i = 0; i < ndpb; i++) {
-                free(dpbY[i]); free(dpbU[i]); free(dpbV[i]);
+            int32_t poc;
+            if (ents[0].is_idr) { prev_msb = 0; prev_lsb = 0; }
+            if (sps.poc_type == 0) {
+                uint32_t maxlsb = 1u << sps.log2_max_poc_lsb;
+                uint32_t lsb = ents[0].sh.poc_lsb;
+                int32_t msb = prev_msb;
+                if (lsb < prev_lsb && prev_lsb - lsb >= maxlsb / 2) {
+                    msb = prev_msb + (int32_t)maxlsb;
+                } else if (lsb > prev_lsb && lsb - prev_lsb > maxlsb / 2) {
+                    msb = prev_msb - (int32_t)maxlsb;
+                }
+                poc = msb + (int32_t)lsb;
+            } else {
+                poc = dec_idx;
             }
+            dpb_ent_t k;
+            memset(&k, 0, sizeof(k));
+            int rc = decode_picture(ents, nslices, &sps, &pps,
+                                    dpb, ndpb, poc, &k, out);
+            dpb_ent_free(&k);
+            for (int i = 0; i < ndpb; i++) dpb_ent_free(&dpb[i]);
             for (int i = 0; i < nslices; i++) free(ents[i].rbsp);
+            if (rc == 0 && n_out < MAX_OUT) {
+                out_poc[n_out++] = poc;
+                /* Reorder output frames to display (POC) order. */
+                size_t ysz = (size_t)out->width * out->height;
+                size_t csz = ((size_t)out->width >> 1) *
+                             ((size_t)out->height >> 1);
+                int order[MAX_OUT];
+                for (int i = 0; i < n_out; i++) order[i] = i;
+                for (int i = 1; i < n_out; i++) {      /* stable insertion */
+                    int oi = order[i];
+                    int j = i;
+                    while (j > 0 && out_poc[order[j - 1]] > out_poc[oi]) {
+                        order[j] = order[j - 1];
+                        j--;
+                    }
+                    order[j] = oi;
+                }
+                int sorted = 1;
+                for (int i = 0; i < n_out; i++)
+                    if (order[i] != i) sorted = 0;
+                if (!sorted && out->nframes == (uint32_t)n_out) {
+                    uint8_t *ny = (uint8_t *)malloc(ysz * (size_t)n_out);
+                    uint8_t *nu = (uint8_t *)malloc(csz * (size_t)n_out);
+                    uint8_t *nv = (uint8_t *)malloc(csz * (size_t)n_out);
+                    if (!ny || !nu || !nv) {
+                        free(ny); free(nu); free(nv);
+                        out->err = H264_ERR_INTERNAL;
+                        free(out->y_plane); free(out->cb_plane);
+                        free(out->cr_plane);
+                        out->y_plane = out->cb_plane = out->cr_plane = NULL;
+                        return -1;
+                    }
+                    for (int i = 0; i < n_out; i++) {
+                        memcpy(ny + (size_t)i * ysz,
+                               out->y_plane + (size_t)order[i] * ysz, ysz);
+                        memcpy(nu + (size_t)i * csz,
+                               out->cb_plane + (size_t)order[i] * csz, csz);
+                        memcpy(nv + (size_t)i * csz,
+                               out->cr_plane + (size_t)order[i] * csz, csz);
+                    }
+                    free(out->y_plane); free(out->cb_plane);
+                    free(out->cr_plane);
+                    out->y_plane = ny;
+                    out->cb_plane = nu;
+                    out->cr_plane = nv;
+                }
+            }
             return rc;
 ents_fail:
-            for (int i = 0; i < ndpb; i++) {
-                free(dpbY[i]); free(dpbU[i]); free(dpbV[i]);
-            }
+            for (int i = 0; i < ndpb; i++) dpb_ent_free(&dpb[i]);
             for (int i = 0; i < nslices; i++) free(ents[i].rbsp);
             return -1;
         }
