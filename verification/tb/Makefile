@@ -80,3 +80,21 @@ xf:
 	./obj_dir_xf/Vtransform_top
 
 .PHONY: xf
+
+i4:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module intra4x4_pred \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_i4 \
+	  $(RTL_DIR)/intra4x4_pred.sv \
+	  tb_intra4.cpp $(CMODEL_BUILD)/intra.o
+	./obj_dir_i4/Vintra4x4_pred
+
+.PHONY: i4
+
+ifull:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module intra_wrap \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_ifull \
+	  $(RTL_DIR)/intra_wrap.sv $(RTL_DIR)/intra_full_pred.sv \
+	  tb_intra_full.cpp $(CMODEL_BUILD)/intra.o
+	./obj_dir_ifull/Vintra_wrap
+
+.PHONY: ifull

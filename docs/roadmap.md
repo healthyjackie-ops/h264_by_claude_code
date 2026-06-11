@@ -138,7 +138,9 @@ ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
 | **R1a** ✅ | bitreader.sv（64-bit 左对齐缓冲/24-bit lookahead/同拍消费+填充）+ expgolomb.sv（组合 ue/se，CLZ≤11） | Verilator 200×600 随机 op 对拍 C bitstream |
 | **R1b** ✅ | gen_cavlc_rom.py（C 表→casez SVH，roundtrip 自检，单一可信源）+ cavlc_block.sv（clause 9.2 全 FSM：token/t1/level prefix-suffix 自适应/total_zeros/run_before/置位）+ C 端重放 log（H264_CAVLC_LOG） | **74978 块 bit-exact**（phase05/06/13 全 CAVLC 残差，I+P、escape level、chroma DC/AC） |
 | **R1c** ✅ | mb_dec.sv（MB 层 FSM：mb_type/I16 推导/i4 模式预测 min(A,B) 行缓冲/cmode/intra CBP ROM/qp 链/残差序列调度 + nC 行缓冲）+ mb_top 集成（bitreader 双消费者仲裁）| **40/40 向量逐 MB 840B 记录 bit-exact**（phase05+06 全 baseline I）|
-| R2 | dequant/idct + intra_pred + recon | 重建块对拍 |
+| **R2a** ✅ | transform_dec.sv（dequant4x4/luma DC Hadamard/chroma DC/idct4x4_add 组合） | 20000×4 路径随机对拍 bit-exact |
+| **R2b** ✅ | intra4x4_pred.sv（9 模式含 z≤−2 角替换）+ intra16_pred/chroma_pred（V/H/DC/Plane、chroma 象限 DC 规则） | 40000+20000 trials bit-exact |
+| R2c | recon 集成（邻样本行缓冲 + I4 块环 + MB 重建）| 重建 MB 对拍 → 帧级 |
 | R2 | dequant/idct + intra_pred + recon | 重建块对拍 |
 | R3 | deblock + wb + 帧级集成 | 帧 bit-exact + ASAP7 综合 |
 | P 帧 | 运动补偿（半/四像素插值）+ ref list + skip |
