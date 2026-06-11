@@ -97,6 +97,9 @@ int main(int argc, char **argv) {
                 return 1;
             }
             rbsp.assign(n.rbsp, n.rbsp + n.size);
+            // tail padding: single-cycle CAVLC needs a full 24-bit window
+            // even while decoding the last macroblock
+            for (int pi = 0; pi < 8; pi++) rbsp.push_back(0);
             sd_byte = bs.byte;
             sd_bit = bs.bit;
             found = true;

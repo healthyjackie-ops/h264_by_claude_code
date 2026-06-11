@@ -39,7 +39,7 @@ module cavlc_top (
     cavlc_block u_blk (
         .clk(clk), .rst_n(rst_n),
         .req_valid(req_valid), .req_bits(req_bits), .req_ready(req_ready),
-        .show(show),
+        .show(show), .avail(avail),
         .start(start), .chroma_dc(chroma_dc), .nc_class(nc_class),
         .maxc(maxc),
         .busy(busy), .done(done), .tc_out(tc_out), .err(err),

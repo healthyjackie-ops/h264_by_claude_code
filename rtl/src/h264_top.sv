@@ -69,7 +69,7 @@ module h264_top #(
     cavlc_block u_blk (
         .clk(clk), .rst_n(rst_n),
         .req_valid(b_req_valid), .req_bits(b_req_bits),
-        .req_ready(br_req_ready), .show(show),
+        .req_ready(br_req_ready), .show(show), .avail(avail),
         .start(blk_start), .chroma_dc(blk_chroma_dc),
         .nc_class(blk_nc_class), .maxc(blk_maxc),
         .busy(blk_busy), .done(blk_done), .tc_out(blk_tc), .err(blk_err),

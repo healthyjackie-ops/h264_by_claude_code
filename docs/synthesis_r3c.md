@@ -48,8 +48,29 @@ cram→dequant→IDCT→clip 全组合链切成两半：
 
 回归零退步：mb-regress 40/40、top-regress 38/38。
 
+## R4b — CAVLC 单拍化（已完成）
+
+cavlc_block 的 req 从寄存输出改为组合（Mealy）：FSM 推进与 bitreader
+消费同沿，每个语法元素 1 拍（原 2 拍）。两个连带改动：
+
+1. **饥饿 gate**：单拍消费（峰值 ~29 bits/2 拍）可超过 8 bits/拍的
+   字节填充——窗口跌穿 24 bits 后右端补零会被解成"假全零码"
+   （74978 块重放精确抓到 5 个大 level escape 块在 avail 枯竭点出错）。
+   FSM 动作 gate 在 `avail≥24`，testbench 给流尾加 8 字节垫。
+2. mb_dec/cavlc 仲裁不变（mb_dec 仍 2 拍/元素，R4 余项）。
+
+| 指标 | R4a | R4b |
+|---|---|---|
+| 关键路径 | 3332.6 ps（300 MHz） | **3353.6 ps（298 MHz，−0.6%）** |
+| 面积 | 44,830 µm² | 44,843 µm² |
+| CAVLC 吞吐 | 2 拍/元素 | **1 拍/元素**（高码率流收益显著；低码率流被填充等待抵消） |
+
+代价：coeff_token casez → req_bits → bitreader 填充算术成为新关键路径，
+300 MHz 差一档 sizing。回归零退步：74978 块 + 40/40 + 38/38。
+
 ## 下一步（R4 余项）
 
 1. 行缓冲/cram SRAM 化 + FF 削减（49K FF 的大头）
-2. cavlc_block 每拍一语法元素（去 `!req_valid` 等待拍，吞吐 ×2）
-3. deblock_frame 流式行缓冲重构 + 并入综合
+2. mb_dec 单拍化（与 R4b 同法）+ req 路径 sizing 收回 300 MHz
+3. 输入加宽（16/32-bit 喂入）解除填充瓶颈
+4. deblock_frame 流式行缓冲重构 + 并入综合

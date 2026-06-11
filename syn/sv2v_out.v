@@ -86,6 +86,7 @@ module h264_core (
 		.req_bits(b_req_bits),
 		.req_ready(br_req_ready),
 		.show(show),
+		.avail(avail),
 		.start(blk_start),
 		.chroma_dc(blk_chroma_dc),
 		.nc_class(blk_nc_class),
@@ -303,6 +304,7 @@ module cavlc_block (
 	req_bits,
 	req_ready,
 	show,
+	avail,
 	start,
 	chroma_dc,
 	nc_class,
@@ -322,6 +324,7 @@ module cavlc_block (
 	output reg [4:0] req_bits;
 	input wire req_ready;
 	input wire [23:0] show;
+	input wire [6:0] avail;
 	input wire start;
 	input wire chroma_dc;
 	input wire [1:0] nc_class;
@@ -334,19 +337,70 @@ module cavlc_block (
 	output reg [3:0] coef_addr;
 	output reg signed [15:0] coef_data;
 	reg [3:0] st_q;
-	reg [4:0] tc_q;
-	reg [1:0] t1_q;
-	reg [2:0] sl_q;
+	wire win_ok;
+	assign win_ok = avail >= 7'd24;
+	reg cdc_q;
+	reg [4:0] clz;
+	wire [4:0] ctzl;
 	reg [4:0] i_q;
+	reg [4:0] maxc_q;
+	wire [8:0] runl;
+	reg [4:0] sfx_size;
+	reg [1:0] t1_q;
+	reg [4:0] tc_q;
+	wire [12:0] tok;
+	wire [8:0] tzl;
+	reg [4:0] zl_q;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		req_valid = 1'b0;
+		req_bits = 1'sb0;
+		if (win_ok)
+			(* full_case, parallel_case *)
+			case (st_q)
+				4'd1:
+					if (tok[12]) begin
+						req_valid = 1'b1;
+						req_bits = tok[4:0];
+					end
+				4'd2:
+					if (i_q < {3'b000, t1_q}) begin
+						req_valid = 1'b1;
+						req_bits = 5'd1;
+					end
+				4'd3:
+					if (clz < 5'd24) begin
+						req_valid = 1'b1;
+						req_bits = clz + 5'd1;
+					end
+				4'd4:
+					if (sfx_size != 5'd0) begin
+						req_valid = 1'b1;
+						req_bits = sfx_size;
+					end
+				4'd5:
+					if (tc_q < maxc_q) begin
+						if ((cdc_q ? ctzl[4] : tzl[8])) begin
+							req_valid = 1'b1;
+							req_bits = (cdc_q ? {3'b000, ctzl[1:0]} : {1'b0, tzl[3:0]});
+						end
+					end
+				4'd6:
+					if (((i_q != (tc_q - 5'd1)) && (zl_q > 5'd0)) && runl[8]) begin
+						req_valid = 1'b1;
+						req_bits = {1'b0, runl[3:0]};
+					end
+				default:
+					;
+			endcase
+	end
+	reg [2:0] sl_q;
 	reg [4:0] pfx_q;
 	reg signed [15:0] level_q [0:15];
-	reg [4:0] zl_q;
 	reg signed [5:0] pos_q;
 	reg [4:0] run_i_q;
-	reg [4:0] maxc_q;
-	reg cdc_q;
 	reg [1:0] ncc_q;
-	wire [12:0] tok;
 	function automatic [12:0] cavlc_coeff_token;
 		input reg [2:0] tab;
 		input reg [15:0] win;
@@ -643,7 +697,6 @@ module cavlc_block (
 		end
 	endfunction
 	assign tok = cavlc_coeff_token((cdc_q ? 3'd4 : {1'b0, ncc_q}), show[23:8]);
-	wire [8:0] tzl;
 	function automatic [8:0] cavlc_total_zeros;
 		input reg [3:0] tc_m1;
 		input reg [8:0] win;
@@ -857,7 +910,6 @@ module cavlc_block (
 		sv2v_cast_4 = inp;
 	endfunction
 	assign tzl = cavlc_total_zeros(sv2v_cast_4(tc_q - 5'd1), show[23:15]);
-	wire [4:0] ctzl;
 	function automatic [4:0] cavlc_cdc_total_zeros;
 		input reg [1:0] tc_m1;
 		input reg [2:0] win;
@@ -897,7 +949,6 @@ module cavlc_block (
 		sv2v_cast_2 = inp;
 	endfunction
 	assign ctzl = cavlc_cdc_total_zeros(sv2v_cast_2(tc_q - 5'd1), show[23:21]);
-	wire [8:0] runl;
 	wire [2:0] zl_row;
 	function automatic [2:0] sv2v_cast_3;
 		input reg [2:0] inp;
@@ -988,7 +1039,6 @@ module cavlc_block (
 		end
 	endfunction
 	assign runl = cavlc_run_before(zl_row, show[23:13]);
-	reg [4:0] clz;
 	function automatic signed [4:0] sv2v_cast_5_signed;
 		input reg signed [4:0] inp;
 		sv2v_cast_5_signed = inp;
@@ -1019,7 +1069,6 @@ module cavlc_block (
 			end
 		end
 	end
-	reg [4:0] sfx_size;
 	always @(*) begin
 		if (_sv2v_0)
 			;
@@ -1063,8 +1112,6 @@ module cavlc_block (
 	always @(posedge clk or negedge rst_n)
 		if (!rst_n) begin
 			st_q <= 4'd0;
-			req_valid <= 1'b0;
-			req_bits <= 1'sb0;
 			coef_we <= 1'b0;
 			coef_addr <= 1'sb0;
 			coef_data <= 1'sb0;
@@ -1081,7 +1128,6 @@ module cavlc_block (
 			ncc_q <= 1'sb0;
 		end
 		else begin
-			req_valid <= 1'b0;
 			coef_we <= 1'b0;
 			(* full_case, parallel_case *)
 			case (st_q)
@@ -1094,14 +1140,12 @@ module cavlc_block (
 						st_q <= 4'd1;
 					end
 				4'd1:
-					if (!req_valid) begin
+					if (win_ok) begin
 						if (!tok[12])
 							st_q <= 4'd8;
 						else begin
 							tc_q <= tok[11:7];
 							t1_q <= tok[6:5];
-							req_valid <= 1'b1;
-							req_bits <= tok[4:0];
 							if (tok[11:7] == 5'd0)
 								st_q <= 4'd7;
 							else begin
@@ -1112,12 +1156,12 @@ module cavlc_block (
 						end
 					end
 				4'd2:
-					if (!req_valid) begin
+					if (win_ok) begin
 						if (i_q < {3'b000, t1_q}) begin
 							level_q[i_q[3:0]] <= (show[23] ? -16'sd1 : 16'sd1);
-							req_valid <= 1'b1;
-							req_bits <= 5'd1;
 							i_q <= i_q + 5'd1;
+							if ((i_q + 5'd1) == {3'b000, t1_q})
+								st_q <= ({3'b000, t1_q} < tc_q ? 4'd3 : 4'd5);
 						end
 						else if (i_q < tc_q)
 							st_q <= 4'd3;
@@ -1125,41 +1169,26 @@ module cavlc_block (
 							st_q <= 4'd5;
 					end
 				4'd3:
-					if (!req_valid) begin
+					if (win_ok) begin
 						if (clz >= 5'd24)
 							st_q <= 4'd8;
 						else begin
 							pfx_q <= clz;
-							req_valid <= 1'b1;
-							req_bits <= clz + 5'd1;
 							st_q <= 4'd4;
 						end
 					end
 				4'd4:
-					if (!req_valid) begin
-						if (sfx_size == 5'd0) begin
-							level_q[i_q[3:0]] <= lvl_new;
-							if (sl_q == 3'd0)
-								sl_q <= ((abs_lvl > 16'd3) && 1'd1 ? 3'd2 : 3'd1);
-							else if ((abs_lvl > (16'd3 << (sl_q - 3'd1))) && (sl_q < 3'd6))
-								sl_q <= sl_q + 3'd1;
-							i_q <= i_q + 5'd1;
-							st_q <= ((i_q + 5'd1) < tc_q ? 4'd3 : 4'd5);
-						end
-						else begin
-							level_q[i_q[3:0]] <= lvl_new;
-							req_valid <= 1'b1;
-							req_bits <= sfx_size;
-							if (sl_q == 3'd0)
-								sl_q <= (abs_lvl > 16'd3 ? 3'd2 : 3'd1);
-							else if ((abs_lvl > (16'd3 << (sl_q - 3'd1))) && (sl_q < 3'd6))
-								sl_q <= sl_q + 3'd1;
-							i_q <= i_q + 5'd1;
-							st_q <= ((i_q + 5'd1) < tc_q ? 4'd3 : 4'd5);
-						end
+					if (win_ok) begin
+						level_q[i_q[3:0]] <= lvl_new;
+						if (sl_q == 3'd0)
+							sl_q <= (abs_lvl > 16'd3 ? 3'd2 : 3'd1);
+						else if ((abs_lvl > (16'd3 << (sl_q - 3'd1))) && (sl_q < 3'd6))
+							sl_q <= sl_q + 3'd1;
+						i_q <= i_q + 5'd1;
+						st_q <= ((i_q + 5'd1) < tc_q ? 4'd3 : 4'd5);
 					end
 				4'd5:
-					if (!req_valid) begin
+					if (win_ok) begin
 						if (tc_q < maxc_q) begin : sv2v_autoblock_5
 							reg [4:0] tzv;
 							reg [4:0] tzlen;
@@ -1179,8 +1208,6 @@ module cavlc_block (
 							else begin
 								zl_q <= tzv;
 								pos_q <= (sv2v_cast_6(tc_q) + sv2v_cast_6(tzv)) - 6'd1;
-								req_valid <= 1'b1;
-								req_bits <= tzlen;
 								run_i_q <= 1'sb0;
 								i_q <= 1'sb0;
 								st_q <= 4'd6;
@@ -1195,30 +1222,24 @@ module cavlc_block (
 						end
 					end
 				4'd6:
-					if (!req_valid) begin : sv2v_autoblock_6
+					if (win_ok) begin : sv2v_autoblock_6
 						reg [4:0] run;
-						reg [4:0] rlen;
-						reg consume;
+						reg bad;
 						run = 1'sb0;
-						rlen = 1'sb0;
-						consume = 1'b0;
+						bad = 1'b0;
 						if (i_q == (tc_q - 5'd1))
 							run = zl_q;
 						else if (zl_q > 5'd0) begin
 							if (!runl[8] || ({4'b0000, runl[7:4]} > {4'b0000, zl_q}))
-								st_q <= 4'd8;
+								bad = 1'b1;
 							run = {1'b0, runl[7:4]};
-							rlen = {1'b0, runl[3:0]};
-							consume = 1'b1;
 						end
-						if (st_q != 4'd8) begin
+						if (bad)
+							st_q <= 4'd8;
+						else begin
 							coef_we <= 1'b1;
 							coef_addr <= pos_q[3:0];
 							coef_data <= level_q[i_q[3:0]];
-							if (consume) begin
-								req_valid <= 1'b1;
-								req_bits <= rlen;
-							end
 							if ((i_q + 5'd1) >= tc_q)
 								st_q <= 4'd7;
 							else begin

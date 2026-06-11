@@ -15,6 +15,7 @@ module cavlc_block (
     output logic [4:0]  req_bits,
     input  logic        req_ready,
     input  logic [23:0] show,
+    input  logic [6:0]  avail,
 
     // command: maxc 4 (chroma DC), 15 (AC), 16; chroma_dc selects the
     // dedicated token table (C nC == -1); nc_class 0..3 otherwise.
@@ -39,6 +40,48 @@ module cavlc_block (
         S_ERR
     } state_e;
     state_e st_q;
+
+    // single-cycle syntax elements (R4b): requests are combinational off
+    // the current state; the bitreader retires them on the same edge the
+    // FSM moves, so every state sees an up-to-date window.
+    logic win_ok;
+    assign win_ok = (avail >= 7'd24);
+
+    always_comb begin
+        req_valid = 1'b0;
+        req_bits = '0;
+        if (win_ok) unique case (st_q)
+        S_TOKEN: if (tok[12]) begin
+            req_valid = 1'b1;
+            req_bits = tok[4:0];
+        end
+        S_T1: if (i_q < {3'b0, t1_q}) begin
+            req_valid = 1'b1;
+            req_bits = 5'd1;
+        end
+        S_LVL_PFX: if (clz < 5'd24) begin
+            req_valid = 1'b1;
+            req_bits = clz + 5'd1;
+        end
+        S_LVL_SFX: if (sfx_size != 5'd0) begin
+            req_valid = 1'b1;
+            req_bits = sfx_size;
+        end
+        S_TZ: if (tc_q < maxc_q) begin
+            if (cdc_q ? ctzl[4] : tzl[8]) begin
+                req_valid = 1'b1;
+                req_bits = cdc_q ? {3'b0, ctzl[1:0]} : {1'b0, tzl[3:0]};
+            end
+        end
+        S_RUN: begin
+            if ((i_q != tc_q - 5'd1) && (zl_q > 5'd0) && runl[8]) begin
+                req_valid = 1'b1;
+                req_bits = {1'b0, runl[3:0]};
+            end
+        end
+        default: ;
+        endcase
+    end
 
     logic [4:0]  tc_q;
     logic [1:0]  t1_q;
@@ -125,8 +168,6 @@ module cavlc_block (
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             st_q <= S_IDLE;
-            req_valid <= 1'b0;
-            req_bits <= '0;
             coef_we <= 1'b0;
             coef_addr <= '0;
             coef_data <= '0;
@@ -134,7 +175,6 @@ module cavlc_block (
             zl_q <= '0; pos_q <= '0; run_i_q <= '0; maxc_q <= '0;
             cdc_q <= 1'b0; ncc_q <= '0;
         end else begin
-            req_valid <= 1'b0;
             coef_we <= 1'b0;
 
             unique case (st_q)
@@ -146,14 +186,12 @@ module cavlc_block (
                 st_q <= S_TOKEN;
             end
 
-            S_TOKEN: if (!req_valid) begin
+            S_TOKEN: if (win_ok) begin
                 if (!tok[12]) begin
                     st_q <= S_ERR;
                 end else begin
                     tc_q <= tok[11:7];
                     t1_q <= tok[6:5];
-                    req_valid <= 1'b1;
-                    req_bits <= tok[4:0];
                     if (tok[11:7] == 5'd0) begin
                         st_q <= S_DONE;
                     end else begin
@@ -165,12 +203,13 @@ module cavlc_block (
                 end
             end
 
-            S_T1: if (!req_valid) begin
+            S_T1: if (win_ok) begin
                 if (i_q < {3'b0, t1_q}) begin
                     level_q[i_q[3:0]] <= show[23] ? -16'sd1 : 16'sd1;
-                    req_valid <= 1'b1;
-                    req_bits <= 5'd1;
                     i_q <= i_q + 5'd1;
+                    if (i_q + 5'd1 == {3'b0, t1_q}) begin
+                        st_q <= ({3'b0, t1_q} < tc_q) ? S_LVL_PFX : S_TZ;
+                    end
                 end else if (i_q < tc_q) begin
                     st_q <= S_LVL_PFX;
                 end else begin
@@ -178,44 +217,28 @@ module cavlc_block (
                 end
             end
 
-            S_LVL_PFX: if (!req_valid) begin
+            S_LVL_PFX: if (win_ok) begin
                 if (clz >= 5'd24) begin
                     st_q <= S_ERR;     // no marker in window
                 end else begin
                     pfx_q <= clz;
-                    req_valid <= 1'b1;
-                    req_bits <= clz + 5'd1;
                     st_q <= S_LVL_SFX;
                 end
             end
 
-            S_LVL_SFX: if (!req_valid) begin
-                if (sfx_size == 5'd0) begin
-                    level_q[i_q[3:0]] <= lvl_new;
-                    if (sl_q == 3'd0) begin
-                        sl_q <= (abs_lvl > 16'd3 && 3'd1 < 3'd6) ? 3'd2 : 3'd1;
-                    end else if (abs_lvl > (16'd3 << (sl_q - 3'd1)) &&
-                                 sl_q < 3'd6) begin
-                        sl_q <= sl_q + 3'd1;
-                    end
-                    i_q <= i_q + 5'd1;
-                    st_q <= (i_q + 5'd1 < tc_q) ? S_LVL_PFX : S_TZ;
-                end else begin
-                    level_q[i_q[3:0]] <= lvl_new;
-                    req_valid <= 1'b1;
-                    req_bits <= sfx_size;
-                    if (sl_q == 3'd0) begin
-                        sl_q <= (abs_lvl > 16'd3) ? 3'd2 : 3'd1;
-                    end else if (abs_lvl > (16'd3 << (sl_q - 3'd1)) &&
-                                 sl_q < 3'd6) begin
-                        sl_q <= sl_q + 3'd1;
-                    end
-                    i_q <= i_q + 5'd1;
-                    st_q <= (i_q + 5'd1 < tc_q) ? S_LVL_PFX : S_TZ;
+            S_LVL_SFX: if (win_ok) begin
+                level_q[i_q[3:0]] <= lvl_new;
+                if (sl_q == 3'd0) begin
+                    sl_q <= (abs_lvl > 16'd3) ? 3'd2 : 3'd1;
+                end else if (abs_lvl > (16'd3 << (sl_q - 3'd1)) &&
+                             sl_q < 3'd6) begin
+                    sl_q <= sl_q + 3'd1;
                 end
+                i_q <= i_q + 5'd1;
+                st_q <= (i_q + 5'd1 < tc_q) ? S_LVL_PFX : S_TZ;
             end
 
-            S_TZ: if (!req_valid) begin
+            S_TZ: if (win_ok) begin
                 if (tc_q < maxc_q) begin
                     logic [4:0] tzv;
                     logic [4:0] tzlen;
@@ -234,8 +257,6 @@ module cavlc_block (
                     end else begin
                         zl_q <= tzv;
                         pos_q <= 6'(tc_q) + 6'(tzv) - 6'd1;
-                        req_valid <= 1'b1;
-                        req_bits <= tzlen;
                         run_i_q <= '0;
                         i_q <= '0;
                         st_q <= S_RUN;
@@ -249,31 +270,25 @@ module cavlc_block (
                 end
             end
 
-            S_RUN: if (!req_valid) begin
+            S_RUN: if (win_ok) begin
                 logic [4:0] run;
-                logic [4:0] rlen;
-                logic       consume;
+                logic       bad;
                 run = '0;
-                rlen = '0;
-                consume = 1'b0;
+                bad = 1'b0;
                 if (i_q == tc_q - 5'd1) begin
                     run = zl_q;
                 end else if (zl_q > 5'd0) begin
                     if (!runl[8] || {4'b0, runl[7:4]} > {4'b0, zl_q}) begin
-                        st_q <= S_ERR;
+                        bad = 1'b1;
                     end
                     run = {1'b0, runl[7:4]};
-                    rlen = {1'b0, runl[3:0]};
-                    consume = 1'b1;
                 end
-                if (st_q != S_ERR) begin
+                if (bad) begin
+                    st_q <= S_ERR;
+                end else begin
                     coef_we <= 1'b1;
                     coef_addr <= pos_q[3:0];
                     coef_data <= level_q[i_q[3:0]];
-                    if (consume) begin
-                        req_valid <= 1'b1;
-                        req_bits <= rlen;
-                    end
                     if (i_q + 5'd1 >= tc_q) begin
                         st_q <= S_DONE;
                     end else begin
