@@ -26,6 +26,9 @@ module mb_recon #(
     input  logic        mb_valid,
     input  logic [7:0]  mb_x,
     input  logic [7:0]  mb_y,
+    input  logic        mb_inter,      // P MB (incl. skip): MC prediction
+    input  logic signed [15:0] mb_mvx [16],   // z-scan final MVs
+    input  logic signed [15:0] mb_mvy [16],
     input  logic        mb_i16,
     input  logic [5:0]  mb_cbp,
     input  logic [5:0]  mb_qp,
@@ -43,7 +46,16 @@ module mb_recon #(
     output logic [7:0]  rec_y [256],
     output logic [7:0]  rec_u [64],
     output logic [7:0]  rec_v [64],
-    output logic        err
+    output logic        err,
+
+    // reference-frame row-read channel (mc_fetch passthrough)
+    output logic        mc_req_valid,
+    output logic [1:0]  mc_req_plane,  // 0 Y, 1 U, 2 V
+    output logic signed [12:0] mc_req_x,
+    output logic signed [11:0] mc_req_y,
+    output logic [3:0]  mc_req_w,
+    input  logic        mc_rsp_valid,
+    input  logic [71:0] mc_rsp_data
 );
 
     import transform_pkg::*;
@@ -133,11 +145,51 @@ module mb_recon #(
 
     typedef enum logic [3:0] {
         S_IDLE, S_LDC, S_YPRED16, S_YBLK, S_YBLK_WR, S_CPRED, S_CDC,
-        S_CBLK, S_CBLK_WR, S_UPD, S_CLR, S_OUT, S_ERR
+        S_CBLK, S_CBLK_WR, S_UPD, S_CLR, S_OUT, S_ERR, S_MC
     } state_e;
     state_e st_q;
     logic [4:0] k_q;
     logic       comp_q;
+
+    // ---- inter (P) state: MC over 48 blocks, 16 luma 4x4 (z order)
+    // then 16+16 chroma 2x2 (top-left quarter of the 4x4 interpolator
+    // output; bilinear is per-pixel so the split is exact) ----
+    logic        inter_q;
+    logic signed [15:0] mvq_x [16];
+    logic signed [15:0] mvq_y [16];
+    logic [5:0]  mk_q;
+
+    logic        mc_start_w, mc_busy_w, mc_done_w;
+    logic [7:0]  mc_pred_w [16];
+    logic [3:0]  mck;
+    logic        mc_is_c;
+    logic [11:0] mc_px;
+    logic [10:0] mc_py;
+    assign mck = mk_q[3:0];
+    assign mc_is_c = (mk_q[5:4] != 2'd0);
+    always_comb begin
+        if (mc_is_c) begin
+            mc_px = {1'b0, mbx_q, 3'b0} + 12'({zsx(mck), 1'b0});
+            mc_py = {mby_q, 3'b0} + 11'({zsy(mck), 1'b0});
+        end else begin
+            mc_px = {mbx_q, 4'b0} + 12'({zsx(mck), 2'b0});
+            mc_py = 11'({mby_q, 4'b0}) + 11'({zsy(mck), 2'b0});
+        end
+    end
+    assign mc_start_w = (st_q == S_MC) && !mc_busy_w && !mc_done_w;
+    assign mc_req_plane = mk_q[5:4];
+
+    mc_fetch u_mc (
+        .clk(clk), .rst_n(rst_n),
+        .start(mc_start_w), .is_chroma(mc_is_c),
+        .px(mc_px), .py(mc_py),
+        .mvx(mvq_x[mck]), .mvy(mvq_y[mck]),
+        .busy(mc_busy_w), .done(mc_done_w),
+        .req_valid(mc_req_valid), .req_x(mc_req_x), .req_y(mc_req_y),
+        .req_w(mc_req_w),
+        .rsp_valid(mc_rsp_valid), .rsp_data(mc_rsp_data),
+        .pred(mc_pred_w)
+    );
 
     assign busy = (st_q != S_IDLE);
     assign accepted = (st_q == S_IDLE) && mb_valid;
@@ -305,7 +357,8 @@ module mb_recon #(
                 dq_in[i] = cram_dq_w[i*16 +: 16];
             for (int y = 0; y < 4; y++)
                 for (int x = 0; x < 4; x++)
-                    id_pred[y*4+x] = i16_q ? rec_y[(py+y)*16 + px+x]
+                    id_pred[y*4+x] = (i16_q || inter_q)
+                                           ? rec_y[(py+y)*16 + px+x]
                                            : p4[y*4+x];
         end else if (st_q == S_CBLK || st_q == S_CBLK_WR) begin
             int px, py;
@@ -341,6 +394,8 @@ module mb_recon #(
             tlq_y <= '0; tlq_u <= '0; tlq_v <= '0;
             clr_q <= '0;
             wb_q <= 1'b0;
+            inter_q <= 1'b0;
+            mk_q <= '0;
         end else begin
             // per-bank single write ports: capture goes to wb_q's bank,
             // the serial clear scrubs the other (just-reconstructed) one
@@ -365,6 +420,12 @@ module mb_recon #(
                 cmode_q <= mb_cmode;
                 for (int i = 0; i < 16; i++)
                     i4m_q[i] <= mb_i4m[i*4 +: 4];
+                inter_q <= mb_inter;
+                for (int i = 0; i < 16; i++) begin
+                    mvq_x[i] <= mb_mvx[i];
+                    mvq_y[i] <= mb_mvy[i];
+                end
+                mk_q <= '0;
                 have_left <= (mb_x != 8'd0);
                 have_top <= (mb_y != 8'd0);
                 // stage the corner for THIS MB before top_y is rewritten
@@ -379,8 +440,37 @@ module mb_recon #(
                 tyn_q <= (mb_x + 8'd1 < cfg_mb_w) ? ty_nxt_w : '0;
                 tuc_q <= tu_cur_w;
                 tvc_q <= tv_cur_w;
-                st_q <= mb_i16 ? S_LDC : S_YBLK;
+                st_q <= mb_i16 ? S_LDC : (mb_inter ? S_MC : S_YBLK);
                 k_q <= '0;
+            end
+
+            // inter prediction: one mc_fetch block per iteration
+            S_MC: if (mc_done_w) begin
+                if (!mc_is_c) begin
+                    for (int y = 0; y < 4; y++)
+                        for (int x = 0; x < 4; x++)
+                            rec_y[(int'(zsy(mck))*4 + y) * 16 +
+                                  int'(zsx(mck))*4 + x]
+                                <= mc_pred_w[y*4 + x];
+                end else if (!mk_q[5]) begin
+                    for (int y = 0; y < 2; y++)
+                        for (int x = 0; x < 2; x++)
+                            rec_u[(int'(zsy(mck))*2 + y) * 8 +
+                                  int'(zsx(mck))*2 + x]
+                                <= mc_pred_w[y*4 + x];
+                end else begin
+                    for (int y = 0; y < 2; y++)
+                        for (int x = 0; x < 2; x++)
+                            rec_v[(int'(zsy(mck))*2 + y) * 8 +
+                                  int'(zsx(mck))*2 + x]
+                                <= mc_pred_w[y*4 + x];
+                end
+                if (mk_q == 6'd47) begin
+                    mk_q <= '0;
+                    k_q <= '0;
+                    st_q <= S_YBLK;
+                end else
+                    mk_q <= mk_q + 6'd1;
             end
 
             S_LDC: begin
@@ -400,7 +490,7 @@ module mb_recon #(
                 // latch phase: dequant + prediction registered for the
                 // IDCT stage (every block passes through; zero cram makes
                 // the add identity for I4x4, DC-only for I16)
-                if (!i16_q && !p4_ok) st_q <= S_ERR;
+                if (!i16_q && !inter_q && !p4_ok) st_q <= S_ERR;
                 else begin
                     for (int i = 0; i < 16; i++) begin
                         id_in_q[i] <= id_in[i];
@@ -420,7 +510,9 @@ module mb_recon #(
                 if (k_q == 5'd15) begin
                     k_q <= '0;
                     comp_q <= 1'b0;
-                    st_q <= S_CPRED;
+                    st_q <= inter_q
+                            ? ((cbp_q[5:4] != 2'd0) ? S_CDC : S_UPD)
+                            : S_CPRED;
                 end else begin
                     k_q <= k_q + 5'd1;
                     st_q <= S_YBLK;

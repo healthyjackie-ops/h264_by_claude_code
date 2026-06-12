@@ -8,6 +8,7 @@ INC     := $(REPO)/rtl/include
 
 SRCS := $(RTL)/h264_core.sv $(RTL)/bitreader.sv $(RTL)/expgolomb.sv \
         $(RTL)/cavlc_block.sv $(RTL)/mb_dec.sv $(RTL)/mb_recon.sv \
+        $(RTL)/mc_fetch.sv $(RTL)/mc_core.sv \
         $(RTL)/intra4x4_pred.sv $(RTL)/intra_full_pred.sv \
         $(RTL)/transform_dec.sv $(RTL)/deblock_edge.sv \
         $(RTL)/deblock_stream.sv

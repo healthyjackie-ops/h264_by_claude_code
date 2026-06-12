@@ -104,7 +104,7 @@ recon:
 	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module mb_recon \
 	  -CFLAGS "-O2" -Mdir obj_dir_recon \
 	  -I$(RTL_DIR) \
-	  $(RTL_DIR)/mb_recon.sv $(RTL_DIR)/intra4x4_pred.sv \
+	  $(RTL_DIR)/mb_recon.sv $(RTL_DIR)/mc_fetch.sv $(RTL_DIR)/mc_core.sv $(RTL_DIR)/intra4x4_pred.sv \
 	  $(RTL_DIR)/intra_full_pred.sv \
 	  tb_mb_recon.cpp
 	@echo "built; run: ./obj_dir_recon/Vmb_recon <coef> <rec> <mb_w> <cqp>"
@@ -136,7 +136,7 @@ top:
 	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_top \
 	  -I$(REPO)/rtl/include -I$(RTL_DIR) \
 	  $(RTL_DIR)/h264_top.sv $(RTL_DIR)/bitreader.sv $(RTL_DIR)/expgolomb.sv \
-	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/mb_recon.sv \
+	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/mb_recon.sv $(RTL_DIR)/mc_fetch.sv $(RTL_DIR)/mc_core.sv \
 	  $(RTL_DIR)/intra4x4_pred.sv $(RTL_DIR)/intra_full_pred.sv \
 	  $(RTL_DIR)/deblock_frame.sv $(RTL_DIR)/deblock_edge.sv \
 	  tb_h264_top.cpp $(MB_OBJS)
@@ -188,7 +188,7 @@ core:
 	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_core \
 	  -I$(REPO)/rtl/include -I$(RTL_DIR) \
 	  $(RTL_DIR)/h264_core.sv $(RTL_DIR)/bitreader.sv $(RTL_DIR)/expgolomb.sv \
-	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/mb_recon.sv \
+	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/mb_recon.sv $(RTL_DIR)/mc_fetch.sv $(RTL_DIR)/mc_core.sv \
 	  $(RTL_DIR)/intra4x4_pred.sv $(RTL_DIR)/intra_full_pred.sv \
 	  $(RTL_DIR)/deblock_stream.sv $(RTL_DIR)/deblock_edge.sv \
 	  tb_h264_core.cpp $(MB_OBJS)
@@ -258,4 +258,40 @@ p-regress: pparse
 	echo "=== p-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
 	test $$fail -eq 0
 
-.PHONY: pparse p-regress
+prec:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module p_rec_top \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_prec \
+	  -I$(REPO)/rtl/include -I$(RTL_DIR) \
+	  $(RTL_DIR)/p_rec_top.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/bitreader.sv \
+	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/expgolomb.sv \
+	  $(RTL_DIR)/mv_pred.sv $(RTL_DIR)/mb_recon.sv \
+	  $(RTL_DIR)/mc_fetch.sv $(RTL_DIR)/mc_core.sv \
+	  $(RTL_DIR)/intra4x4_pred.sv $(RTL_DIR)/intra_full_pred.sv \
+	  tb_p_rec.cpp $(MB_OBJS)
+	@echo built
+
+# P reconstruction differential over every gated CAVLC baseline P stream
+prec-regress: prec
+	@pass=0; skip=0; fail=0; \
+	for V in $(REPO)/verification/vectors/phase1[3-9]/*.264; do \
+	  rm -f /tmp/pr_p.dump /tmp/pr_prec.dump /tmp/pr_ref.dump; \
+	  H264_RTL_DUMP_P=/tmp/pr_p.dump \
+	  H264_RTL_DUMP_PREC=/tmp/pr_prec.dump \
+	  H264_RTL_DUMP_REF=/tmp/pr_ref.dump \
+	    $(CMODEL_DIR)/build/h264_decode $$V /tmp/pr.yuv \
+	    >/dev/null 2>&1; \
+	  if [ ! -s /tmp/pr_prec.dump ] || [ ! -s /tmp/pr_ref.dump ]; then \
+	    skip=$$((skip+1)); continue; fi; \
+	  r=$$(./obj_dir_prec/Vp_rec_top $$V /tmp/pr_prec.dump \
+	       /tmp/pr_ref.dump 2>&1 | tail -1); \
+	  case "$$r" in \
+	    \[PASS\]*) pass=$$((pass+1));; \
+	    \[SKIP\]*) skip=$$((skip+1));; \
+	    *) fail=$$((fail+1)); echo "$$(basename $$V): $$r";; \
+	  esac; \
+	done; \
+	rm -f /tmp/pr_p.dump /tmp/pr_prec.dump /tmp/pr_ref.dump /tmp/pr.yuv; \
+	echo "=== prec-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
+	test $$fail -eq 0
+
+.PHONY: pparse p-regress prec prec-regress

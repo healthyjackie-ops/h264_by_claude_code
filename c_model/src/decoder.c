@@ -108,6 +108,50 @@ static FILE *rtl_dump_p_file(void) {
     return f;
 }
 
+/* P reconstruction pixels (P-R3d): 384B/MB like DUMP_REC, written at
+ * mb_done so skipped MBs (pure MC) are covered too. Same gate as the
+ * P-syntax dump minus weighted prediction (pixel-level effect). */
+static FILE *rtl_dump_prec_file(void) {
+    static FILE *f;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        const char *path = getenv("H264_RTL_DUMP_PREC");
+        if (path) f = fopen(path, "wb");
+    }
+    return f;
+}
+
+static void rtl_dump_prec(const uint8_t *y, size_t ls, const uint8_t *u,
+                          const uint8_t *v, size_t cs) {
+    FILE *f = rtl_dump_prec_file();
+    if (!f) return;
+    for (int r = 0; r < 16; r++) fwrite(y + (size_t)r * ls, 1, 16, f);
+    for (int r = 0; r < 8; r++) fwrite(u + (size_t)r * cs, 1, 8, f);
+    for (int r = 0; r < 8; r++) fwrite(v + (size_t)r * cs, 1, 8, f);
+}
+
+/* One-shot reference-plane dump for the P-R3d bench: the FIRST gated
+ * P slice's list0[0] uncropped planes (the bench implements the MC
+ * clamp over these). Layout: u16 mb_w, u16 mb_h (LE), then Y, U, V. */
+static void rtl_dump_ref_once(uint32_t mb_w, uint32_t mb_h,
+                              const uint8_t *y, const uint8_t *u,
+                              const uint8_t *v) {
+    static int done;
+    if (done) return;
+    done = 1;
+    const char *path = getenv("H264_RTL_DUMP_REF");
+    if (!path) return;
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    uint16_t hdr[2] = { (uint16_t)mb_w, (uint16_t)mb_h };
+    fwrite(hdr, 2, 2, f);
+    fwrite(y, 1, (size_t)mb_w * 16 * mb_h * 16, f);
+    fwrite(u, 1, (size_t)mb_w * 8 * mb_h * 8, f);
+    fwrite(v, 1, (size_t)mb_w * 8 * mb_h * 8, f);
+    fclose(f);
+}
+
 typedef struct {
     uint8_t mbx, mby, skip, mb_type;
     uint8_t sub[4];
@@ -1309,6 +1353,9 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                        sh->num_ref_l0 == 1 && !pps->transform_8x8 &&
                        rtl_dump_p_file() != NULL);
         if (prec_on) {
+            if (c.list0[0])
+                rtl_dump_ref_once(c.mb_w, c.mb_h, c.list0[0]->Y,
+                                  c.list0[0]->U, c.list0[0]->V);
             memset(&prec, 0, sizeof(prec));
             prec.mbx = (uint8_t)mbx;
             prec.mby = (uint8_t)mby;
@@ -2520,6 +2567,11 @@ mb_done:
                                                      : c.mv_y[gi];
             }
             rtl_dump_p(&prec);
+            if (!pps->weighted_pred)
+                rtl_dump_prec(
+                    c.Y + (size_t)mby * 16 * c.ls + (size_t)mbx * 16, c.ls,
+                    c.U + (size_t)mby * 8 * c.cs + (size_t)mbx * 8,
+                    c.V + (size_t)mby * 8 * c.cs + (size_t)mbx * 8, c.cs);
         }
         /* Intra MBs (and PCM) never wrote motion state: turn the -2
          * sentinels into -1 = intra, mv (0,0) for neighbor prediction. */

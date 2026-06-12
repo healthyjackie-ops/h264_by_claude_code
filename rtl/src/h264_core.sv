@@ -118,7 +118,15 @@ module h264_core #(
     logic dbf_ready, rec_busy;
     logic slice_done;
 
+    // I-only cores: inter path tied off
+    logic signed [15:0] zero_mv [16];
+    always_comb for (int zi = 0; zi < 16; zi++) zero_mv[zi] = '0;
+
     mb_recon #(.MAX_MBW(MAX_MBW)) u_rec (
+        .mb_inter(1'b0), .mb_mvx(zero_mv), .mb_mvy(zero_mv),
+        .mc_req_valid(), .mc_req_plane(), .mc_req_x(), .mc_req_y(),
+        .mc_req_w(),
+        .mc_rsp_valid(1'b0), .mc_rsp_data('0),
         .clk(clk), .rst_n(rst_n),
         .cfg_mb_w(cfg_mb_w), .cfg_cqp_off(cfg_cqp_off),
         .coef_we(coef_we), .coef_blk(coef_blk), .coef_addr(coef_addr),
