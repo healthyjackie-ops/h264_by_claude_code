@@ -118,6 +118,10 @@ module h264_core (
 	wire mb_err;
 	wire rec_valid;
 	wire rec_err;
+	wire rec_accept;
+	wire [7:0] rec_x;
+	wire [7:0] rec_yc;
+	wire [5:0] rec_qp;
 	mb_dec #(.MAX_MBW(MAX_MBW)) u_mb(
 		.clk(clk),
 		.rst_n(rst_n),
@@ -156,7 +160,7 @@ module h264_core (
 		.coef_data(coef_data),
 		.slice_done(slice_done),
 		.err(mb_err),
-		.rec_done(rec_valid && rec_taken)
+		.rec_done(rec_accept && rec_taken)
 	);
 	mb_recon #(.MAX_MBW(MAX_MBW)) u_rec(
 		.clk(clk),
@@ -177,6 +181,10 @@ module h264_core (
 		.mb_cmode(mb_cmode),
 		.mb_i4m(mb_i4m),
 		.busy(),
+		.accepted(rec_accept),
+		.rec_x(rec_x),
+		.rec_yc(rec_yc),
+		.rec_qp(rec_qp),
 		.rec_valid(rec_valid),
 		.rec_y(out_y),
 		.rec_u(out_u),
@@ -184,9 +192,9 @@ module h264_core (
 		.err(rec_err)
 	);
 	assign mb_out_valid = rec_valid;
-	assign mb_out_x = mb_x;
-	assign mb_out_y = mb_y;
-	assign mb_out_qp = mb_qp;
+	assign mb_out_x = rec_x;
+	assign mb_out_y = rec_yc;
+	assign mb_out_qp = rec_qp;
 	assign err = (mb_err | rec_err) | blk_err;
 endmodule
 module bitreader (
@@ -213,11 +221,11 @@ module bitreader (
 	output wire req_ready;
 	output wire [23:0] show;
 	output wire [6:0] avail;
-	reg [63:0] buf_q;
+	reg [95:0] buf_q;
 	reg [6:0] fill_q;
-	assign in_ready = fill_q <= 7'd32;
+	assign in_ready = fill_q <= 7'd64;
 	assign req_ready = req_valid && (fill_q >= {2'b00, req_bits});
-	assign show = buf_q[63:40];
+	assign show = buf_q[95:72];
 	assign avail = fill_q;
 	always @(posedge clk or negedge rst_n)
 		if (!rst_n) begin
@@ -225,7 +233,7 @@ module bitreader (
 			fill_q <= 1'sb0;
 		end
 		else begin : sv2v_autoblock_1
-			reg [63:0] b;
+			reg [95:0] b;
 			reg [6:0] f;
 			b = buf_q;
 			f = fill_q;
@@ -233,7 +241,7 @@ module bitreader (
 				b = b << req_bits;
 				f = f - {2'b00, req_bits};
 			end
-			if (in_valid && (fill_q <= 7'd32)) begin : sv2v_autoblock_2
+			if (in_valid && (fill_q <= 7'd64)) begin : sv2v_autoblock_2
 				reg [31:0] wd;
 				(* full_case, parallel_case *)
 				case (in_bytes)
@@ -242,7 +250,7 @@ module bitreader (
 					3'd3: wd = {in_word[31:8], 8'b00000000};
 					default: wd = in_word;
 				endcase
-				b = b | ({32'b00000000000000000000000000000000, wd} << (7'd32 - f));
+				b = b | ({64'b0000000000000000000000000000000000000000000000000000000000000000, wd} << (7'd64 - f));
 				f = f + {2'b00, in_bytes, 3'b000};
 			end
 			buf_q <= b;
@@ -1578,7 +1586,7 @@ module mb_dec (
 				mb_i4m[i * 4+:4] = i4m_q[i];
 		end
 	end
-	assign mb_valid = st_q == 4'd12;
+	assign mb_valid = (st_q == 4'd12) || (st_q == 4'd13);
 	assign slice_done = st_q == 4'd14;
 	assign err = st_q == 4'd15;
 	function automatic cbp_l_bit;
@@ -1919,7 +1927,25 @@ module mb_dec (
 						nzc_top0[mbx_q] <= wc0;
 						nzc_top1[mbx_q] <= wc1;
 					end
-					st_q <= 4'd13;
+					if (rec_done) begin
+						if ((mbx_q + 8'd1) == cfg_mb_w) begin
+							have_left <= 1'b0;
+							mbx_q <= 1'sb0;
+							if ((mby_q + 8'd1) == cfg_mb_h)
+								st_q <= 4'd14;
+							else begin
+								mby_q <= mby_q + 8'd1;
+								st_q <= 4'd1;
+							end
+						end
+						else begin
+							have_left <= 1'b1;
+							mbx_q <= mbx_q + 8'd1;
+							st_q <= 4'd1;
+						end
+					end
+					else
+						st_q <= 4'd13;
 				end
 				4'd13:
 					if (rec_done) begin
@@ -2318,6 +2344,10 @@ module mb_recon (
 	mb_cmode,
 	mb_i4m,
 	busy,
+	accepted,
+	rec_x,
+	rec_yc,
+	rec_qp,
 	rec_valid,
 	rec_y,
 	rec_u,
@@ -2344,6 +2374,10 @@ module mb_recon (
 	input wire [1:0] mb_cmode;
 	input wire [63:0] mb_i4m;
 	output wire busy;
+	output wire accepted;
+	output wire [7:0] rec_x;
+	output wire [7:0] rec_yc;
+	output wire [5:0] rec_qp;
 	output wire rec_valid;
 	output reg [2047:0] rec_y;
 	output reg [511:0] rec_u;
@@ -2395,21 +2429,24 @@ module mb_recon (
 		input reg [1:0] by;
 		zidx = {by[1], bx[1], by[0], bx[0]};
 	endfunction
-	reg [255:0] cram [0:26];
+	reg [255:0] cramA [0:26];
+	reg [255:0] cramB [0:26];
+	reg wb_q;
 	reg [4:0] clr_q;
 	reg [4:0] dq_row;
-	wire [255:0] cram_wr_old = cram[coef_blk];
+	wire [255:0] cramA_wr_old = cramA[coef_blk];
+	wire [255:0] cramB_wr_old = cramB[coef_blk];
 	reg [255:0] cram_wr_new;
 	always @(*) begin
 		if (_sv2v_0)
 			;
-		cram_wr_new = cram_wr_old;
+		cram_wr_new = (wb_q ? cramB_wr_old : cramA_wr_old);
 		cram_wr_new[coef_addr * 16+:16] = coef_data;
 	end
-	wire [255:0] cram_ldc_w = cram[16];
+	wire [255:0] cram_ldc_w = (wb_q ? cramA[16] : cramB[16]);
 	reg comp_q;
-	wire [255:0] cram_cdc_w = cram[{4'b1000, comp_q} + 5'd1];
-	wire [255:0] cram_dq_w = cram[dq_row];
+	wire [255:0] cram_cdc_w = (wb_q ? cramA[{4'b1000, comp_q} + 5'd1] : cramB[{4'b1000, comp_q} + 5'd1]);
+	wire [255:0] cram_dq_w = (wb_q ? cramA[dq_row] : cramB[dq_row]);
 	reg [127:0] top_y [0:MAX_MBW - 1];
 	reg [63:0] top_u [0:MAX_MBW - 1];
 	reg [63:0] top_v [0:MAX_MBW - 1];
@@ -2443,6 +2480,10 @@ module mb_recon (
 	reg [3:0] st_q;
 	reg [4:0] k_q;
 	assign busy = st_q != 4'd0;
+	assign accepted = (st_q == 4'd0) && mb_valid;
+	assign rec_x = mbx_q;
+	assign rec_yc = mby_q;
+	assign rec_qp = qp_q;
 	assign rec_valid = st_q == 4'd11;
 	assign err = st_q == 4'd12;
 	reg signed [255:0] ldc_in;
@@ -2739,16 +2780,26 @@ module mb_recon (
 			tlq_u <= 1'sb0;
 			tlq_v <= 1'sb0;
 			clr_q <= 1'sb0;
+			wb_q <= 1'b0;
 		end
 		else begin
-			if (coef_we)
-				cram[coef_blk] <= cram_wr_new;
-			else if (st_q == 4'd10)
-				cram[clr_q] <= 1'sb0;
+			if (wb_q) begin
+				if (coef_we)
+					cramB[coef_blk] <= cram_wr_new;
+				if (st_q == 4'd10)
+					cramA[clr_q] <= 1'sb0;
+			end
+			else begin
+				if (coef_we)
+					cramA[coef_blk] <= cram_wr_new;
+				if (st_q == 4'd10)
+					cramB[clr_q] <= 1'sb0;
+			end
 			(* full_case, parallel_case *)
 			case (st_q)
 				4'd0:
 					if (mb_valid) begin
+						wb_q <= ~wb_q;
 						mbx_q <= mb_x;
 						mby_q <= mb_y;
 						i16_q <= mb_i16;
@@ -2936,14 +2987,14 @@ module mb_recon (
 					top_u[mbx_q] <= wu;
 					top_v[mbx_q] <= wv;
 					clr_q <= 1'sb0;
-					st_q <= 4'd10;
+					st_q <= 4'd11;
 				end
+				4'd11: st_q <= 4'd10;
 				4'd10: begin
 					clr_q <= clr_q + 5'd1;
 					if (clr_q == 5'd26)
-						st_q <= 4'd11;
+						st_q <= 4'd0;
 				end
-				4'd11: st_q <= 4'd0;
 				4'd12: st_q <= 4'd12;
 				default: st_q <= 4'd12;
 			endcase

@@ -87,7 +87,9 @@ module h264_core #(
     logic [4:0] coef_blk;
     logic [3:0] coef_addr;
     logic signed [15:0] coef_data;
-    logic mb_err, rec_valid, rec_err;
+    logic mb_err, rec_valid, rec_err, rec_accept;
+    logic [7:0] rec_x, rec_yc;
+    logic [5:0] rec_qp;
 
     mb_dec #(.MAX_MBW(MAX_MBW)) u_mb (
         .clk(clk), .rst_n(rst_n),
@@ -106,7 +108,7 @@ module h264_core #(
         .coef_we(coef_we), .coef_blk(coef_blk), .coef_addr(coef_addr),
         .coef_data(coef_data),
         .slice_done(slice_done), .err(mb_err),
-        .rec_done(rec_valid && rec_taken)
+        .rec_done(rec_accept && rec_taken)
     );
 
     mb_recon #(.MAX_MBW(MAX_MBW)) u_rec (
@@ -117,15 +119,17 @@ module h264_core #(
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
-        .busy(), .rec_valid(rec_valid),
+        .busy(), .accepted(rec_accept),
+        .rec_x(rec_x), .rec_yc(rec_yc), .rec_qp(rec_qp),
+        .rec_valid(rec_valid),
         .rec_y(out_y), .rec_u(out_u), .rec_v(out_v),
         .err(rec_err)
     );
 
     assign mb_out_valid = rec_valid;
-    assign mb_out_x = mb_x;
-    assign mb_out_y = mb_y;
-    assign mb_out_qp = mb_qp;
+    assign mb_out_x = rec_x;
+    assign mb_out_y = rec_yc;
+    assign mb_out_qp = rec_qp;
     assign err = mb_err | rec_err | blk_err;
 
 endmodule

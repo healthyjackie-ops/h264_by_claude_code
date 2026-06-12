@@ -64,7 +64,8 @@ module mb_dec #(
     output logic        err,
 
     // reconstruction handshake: after the header pulse, parsing stalls
-    // until the consumer signals completion (tie high when unused)
+    // only until the consumer ACCEPTS the header (R4f pipelining: the
+    // next MB parses while the previous reconstructs); tie high unused
     input  logic        rec_done
 );
 
@@ -246,7 +247,7 @@ module mb_dec #(
     always_comb begin
         for (int i = 0; i < 16; i++) mb_i4m[i*4 +: 4] = i4m_q[i];
     end
-    assign mb_valid = (st_q == S_EMIT);
+    assign mb_valid = (st_q == S_EMIT) || (st_q == S_WAIT_REC);
     assign slice_done = (st_q == S_DONE);
     assign err = (st_q == S_ERR);
 
@@ -513,9 +514,29 @@ module mb_dec #(
                     nzc_top0[mbx_q] <= wc0;
                     nzc_top1[mbx_q] <= wc1;
                 end
-                st_q <= S_WAIT_REC;
+                // the consumer may accept on this very cycle (it idles
+                // while we parse): advance straight through, else hold
+                // valid in S_WAIT_REC
+                if (rec_done) begin
+                    if (mbx_q + 8'd1 == cfg_mb_w) begin
+                        have_left <= 1'b0;
+                        mbx_q <= '0;
+                        if (mby_q + 8'd1 == cfg_mb_h) st_q <= S_DONE;
+                        else begin
+                            mby_q <= mby_q + 8'd1;
+                            st_q <= S_PRE;
+                        end
+                    end else begin
+                        have_left <= 1'b1;
+                        mbx_q <= mbx_q + 8'd1;
+                        st_q <= S_PRE;
+                    end
+                end else begin
+                    st_q <= S_WAIT_REC;
+                end
             end
 
+            // hold the header valid until accepted, then advance
             S_WAIT_REC: if (rec_done) begin
                 if (mbx_q + 8'd1 == cfg_mb_w) begin
                     have_left <= 1'b0;

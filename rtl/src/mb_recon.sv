@@ -34,6 +34,10 @@ module mb_recon #(
     input  logic [63:0] mb_i4m,
 
     output logic        busy,
+    output logic        accepted,      // header taken; parser may proceed
+    output logic [7:0]  rec_x,         // latched coords for the consumer
+    output logic [7:0]  rec_yc,
+    output logic [5:0]  rec_qp,
     output logic        rec_valid,     // one-cycle pulse, planes readable
     output logic [7:0]  rec_y [256],
     output logic [7:0]  rec_u [64],
@@ -73,22 +77,30 @@ module mb_recon #(
     // coefficient store: 27 blocks x 256b wide words (16 lanes x 16b).
     // Single lane-write port + async row reads -> yosys keeps it as a
     // memory under `memory -nomap` (R4d).
-    logic [255:0] cram [27];
+    // double-banked store (R4f): mb_dec fills one bank while this MB
+    // reconstructs (and afterwards clears) the other — the serial clear
+    // and the parse/reconstruct overlap instead of serializing.
+    logic [255:0] cramA [27];
+    logic [255:0] cramB [27];
+    logic         wb_q;                // bank being written by mb_dec
     logic [4:0] clr_q;                 // serial clear row counter
 
     // explicit async read ports (continuous assigns keep yosys's memory
     // inference happy — a function wrapping mem reads gets inlined by
     // sv2v into an @(cram) sensitivity list the verilog frontend rejects)
     logic [4:0] dq_row;
-    wire [255:0] cram_wr_old = cram[coef_blk];
+    wire [255:0] cramA_wr_old = cramA[coef_blk];
+    wire [255:0] cramB_wr_old = cramB[coef_blk];
     logic [255:0] cram_wr_new;
     always_comb begin
-        cram_wr_new = cram_wr_old;
+        cram_wr_new = wb_q ? cramB_wr_old : cramA_wr_old;
         cram_wr_new[coef_addr*16 +: 16] = coef_data;
     end
-    wire [255:0] cram_ldc_w = cram[16];
-    wire [255:0] cram_cdc_w = cram[{4'b1000, comp_q} + 5'd1]; // 17 + comp
-    wire [255:0] cram_dq_w  = cram[dq_row];
+    // read side: the bank NOT being written (the accepted MB's bank)
+    wire [255:0] cram_ldc_w = wb_q ? cramA[16] : cramB[16];
+    wire [255:0] cram_cdc_w = wb_q ? cramA[{4'b1000, comp_q} + 5'd1]
+                                   : cramB[{4'b1000, comp_q} + 5'd1];
+    wire [255:0] cram_dq_w  = wb_q ? cramA[dq_row] : cramB[dq_row];
 
     // neighbor line buffers, one wide word per MB column (R4d: single
     // write port + async row read -> memory inference)
@@ -127,6 +139,10 @@ module mb_recon #(
     logic       comp_q;
 
     assign busy = (st_q != S_IDLE);
+    assign accepted = (st_q == S_IDLE) && mb_valid;
+    assign rec_x = mbx_q;
+    assign rec_yc = mby_q;
+    assign rec_qp = qp_q;
     assign rec_valid = (st_q == S_OUT);
     assign err = (st_q == S_ERR);
 
@@ -323,18 +339,22 @@ module mb_recon #(
             tl_y <= '0; tl_u <= '0; tl_v <= '0;
             tlq_y <= '0; tlq_u <= '0; tlq_v <= '0;
             clr_q <= '0;
+            wb_q <= 1'b0;
         end else begin
-            // single write port: coefficient capture while parsing, the
-            // serial clear inside S_CLR (mb_dec is stalled there, so the
-            // two never collide)
-            if (coef_we) begin
-                cram[coef_blk] <= cram_wr_new;
-            end else if (st_q == S_CLR) begin
-                cram[clr_q] <= '0;
+            // per-bank single write ports: capture goes to wb_q's bank,
+            // the serial clear scrubs the other (just-reconstructed) one
+            if (wb_q) begin
+                if (coef_we) cramB[coef_blk] <= cram_wr_new;
+                if (st_q == S_CLR) cramA[clr_q] <= '0;
+            end else begin
+                if (coef_we) cramA[coef_blk] <= cram_wr_new;
+                if (st_q == S_CLR) cramB[clr_q] <= '0;
             end
 
             unique case (st_q)
             S_IDLE: if (mb_valid) begin
+                wb_q <= ~wb_q;                 // incoming MB fills the
+                                               // other bank from now on
                 mbx_q <= mb_x;
                 mby_q <= mb_y;
                 i16_q <= mb_i16;
@@ -474,15 +494,15 @@ module mb_recon #(
                 top_u[mbx_q] <= wu;
                 top_v[mbx_q] <= wv;
                 clr_q <= '0;
-                st_q <= S_CLR;
+                st_q <= S_OUT;
             end
+
+            S_OUT: st_q <= S_CLR;
 
             S_CLR: begin
                 clr_q <= clr_q + 5'd1;
-                if (clr_q == 5'd26) st_q <= S_OUT;
+                if (clr_q == 5'd26) st_q <= S_IDLE;
             end
-
-            S_OUT: st_q <= S_IDLE;
 
             S_ERR: st_q <= S_ERR;
             default: st_q <= S_ERR;

@@ -91,7 +91,9 @@ module h264_top #(
     logic [3:0] coef_addr;
     logic signed [15:0] coef_data;
     logic slice_done, mb_err;
-    logic rec_valid, rec_err;
+    logic rec_valid, rec_err, rec_accept;
+    logic [7:0] rec_x, rec_yc;
+    logic [5:0] rec_qp;
 
     mb_dec #(.MAX_MBW(MAX_MBW)) u_mb (
         .clk(clk), .rst_n(rst_n),
@@ -110,7 +112,7 @@ module h264_top #(
         .coef_we(coef_we), .coef_blk(coef_blk), .coef_addr(coef_addr),
         .coef_data(coef_data),
         .slice_done(slice_done), .err(mb_err),
-        .rec_done(rec_valid)
+        .rec_done(rec_accept)
     );
 
     // ---- reconstruction ----
@@ -126,30 +128,42 @@ module h264_top #(
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
-        .busy(), .rec_valid(rec_valid),
+        .busy(rec_busy), .accepted(rec_accept),
+        .rec_x(rec_x), .rec_yc(rec_yc), .rec_qp(rec_qp),
+        .rec_valid(rec_valid),
         .rec_y(rec_y), .rec_u(rec_u), .rec_v(rec_v),
         .err(rec_err)
     );
 
-    // mb position latched for the deblock push (mb_dec holds them
-    // through S_WAIT_REC so the live ports are stable at rec_valid)
+    // deblock push uses mb_recon's LATCHED coords/qp — with parsing
+    // pipelined ahead, mb_dec's live ports already show the next MB
     logic frame_go;
     logic dbf_done;
     logic [7:0] dbf_rd;
-    assign frame_go = slice_done;
+    // the parser finishes ahead of the last reconstruction: hold the
+    // filter launch until recon is idle again
+    logic rec_busy;
+    logic slice_done_q;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) slice_done_q <= 1'b0;
+        else if (slice_done) slice_done_q <= 1'b1;
+        else if (frame_go) slice_done_q <= 1'b0;
+    end
+    assign frame_go = slice_done_q && !rec_busy;
 
     deblock_frame #(.MAX_W(MAX_W), .MAX_H(MAX_H)) u_dbf (
         .clk(clk), .rst_n(rst_n),
         .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h),
         .cfg_cqp_off(cfg_cqp_off),
         .cfg_a_off(cfg_a_off), .cfg_b_off(cfg_b_off),
-        .mb_push(rec_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_qp(mb_qp),
+        .mb_push(rec_valid), .mb_x(rec_x), .mb_y(rec_yc), .mb_qp(rec_qp),
         .in_y(rec_y), .in_u(rec_u), .in_v(rec_v),
         .frame_go(frame_go && cfg_deblock),
         .frame_done(dbf_done), .busy(),
         .rd_addr(rd_addr), .rd_plane(rd_plane), .rd_data(dbf_rd)
     );
-    assign frame_done = cfg_deblock ? dbf_done : slice_done;
+    assign frame_done = cfg_deblock ? dbf_done
+                                    : (slice_done_q && !rec_busy);
     assign rd_data = dbf_rd;           // buffer holds unfiltered pixels
                                        // when cfg_deblock=0 (no filter ran)
     assign err = mb_err | rec_err | blk_err;
