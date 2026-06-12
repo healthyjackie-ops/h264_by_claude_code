@@ -135,7 +135,7 @@ ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
 | Phase | 内容 | 验收 |
 |---|---|---|
 | **P-R1** ✅ | mc_core.sv（mc4x4_luma 15 qpel 相位 9x9 窗口 + mc4x4_chroma 1/8 双线性 5x5）| 60000 随机 trial（全相位+边缘 clamp）bit-exact vs mc.o，第一发全过 |
-| P-R2 | 参考帧访问架构（窗口取数 + 帧存接口）| 设计决策：外存 AXI vs 片上 |
+| **P-R2** ✅ | mc_fetch.sv：参考帧留系统侧（DDR/pad 帧），核发 clamp 语义窗口行读（req x/y/w → rsp 9px 行）；坐标推导（xInt=px+mv>>2、相位=mv&3）入 RTL；统一 4x4 粒度（分块插值与整块数学等价） | 20000 块（随机 MV 越界+全相位+取数协议）bit-exact，第一发全过 |
 | P-R3 | P MB 层 FSM（MV 预测/skip/分区）+ 集成 | P 流帧级 bit-exact |
 
 ## Wave 13 — RTL（进行中）

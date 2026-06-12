@@ -216,3 +216,12 @@ mc:
 	./obj_dir_mc/Vmc_wrap
 
 .PHONY: mc
+
+mcf:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module mc_fetch \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_mcf \
+	  $(RTL_DIR)/mc_fetch.sv $(RTL_DIR)/mc_core.sv \
+	  tb_mc_fetch.cpp $(CMODEL_BUILD)/mc.o
+	./obj_dir_mcf/Vmc_fetch
+
+.PHONY: mcf
