@@ -142,7 +142,16 @@ ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
 | **P-R3d** ✅ | inter 重建集成：mb_recon S_MC 子环（48 块/MB：16 luma 4x4 z 序 + 32 chroma 2x2，双线性逐像素独立故 2x2 取 4x4 插值左上角精确）经 mc_fetch 行读通道（+plane 维度）取预测；inter 残差复用 I 通路（id_pred 改读 rec_*、跳过 intra 预测态）；p_rec_top 差分顶层 + C 端 H264_RTL_DUMP_PREC（384B/MB @mb_done，含 skip MB）/H264_RTL_DUMP_REF（首个门控 P slice 的未裁剪 list0[0] 平面）| **24 条 P 流逐 MB 像素 bit-exact（make prec-regress，第一发全过）**；I 回归 40/40+40/40+38/38、C 193/193 |
 | **P-R3e** ✅ | h264_core 完整 I/P 核：cfg_is_p + mv_pred 入核、MC 行读通道出核、参考帧回写闭环（tb 持帧：滤波输出 → 下一帧参考）；**deblock P bS**（8.7.2.1 单参考子集：intra→4/3、nz→2、|Δmv|≥4→1、否则 0 不滤；bS=0 写回门控；chroma 逐 luma 块行映射）——nz/mv/inter sideband 从 mb_dec 经 mb_recon 贯通 deblock_stream（row_mi 133b 行缓冲 + cur/left/top 状态）；全 I 流自然退化为旧 4/3 常数 | **15 条多帧 I/P 流（含 deblock）帧级 yuv bit-exact（make corep-regress）**；全回归 40/40+40/40+38/38+24/24+24/24、C 193/193 |
 
-## Wave 15 — RTL CABAC 硬化（进行中）
+## Wave 16 — RTL B 帧硬化（进行中，规格 docs/rtl_b_spec.md）
+
+| Phase | 内容 | 验收 |
+|---|---|---|
+| W16-a | mb_dec CAVLC B 语法 + mv_pred 双 list + spatial direct | B 语法/MV dump 逐 MB bit-exact |
+| W16-b | mb_recon 双向 MC + avg + 核集成（list 通道、tb DPB） | phase17 CAVLC B 多帧 yuv bit-exact |
+| W16-c | temporal direct（colocated 通道 + POC 缩放） | phase19 CAVLC 流 bit-exact |
+| W16-d | CABAC B + 双熵 | phase17/19 全熵 bit-exact |
+
+## Wave 15 — RTL CABAC 硬化（已完成）
 
 | Phase | 内容 | 验收 |
 |---|---|---|
