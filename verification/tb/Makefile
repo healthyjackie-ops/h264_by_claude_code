@@ -313,6 +313,7 @@ corep:
 	  $(RTL_DIR)/mc_fetch.sv $(RTL_DIR)/mc_core.sv $(RTL_DIR)/mv_pred.sv \
 	  $(RTL_DIR)/intra4x4_pred.sv $(RTL_DIR)/intra_full_pred.sv \
 	  $(RTL_DIR)/deblock_stream.sv $(RTL_DIR)/deblock_edge.sv \
+	  $(RTL_DIR)/cabac_mb.sv $(RTL_DIR)/cabac_core.sv \
 	  tb_h264_core_p.cpp $(DEC_OBJS)
 	@echo built
 
@@ -320,6 +321,7 @@ corep:
 corep-regress: corep
 	@pass=0; skip=0; fail=0; \
 	for V in $(REPO)/verification/vectors/phase13/*.264 \
+	         $(REPO)/verification/vectors/phase14/*.264 \
 	         $(REPO)/verification/vectors/phase1[5-9]/*.264; do \
 	  r=$$(./obj_dir_corep/Vh264_core $$V 2>&1 | tail -1); \
 	  case "$$r" in \

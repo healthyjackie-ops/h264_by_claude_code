@@ -79,7 +79,7 @@ int main(int argc, char **argv) {
                 nal_free(&n);
                 return 1;
             }
-            if (pps.entropy_coding_mode || e.sh.is_b ||
+            if (e.sh.is_b ||
                 pps.transform_8x8 || e.sh.first_mb != 0 ||
                 (e.sh.is_p && (e.sh.num_ref_l0 != 1 ||
                                pps.weighted_pred))) {
@@ -89,8 +89,13 @@ int main(int argc, char **argv) {
             }
             e.rbsp.assign(n.rbsp, n.rbsp + n.size);
             for (int pi = 0; pi < 8; pi++) e.rbsp.push_back(0);
-            e.sd_byte = bs.byte;
-            e.sd_bit = bs.bit;
+            if (pps.entropy_coding_mode) {           // cabac aligns
+                e.sd_byte = bs.bit ? bs.byte + 1 : bs.byte;
+                e.sd_bit = 0;
+            } else {
+                e.sd_byte = bs.byte;
+                e.sd_bit = bs.bit;
+            }
             ents.push_back(std::move(e));
         }
         nal_free(&n);
@@ -193,6 +198,8 @@ int main(int argc, char **argv) {
         top.cfg_b_off = (uint8_t)(e.sh.beta_offset & 0x3F);
         top.cfg_deblock = (e.sh.disable_deblock != 1);
         top.cfg_is_p = e.sh.is_p ? 1 : 0;
+        top.cfg_cabac = pps.entropy_coding_mode ? 1 : 0;
+        top.cfg_init_idc = e.sh.is_p ? (uint8_t)e.sh.cabac_init_idc : 0;
 
         size_t fi = e.sd_byte;
         auto pump = [&] {

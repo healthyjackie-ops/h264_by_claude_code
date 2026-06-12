@@ -24,6 +24,7 @@ module h264_core #(
     input  logic        cfg_deblock,
     input  logic        cfg_is_p,
     input  logic        cfg_cabac,
+    input  logic [1:0]  cfg_init_idc,
 
     input  logic        start,
     input  logic        align_valid,
@@ -153,6 +154,11 @@ module h264_core #(
     logic [4:0]  coef_blk_c;
     logic [3:0]  coef_addr_c;
     logic signed [15:0] coef_data_c;
+    logic        mb_skip_c, mb_inter_c, mvd_valid_c, skip_go_c;
+    logic [2:0]  mb_ptype_c;
+    logic [7:0]  mb_sub_c;
+    logic signed [15:0] mvd_x_c, mvd_y_c;
+    logic [15:0] mb_nz_c;
 
     cabac_mb #(.MAX_MBW(MAX_MBW)) u_cm (
         .clk(clk), .rst_n(rst_n),
@@ -160,6 +166,11 @@ module h264_core #(
         .start(start && cfg_cabac),
         .req_valid(c_req_valid), .req_bits(c_req_bits),
         .req_ready(br_req_ready), .show(show), .avail(avail),
+        .cfg_is_p(cfg_is_p), .cfg_init_idc(cfg_init_idc),
+        .mb_skip(mb_skip_c), .mb_inter(mb_inter_c),
+        .mb_ptype(mb_ptype_c), .mb_sub(mb_sub_c),
+        .mvd_valid(mvd_valid_c), .mvd_x(mvd_x_c), .mvd_y(mvd_y_c),
+        .skip_go(skip_go_c), .mb_nz(mb_nz_c),
         .mb_valid(mb_valid_c), .mb_x(mb_x_c), .mb_y(mb_y_c),
         .mb_i16(mb_i16_c),
         .mb_cbp(mb_cbp_c), .mb_qp(mb_qp_c), .mb_i16_mode(mb_i16_mode_c),
@@ -185,16 +196,30 @@ module h264_core #(
     assign coef_data = cfg_cabac ? coef_data_c : coef_data_v;
     assign slice_done = cfg_cabac ? slice_done_c : slice_done_v;
     assign mb_err = cfg_cabac ? mb_err_c : mb_err_v;
-    assign mb_nz_w = cfg_cabac ? 16'd0 : mb_nz_v;
+    assign mb_nz_w = cfg_cabac ? mb_nz_c : mb_nz_v;
+
+    // P syntax stream mux into mv_pred / mb_recon / deblock
+    logic mb_skip_m, mb_inter_m, mvd_valid_m, skip_go_m;
+    logic [2:0] mb_ptype_m;
+    logic [7:0] mb_sub_m;
+    logic signed [15:0] mvd_x_m, mvd_y_m;
+    assign mb_skip_m = cfg_cabac ? mb_skip_c : mb_skip;
+    assign mb_inter_m = cfg_cabac ? mb_inter_c : mb_inter;
+    assign mb_ptype_m = cfg_cabac ? mb_ptype_c : mb_ptype;
+    assign mb_sub_m = cfg_cabac ? mb_sub_c : mb_sub;
+    assign mvd_valid_m = cfg_cabac ? mvd_valid_c : mvd_valid;
+    assign mvd_x_m = cfg_cabac ? mvd_x_c : mvd_x;
+    assign mvd_y_m = cfg_cabac ? mvd_y_c : mvd_y;
+    assign skip_go_m = cfg_cabac ? skip_go_c : skip_go_w;
 
 
     mv_pred #(.MAX_MBW(MAX_MBW)) u_mv (
         .clk(clk), .rst_n(rst_n),
         .cfg_mb_w(cfg_mb_w), .start(start),
-        .mb_ptype(mb_ptype), .mb_sub(mb_sub),
-        .mvd_valid(mvd_valid), .mvd_x(mvd_x), .mvd_y(mvd_y),
-        .skip_go(skip_go_w), .commit(rec_accept),
-        .mb_inter(mb_inter), .mb_skip(mb_skip),
+        .mb_ptype(mb_ptype_m), .mb_sub(mb_sub_m),
+        .mvd_valid(mvd_valid_m), .mvd_x(mvd_x_m), .mvd_y(mvd_y_m),
+        .skip_go(skip_go_m), .commit(rec_accept),
+        .mb_inter(mb_inter_m), .mb_skip(mb_skip_m),
         .mv_out_x(mv_x_w), .mv_out_y(mv_y_w)
     );
 
@@ -205,7 +230,7 @@ module h264_core #(
     logic slice_done;
 
     mb_recon #(.MAX_MBW(MAX_MBW)) u_rec (
-        .mb_inter(mb_inter), .mb_nz(mb_nz_w),
+        .mb_inter(mb_inter_m), .mb_nz(mb_nz_w),
         .mb_mvx(mv_x_w), .mb_mvy(mv_y_w),
         .mc_req_valid(mc_req_valid), .mc_req_plane(mc_req_plane),
         .mc_req_x(mc_req_x), .mc_req_y(mc_req_y), .mc_req_w(mc_req_w),

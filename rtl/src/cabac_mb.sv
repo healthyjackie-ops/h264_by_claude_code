@@ -28,6 +28,8 @@ module cabac_mb #(
     input  logic [7:0]  cfg_mb_w,
     input  logic [7:0]  cfg_mb_h,
     input  logic [5:0]  cfg_qp,
+    input  logic        cfg_is_p,
+    input  logic [1:0]  cfg_init_idc,
     input  logic        start,
 
     // bitreader window (shared decoder front end)
@@ -47,6 +49,17 @@ module cabac_mb #(
     output logic [1:0]  mb_i16_mode,
     output logic [1:0]  mb_cmode,
     output logic [63:0] mb_i4m,
+
+    // P syntax stream (mb_dec-compatible, drives mv_pred)
+    output logic        mb_skip,
+    output logic        mb_inter,
+    output logic [2:0]  mb_ptype,
+    output logic [7:0]  mb_sub,
+    output logic        mvd_valid,
+    output logic signed [15:0] mvd_x,
+    output logic signed [15:0] mvd_y,
+    output logic        skip_go,
+    output logic [15:0] mb_nz,         // cbf bitmap, raster (deblock bS)
 
     // coefficient write stream (mb_dec conventions)
     output logic        coef_we,
@@ -82,7 +95,8 @@ module cabac_mb #(
         .clk(clk), .rst_n(rst_n),
         .req_valid(req_valid), .req_bits(req_bits), .req_ready(req_ready),
         .show(show), .avail(avail),
-        .init_start(ci_start), .init_qp(cfg_qp), .init_model(2'd3),
+        .init_start(ci_start), .init_qp(cfg_qp),
+        .init_model(cfg_is_p ? cfg_init_idc : 2'd3),
         .init_busy(ci_busy),
         .op_valid(op_valid), .op(op), .op_ctx(op_ctx),
         .op_ready(op_ready), .bin(bin),
@@ -98,9 +112,10 @@ module cabac_mb #(
     //  [10:9] cbf_cdc, [14:11] cbf_l bottom row, [16:15] cbf_c U bottom,
     //  [18:17] cbf_c V bottom, [34:19] i4 modes of the bottom row
     // ------------------------------------------------------------------
-    logic [34:0] nrow [MAX_MBW];
-    wire  [34:0] nrow_rd = nrow[mbx_q];
-    logic [34:0] nrow_q;               // prefetched copy for this MB
+    // [35] mb_skip, [91:36] amvd bottom row (4 x {ay[6:0], ax[6:0]})
+    logic [91:0] nrow [MAX_MBW];
+    wire  [91:0] nrow_rd = nrow[mbx_q];
+    logic [91:0] nrow_q;               // prefetched copy for this MB
 
     // left-neighbor state
     logic        l_valid;
@@ -111,6 +126,9 @@ module cabac_mb #(
     logic [3:0]  l_cbfl;               // right column, rows 0..3
     logic [1:0]  l_cbfc [2];           // right column, rows 0..1
     logic [3:0]  l_i4m [4];
+    logic        l_skip;
+    logic [6:0]  l_avx [4];            // right-column |mvd| (clip 70)
+    logic [6:0]  l_avy [4];
 
     // current MB state
     logic [7:0]  mbx_q, mby_q;
@@ -124,6 +142,22 @@ module cabac_mb #(
     logic        ldc_q;
     logic        lastqpd_q;
 
+    // P-mode state
+    logic        skip_q, inter_q;
+    logic [2:0]  ptype_q;
+    logic [7:0]  sub_q;
+    logic [1:0]  pb_q, ps_q;           // partition / sub counters
+    logic        axis_q;               // 0 = mvd x, 1 = mvd y
+    logic [15:0] uegv_q;               // UEG3 |mvd| accumulator
+    logic [2:0]  uctx_q;               // unary ctx offset 3..6
+    logic [4:0]  egk3_q;
+    logic [15:0] egv3_q;
+    logic signed [15:0] mvdx_q, mvdy_q;
+    logic        mvdv_q;               // registered mvd_valid pulse
+    logic [6:0]  cur_avx [16];         // |mvd| per 4x4, raster
+    logic [6:0]  cur_avy [16];
+    logic [15:0] av_w;                 // written mask
+
     logic have_left, have_top;
     assign have_left = (mbx_q != 8'd0);
     assign have_top = (mby_q != 8'd0);
@@ -135,7 +169,9 @@ module cabac_mb #(
         S_IDLE, S_CINIT, S_PRE,
         S_MBT, S_I4M, S_CMD, S_CBP, S_QPD,
         R_NEXT, R_CBF, R_SIG, R_LAST, R_L1, R_GT1, R_EGP, R_EGS, R_SIGN,
-        S_EOS, S_EMIT, S_DONE, S_ERR
+        S_EOS, S_EMIT, S_DONE, S_ERR,
+        S_SKIPF, S_PMBT, S_ISUF, S_PSUB,
+        M_B0, M_U, M_EGP, M_EGS, M_SGN
     } state_e;
     state_e st_q;
 
@@ -191,6 +227,62 @@ module cabac_mb #(
         return (n < 3'd4) ? 3'd4 : ((n == 3'd7) ? 3'd7 : n + 3'd1);
     endfunction
 
+    // ---- P partition geometry from (ptype_q, sub_q, pb_q, ps_q) ----
+    logic [2:0] g_bx0, g_by0, g_w4, g_h4;
+    logic [1:0] sub2;
+    logic [2:0] nsub;
+    always_comb begin
+        sub2 = sub_q[{pb_q, 1'b0} +: 2];
+        nsub = (sub2 == 2'd0) ? 3'd1 : (sub2 == 2'd3) ? 3'd4 : 3'd2;
+        g_bx0 = '0; g_by0 = '0; g_w4 = 3'd4; g_h4 = 3'd4;
+        unique case (ptype_q)
+        3'd0: ;
+        3'd1: begin g_by0 = {1'b0, pb_q[0], 1'b0}; g_h4 = 3'd2; end
+        3'd2: begin g_bx0 = {1'b0, pb_q[0], 1'b0}; g_w4 = 3'd2; end
+        default: begin
+            g_bx0 = {2'b0, pb_q[0]} << 1;
+            g_by0 = {2'b0, pb_q[1]} << 1;
+            unique case (sub2)
+            2'd0: begin g_w4 = 3'd2; g_h4 = 3'd2; end
+            2'd1: begin g_w4 = 3'd2; g_h4 = 3'd1;
+                        g_by0 = g_by0 + 3'(ps_q[0]); end
+            2'd2: begin g_w4 = 3'd1; g_h4 = 3'd2;
+                        g_bx0 = g_bx0 + 3'(ps_q[0]); end
+            default: begin g_w4 = 3'd1; g_h4 = 3'd1;
+                           g_bx0 = g_bx0 + 3'(ps_q[0]);
+                           g_by0 = g_by0 + 3'(ps_q[1]); end
+            endcase
+        end
+        endcase
+    end
+
+    // |mvd| neighbor sum for the UEG3 bin0 ctxInc: A=(bx0-1,by0),
+    // B=(bx0,by0-1); unwritten/unavailable blocks read 0 (calloc rule)
+    logic [8:0] amvd;
+    always_comb begin
+        logic [6:0] aa, bb;
+        logic [1:0] bx, by;
+        bx = g_bx0[1:0];
+        by = g_by0[1:0];
+        aa = '0; bb = '0;
+        if (bx != 2'd0) begin
+            if (av_w[{by, bx - 2'd1}])
+                aa = axis_q ? cur_avy[{by, bx - 2'd1}]
+                            : cur_avx[{by, bx - 2'd1}];
+        end else if (have_left)
+            aa = axis_q ? l_avy[by] : l_avx[by];
+        if (by != 2'd0) begin
+            if (av_w[{by - 2'd1, bx}])
+                bb = axis_q ? cur_avy[{by - 2'd1, bx}]
+                            : cur_avx[{by - 2'd1, bx}];
+        end else if (have_top)
+            bb = axis_q ? nrow_q[36 + bx*14 + 7 +: 7]
+                        : nrow_q[36 + bx*14 +: 7];
+        amvd = 9'(aa) + 9'(bb);
+    end
+    logic [1:0] mvd_inc;
+    assign mvd_inc = 2'(amvd > 9'd2) + 2'(amvd > 9'd32);
+
     // ---- coded_block_flag neighbor terms (9.3.3.1.1.9) ----
     // unavailable -> 1 (intra current), I16-vs-I4 DC rule per C model
     logic cond_a, cond_b;
@@ -198,8 +290,8 @@ module cabac_mb #(
         logic [1:0] bx, by;
         bx = zsx(k_q);
         by = zsy(k_q);
-        cond_a = 1'b1;
-        cond_b = 1'b1;
+        cond_a = !inter_q;
+        cond_b = !inter_q;
         unique case (rph_q)
         2'd0: begin                                  // luma DC, MB level
             if (have_left) cond_a = l_cat ? l_ldc : 1'b0;
@@ -225,10 +317,11 @@ module cabac_mb #(
     end
 
     // ---- ctxIdxInc terms for the header elements ----
-    logic [1:0] mbt_inc, cmd_inc;
+    logic [1:0] mbt_inc, cmd_inc, skp_inc;
     always_comb begin
         mbt_inc = 2'(have_left && l_cat) + 2'(have_top && nrow_q[0]);
         cmd_inc = 2'(have_left && l_cmode) + 2'(have_top && nrow_q[1]);
+        skp_inc = 2'(have_left && !l_skip) + 2'(have_top && !nrow_q[35]);
     end
 
     // CBP neighbor words (unavailable reads as 0x0F)
@@ -283,6 +376,48 @@ module cabac_mb #(
             3'd5: op_ctx = 9'd9;
             default: op_ctx = 9'd10;
             endcase
+        end
+        S_SKIPF: begin
+            op_valid = 1'b1;
+            op_ctx = 9'd11 + 9'(skp_inc);
+        end
+        S_PMBT: begin
+            op_valid = 1'b1;
+            unique case (bcnt_q)
+            3'd0: op_ctx = 9'd14;
+            3'd1: op_ctx = 9'd15;
+            3'd2: op_ctx = 9'd16;
+            default: op_ctx = 9'd17;
+            endcase
+        end
+        S_ISUF: begin                                // intra suffix @17
+            op_valid = 1'b1;
+            unique case (bcnt_q)
+            3'd0: op_ctx = 9'd17;
+            3'd1: op = 2'd2;                         // PCM terminate
+            3'd2: op_ctx = 9'd18;
+            3'd3: op_ctx = 9'd19;
+            3'd4: op_ctx = 9'd19;
+            3'd5: op_ctx = 9'd20;
+            default: op_ctx = 9'd20;
+            endcase
+        end
+        S_PSUB: begin
+            op_valid = 1'b1;
+            op_ctx = (bcnt_q == 3'd0) ? 9'd21
+                     : (bcnt_q == 3'd1) ? 9'd22 : 9'd23;
+        end
+        M_B0: begin
+            op_valid = 1'b1;
+            op_ctx = (axis_q ? 9'd47 : 9'd40) + 9'(mvd_inc);
+        end
+        M_U: begin
+            op_valid = 1'b1;
+            op_ctx = (axis_q ? 9'd47 : 9'd40) + 9'd3 + 9'(uctx_q);
+        end
+        M_EGP, M_EGS, M_SGN: begin
+            op_valid = 1'b1;
+            op = 2'd1;                               // bypass
         end
         S_I4M: begin
             op_valid = 1'b1;
@@ -373,6 +508,18 @@ module cabac_mb #(
     assign mb_valid = (st_q == S_EMIT);
     assign slice_done = (st_q == S_DONE);
     assign err = (st_q == S_ERR);
+    assign mb_skip = skip_q;
+    assign mb_inter = inter_q;
+    assign mb_ptype = ptype_q;
+    assign mb_sub = sub_q;
+    assign mvd_valid = mvdv_q;
+    assign mvd_x = mvdx_q;
+    assign mvd_y = mvdy_q;
+    assign mb_nz = cbfl_q;
+    // P_Skip derivation beat for mv_pred: the skip decision just
+    // landed, neighbor state is still pre-advance
+    assign skip_go = skipgo_q;
+    logic skipgo_q;
 
     // I16 derivation from mb_type t (1..24): eff = t-1
     logic [4:0] eff;
@@ -397,8 +544,17 @@ module cabac_mb #(
             l_cat <= 1'b0; l_cmode <= 1'b0; l_cbp <= '0;
             l_ldc <= 1'b0; l_cdc <= '0; l_cbfl <= '0;
             nrow_q <= '0;
+            skip_q <= 1'b0; inter_q <= 1'b0;
+            ptype_q <= '0; sub_q <= '0;
+            pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
+            uegv_q <= '0; uctx_q <= '0; egk3_q <= '0; egv3_q <= '0;
+            mvdx_q <= '0; mvdy_q <= '0; mvdv_q <= 1'b0;
+            av_w <= '0; avxc_q <= '0;
+            skipgo_q <= 1'b0; l_skip <= 1'b0;
         end else begin
             ci_start <= 1'b0;
+            mvdv_q <= 1'b0;
+            skipgo_q <= 1'b0;
             unique case (st_q)
             S_IDLE: if (start) begin
                 mbx_q <= '0; mby_q <= '0;
@@ -420,8 +576,169 @@ module cabac_mb #(
                 cmode_q <= '0; cbp_q <= '0;
                 i16_q <= 1'b0; i16m_q <= '0;
                 t_q <= '0; bcnt_q <= '0; k_q <= '0;
-                st_q <= S_MBT;
+                skip_q <= 1'b0; inter_q <= 1'b0;
+                ptype_q <= '0; sub_q <= '0;
+                pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
+                av_w <= '0;
+                for (int i = 0; i < 16; i++) begin
+                    cur_avx[i] <= '0;
+                    cur_avy[i] <= '0;
+                end
+                st_q <= cfg_is_p ? S_SKIPF : S_MBT;
             end
+
+            S_SKIPF: if (step) begin
+                if (bin) begin                       // P_Skip
+                    skip_q <= 1'b1;
+                    inter_q <= 1'b1;
+                    cbp_q <= '0;
+                    lastqpd_q <= 1'b0;
+                    skipgo_q <= 1'b1;
+                    st_q <= S_EOS;
+                end else
+                    st_q <= S_PMBT;
+            end
+
+            S_PMBT: if (step) begin
+                unique case (bcnt_q)
+                3'd0: begin
+                    if (bin) begin                   // intra in P
+                        bcnt_q <= '0;
+                        st_q <= S_ISUF;
+                    end else begin
+                        inter_q <= 1'b1;
+                        bcnt_q <= 3'd1;
+                    end
+                end
+                3'd1: bcnt_q <= bin ? 3'd3 : 3'd2;
+                3'd2: begin                          // P_8x8 : 16x16
+                    ptype_q <= bin ? 3'd3 : 3'd0;
+                    bcnt_q <= '0;
+                    pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
+                    st_q <= bin ? S_PSUB : M_B0;
+                end
+                default: begin                       // 16x8 : 8x16
+                    ptype_q <= bin ? 3'd1 : 3'd2;
+                    bcnt_q <= '0;
+                    pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
+                    st_q <= M_B0;
+                end
+                endcase
+            end
+
+            S_ISUF: if (step) begin                  // intra suffix @17
+                unique case (bcnt_q)
+                3'd0: begin
+                    if (!bin) begin
+                        k_q <= '0; bcnt_q <= '0;
+                        st_q <= S_I4M;
+                    end else begin
+                        t_q <= 5'd1;
+                        bcnt_q <= 3'd1;
+                    end
+                end
+                3'd1: begin
+                    if (bin) st_q <= S_ERR;          // I_PCM unsupported
+                    else bcnt_q <= 3'd2;
+                end
+                3'd2: begin
+                    if (bin) t_q <= t_q + 5'd12;
+                    bcnt_q <= 3'd3;
+                end
+                3'd3: bcnt_q <= bin ? 3'd4 : 3'd5;
+                3'd4: begin
+                    t_q <= t_q + (bin ? 5'd8 : 5'd4);
+                    bcnt_q <= 3'd5;
+                end
+                3'd5: begin
+                    if (bin) t_q <= t_q + 5'd2;
+                    bcnt_q <= 3'd6;
+                end
+                default: begin
+                    i16_q <= 1'b1;
+                    st_q <= S_CMD;
+                    bcnt_q <= '0;
+                    if (bin) t_q <= t_q + 5'd1;
+                end
+                endcase
+            end
+
+            S_PSUB: if (step) begin
+                unique case (bcnt_q)
+                3'd0: begin
+                    if (bin) begin                   // sub 0 (8x8)
+                        sub_q[{pb_q, 1'b0} +: 2] <= 2'd0;
+                        if (pb_q == 2'd3) begin
+                            pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
+                            st_q <= M_B0;
+                        end else pb_q <= pb_q + 2'd1;
+                    end else bcnt_q <= 3'd1;
+                end
+                3'd1: begin
+                    if (!bin) begin                  // sub 1 (8x4)
+                        sub_q[{pb_q, 1'b0} +: 2] <= 2'd1;
+                        bcnt_q <= '0;
+                        if (pb_q == 2'd3) begin
+                            pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
+                            st_q <= M_B0;
+                        end else pb_q <= pb_q + 2'd1;
+                    end else bcnt_q <= 3'd2;
+                end
+                default: begin                       // 2 (4x8) : 3 (4x4)
+                    sub_q[{pb_q, 1'b0} +: 2] <= bin ? 2'd2 : 2'd3;
+                    bcnt_q <= '0;
+                    if (pb_q == 2'd3) begin
+                        pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
+                        st_q <= M_B0;
+                    end else pb_q <= pb_q + 2'd1;
+                end
+                endcase
+            end
+
+            // ---- mvd component (UEG3) ----
+            M_B0: if (step) begin
+                if (!bin) finish_comp(16'd0, 7'd0);  // zero, no sign bin
+                else begin
+                    uegv_q <= 16'd1;
+                    uctx_q <= '0;
+                    st_q <= M_U;
+                end
+            end
+
+            M_U: if (step) begin
+                if (bin) begin
+                    if (uegv_q == 16'd8) begin       // escape to EG3
+                        uegv_q <= 16'd9;
+                        egk3_q <= 5'd3;
+                        st_q <= M_EGP;
+                    end else begin
+                        if (uegv_q < 16'd4) uctx_q <= uctx_q + 3'd1;
+                        uegv_q <= uegv_q + 16'd1;
+                    end
+                end else
+                    st_q <= M_SGN;
+            end
+
+            M_EGP: if (step) begin
+                if (bin) begin
+                    uegv_q <= uegv_q + (16'd1 << egk3_q);
+                    egk3_q <= egk3_q + 5'd1;
+                    if (egk3_q > 5'd24) st_q <= S_ERR;
+                end else begin
+                    if (egk3_q == 5'd0) st_q <= M_SGN;
+                    else st_q <= M_EGS;
+                end
+            end
+
+            M_EGS: if (step) begin
+                uegv_q <= uegv_q + (16'(bin) << (egk3_q - 5'd1));
+                if (egk3_q == 5'd1) st_q <= M_SGN;
+                else egk3_q <= egk3_q - 5'd1;
+            end
+
+            M_SGN: if (step)
+                finish_comp(bin ? -uegv_q : uegv_q,
+                            (uegv_q < 16'd70) ? uegv_q[6:0] : 7'd70);
 
             S_MBT: if (step) begin
                 unique case (bcnt_q)
@@ -732,7 +1049,15 @@ module cabac_mb #(
                 end
                 l_cbfc[0] <= {cbfc_q[0][3], cbfc_q[0][1]};
                 l_cbfc[1] <= {cbfc_q[1][3], cbfc_q[1][1]};
+                l_skip <= skip_q;
+                for (int j = 0; j < 4; j++) begin
+                    l_avx[j] <= cur_avx[j*4+3];
+                    l_avy[j] <= cur_avy[j*4+3];
+                end
                 nrow[mbx_q] <= {
+                    cur_avy[15], cur_avx[15], cur_avy[14], cur_avx[14],
+                    cur_avy[13], cur_avx[13], cur_avy[12], cur_avx[12],
+                    skip_q,
                     i4m_q[zidx(2'd3, 2'd3)], i4m_q[zidx(2'd2, 2'd3)],
                     i4m_q[zidx(2'd1, 2'd3)], i4m_q[zidx(2'd0, 2'd3)],
                     cbfc_q[1][3:2], cbfc_q[0][3:2],
@@ -758,6 +1083,52 @@ module cabac_mb #(
             endcase
         end
     end
+
+    logic [6:0] avxc_q;                // clipped |mvd_x| awaiting store
+
+    // one mvd component decoded: latch it, store the pair on y, and
+    // advance the partition walk (mirrors the C parse order)
+    task automatic finish_comp(input logic signed [15:0] v,
+                               input logic [6:0] vclip);
+        if (!axis_q) begin
+            mvdx_q <= v;
+            avxc_q <= vclip;
+            axis_q <= 1'b1;
+            st_q <= M_B0;
+        end else begin
+            mvdy_q <= v;
+            mvdv_q <= 1'b1;
+            // store |mvd| over the partition blocks
+            for (int j = 0; j < 4; j++)
+                for (int i = 0; i < 4; i++)
+                    if (i >= int'(g_bx0) && i < int'(g_bx0) + int'(g_w4) &&
+                        j >= int'(g_by0) && j < int'(g_by0) + int'(g_h4))
+                    begin
+                        cur_avx[j*4+i] <= avxc_q;
+                        cur_avy[j*4+i] <= vclip;
+                        av_w[j*4+i] <= 1'b1;
+                    end
+            axis_q <= 1'b0;
+            // partition advance
+            if (ptype_q == 3'd0) st_q <= S_CBP;
+            else if (ptype_q == 3'd1 || ptype_q == 3'd2) begin
+                if (pb_q[0]) st_q <= S_CBP;
+                else begin pb_q <= 2'd1; st_q <= M_B0; end
+            end else begin
+                if (3'(ps_q) + 3'd1 == nsub) begin
+                    if (pb_q == 2'd3) st_q <= S_CBP;
+                    else begin
+                        pb_q <= pb_q + 2'd1;
+                        ps_q <= '0;
+                        st_q <= M_B0;
+                    end
+                end else begin
+                    ps_q <= ps_q + 2'd1;
+                    st_q <= M_B0;
+                end
+            end
+        end
+    endtask
 
     // advance to the next residual block / finish the MB
     task automatic adv_block();
