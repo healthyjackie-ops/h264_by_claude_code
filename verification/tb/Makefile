@@ -329,4 +329,12 @@ corep-regress: corep
 	echo "=== corep-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
 	test $$fail -eq 0
 
-.PHONY: pparse p-regress prec prec-regress corep corep-regress
+cabac:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module cabac_core \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_cabac \
+	  -I$(REPO)/rtl/include \
+	  $(RTL_DIR)/cabac_core.sv \
+	  tb_cabac.cpp $(CMODEL_BUILD)/cabac.o
+	./obj_dir_cabac/Vcabac_core
+
+.PHONY: pparse p-regress prec prec-regress corep corep-regress cabac
