@@ -1363,9 +1363,17 @@ module mb_dec (
 	reg [1:0] comp_q;
 	reg [3:0] i4m_q [0:15];
 	reg [4:0] nz_q [0:15];
-	reg [3:0] i4_top [0:(MAX_MBW * 4) - 1];
-	reg [4:0] nzl_top [0:(MAX_MBW * 4) - 1];
-	reg [4:0] nzc_top [0:1][0:(MAX_MBW * 2) - 1];
+	reg [15:0] i4_top [0:MAX_MBW - 1];
+	reg [19:0] nzl_top [0:MAX_MBW - 1];
+	reg [9:0] nzc_top0 [0:MAX_MBW - 1];
+	reg [9:0] nzc_top1 [0:MAX_MBW - 1];
+	reg [15:0] i4t_q;
+	reg [19:0] nzlt_q;
+	reg [9:0] nzct_q [0:1];
+	wire [15:0] i4t_w = i4_top[mbx_q];
+	wire [19:0] nzlt_w = nzl_top[mbx_q];
+	wire [9:0] nzct0_w = nzc_top0[mbx_q];
+	wire [9:0] nzct1_w = nzc_top1[mbx_q];
 	reg [3:0] i4_left [0:3];
 	reg [4:0] nzl_left [0:3];
 	reg [4:0] nzc_left [0:1][0:1];
@@ -1384,26 +1392,26 @@ module mb_dec (
 		if (win_ok)
 			(* full_case, parallel_case *)
 			case (st_q)
-				4'd1:
+				4'd2:
 					if (eg_ok) begin
 						req_valid = 1'b1;
 						req_bits = eg_len;
 					end
-				4'd2: begin
+				4'd3: begin
 					req_valid = 1'b1;
 					req_bits = (show[23] ? 5'd1 : 5'd4);
 				end
-				4'd3:
+				4'd4:
 					if (eg_ok && (eg_ue <= 12'd3)) begin
 						req_valid = 1'b1;
 						req_bits = eg_len;
 					end
-				4'd4:
+				4'd5:
 					if (eg_ok && (eg_ue <= 12'd47)) begin
 						req_valid = 1'b1;
 						req_bits = eg_len;
 					end
-				4'd5:
+				4'd6:
 					if (eg_ok) begin
 						req_valid = 1'b1;
 						req_bits = eg_len;
@@ -1440,7 +1448,7 @@ module mb_dec (
 		if (by != 0)
 			predB = i4m_q[zidx(bx, by - 2'd1)];
 		else
-			predB = i4_top[{mbx_q, 2'b00} + {6'b000000, bx}];
+			predB = i4t_q[bx * 4+:4];
 	end
 	wire [3:0] i4_pred;
 	assign i4_pred = (!availA || !availB ? 4'd2 : (predA < predB ? predA : predB));
@@ -1463,7 +1471,7 @@ module mb_dec (
 		aA = (bx != 0) || have_left;
 		aB = (by != 0) || (mby_q != 0);
 		nA = (bx != 0 ? nz_q[zidx(bx - 2'd1, by)] : nzl_left[by]);
-		nB = (by != 0 ? nz_q[zidx(bx, by - 2'd1)] : nzl_top[{mbx_q, 2'b00} + {6'b000000, bx}]);
+		nB = (by != 0 ? nz_q[zidx(bx, by - 2'd1)] : nzlt_q[bx * 5+:5]);
 		if (aA && aB)
 			nc_l = sv2v_cast_5((({1'b0, nA} + {1'b0, nB}) + 6'd1) >> 1);
 		else if (aA)
@@ -1488,7 +1496,7 @@ module mb_dec (
 		aA = cx || have_left;
 		aB = cy || (mby_q != 0);
 		nA = (cx ? nzc_q[comp_q][{cy, 1'b0}] : nzc_left[comp_q][cy]);
-		nB = (cy ? nzc_q[comp_q][{1'b0, cx}] : nzc_top[comp_q][{mbx_q, 1'b0} + {7'b0000000, cx}]);
+		nB = (cy ? nzc_q[comp_q][{1'b0, cx}] : nzct_q[comp_q][cx * 5+:5]);
 		if (aA && aB)
 			nc_c = sv2v_cast_5((({1'b0, nA} + {1'b0, nB}) + 6'd1) >> 1);
 		else if (aA)
@@ -1510,7 +1518,7 @@ module mb_dec (
 			nc_class_of = 2'd3;
 	endfunction
 	reg ac15_q;
-	assign coef_we = blk_coef_we && (st_q == 4'd8);
+	assign coef_we = blk_coef_we && (st_q == 4'd9);
 	reg [4:0] cur_blk_q;
 	assign coef_blk = cur_blk_q;
 	function automatic [3:0] zz4;
@@ -1557,9 +1565,9 @@ module mb_dec (
 				mb_i4m[i * 4+:4] = i4m_q[i];
 		end
 	end
-	assign mb_valid = st_q == 4'd11;
-	assign slice_done = st_q == 4'd13;
-	assign err = st_q == 4'd14;
+	assign mb_valid = st_q == 4'd12;
+	assign slice_done = st_q == 4'd14;
+	assign err = st_q == 4'd15;
 	function automatic cbp_l_bit;
 		input reg [3:0] k;
 		cbp_l_bit = cbp_q[{k[3], k[2]}];
@@ -1672,15 +1680,22 @@ module mb_dec (
 						have_left <= 1'b0;
 						st_q <= 4'd1;
 					end
-				4'd1:
+				4'd1: begin
+					i4t_q <= i4t_w;
+					nzlt_q <= nzlt_w;
+					nzct_q[0] <= nzct0_w;
+					nzct_q[1] <= nzct1_w;
+					st_q <= 4'd2;
+				end
+				4'd2:
 					if (win_ok) begin
 						if (!eg_ok)
-							st_q <= 4'd14;
+							st_q <= 4'd15;
 						else if (eg_ue == 12'd0) begin
 							i16_q <= 1'b0;
 							i16m_q <= 1'sb0;
 							k_q <= 1'sb0;
-							st_q <= 4'd2;
+							st_q <= 4'd3;
 						end
 						else if (eg_ue <= 12'd24) begin : sv2v_autoblock_5
 							reg [11:0] m;
@@ -1695,12 +1710,12 @@ module mb_dec (
 								for (i = 0; i < 16; i = i + 1)
 									i4m_q[i] <= 4'd2;
 							end
-							st_q <= 4'd3;
+							st_q <= 4'd4;
 						end
 						else
-							st_q <= 4'd14;
+							st_q <= 4'd15;
 					end
-				4'd2:
+				4'd3:
 					if (win_ok) begin : sv2v_autoblock_7
 						reg [3:0] mode;
 						if (show[23])
@@ -1712,50 +1727,50 @@ module mb_dec (
 						end
 						i4m_q[k_q] <= mode;
 						if (k_q == 4'd15)
-							st_q <= 4'd3;
+							st_q <= 4'd4;
 						k_q <= k_q + 4'd1;
 					end
-				4'd3:
+				4'd4:
 					if (win_ok) begin
 						if (!eg_ok || (eg_ue > 12'd3))
-							st_q <= 4'd14;
+							st_q <= 4'd15;
 						else begin
 							cmode_q <= sv2v_cast_2(eg_ue);
-							st_q <= (i16_q ? 4'd5 : 4'd4);
+							st_q <= (i16_q ? 4'd6 : 4'd5);
 						end
 					end
-				4'd4:
+				4'd5:
 					if (win_ok) begin : sv2v_autoblock_9
 						reg [5:0] cbp;
 						cbp = cavlc_intra_cbp(sv2v_cast_6(eg_ue));
 						if ((!eg_ok || (eg_ue > 12'd47)) || (cbp == 6'd63))
-							st_q <= 4'd14;
+							st_q <= 4'd15;
 						else begin
 							cbp_q <= cbp;
-							st_q <= (cbp == 6'd0 ? 4'd11 : 4'd5);
+							st_q <= (cbp == 6'd0 ? 4'd12 : 4'd6);
 						end
 					end
-				4'd5:
+				4'd6:
 					if (win_ok) begin
 						if (!eg_ok)
-							st_q <= 4'd14;
+							st_q <= 4'd15;
 						else begin
 							qp_q <= sv2v_cast_6(((sv2v_cast_13_signed($signed({1'b0, qp_q})) + sv2v_cast_13_signed(eg_se)) + 13'd52) % 13'd52);
 							k_q <= 1'sb0;
-							st_q <= (i16_q ? 4'd6 : 4'd7);
+							st_q <= (i16_q ? 4'd7 : 4'd8);
 						end
 					end
-				4'd6: begin
+				4'd7: begin
 					blk_start <= 1'b1;
 					blk_chroma_dc <= 1'b0;
 					blk_nc_class <= nc_class_of(nc_l);
 					blk_maxc <= 5'd16;
 					ac15_q <= 1'b0;
 					cur_blk_q <= 5'd16;
-					ret_q <= 4'd7;
-					st_q <= 4'd8;
+					ret_q <= 4'd8;
+					st_q <= 4'd9;
 				end
-				4'd7:
+				4'd8:
 					if (cbp_l_bit(k_q)) begin
 						blk_start <= 1'b1;
 						blk_chroma_dc <= 1'b0;
@@ -1763,30 +1778,30 @@ module mb_dec (
 						blk_maxc <= (i16_q ? 5'd15 : 5'd16);
 						ac15_q <= i16_q;
 						cur_blk_q <= {1'b0, k_q};
-						ret_q <= 4'd7;
-						st_q <= 4'd8;
+						ret_q <= 4'd8;
+						st_q <= 4'd9;
 					end
 					else begin
 						nz_q[k_q] <= 1'sb0;
 						if (k_q == 4'd15) begin
 							k_q <= 1'sb0;
 							comp_q <= 1'sb0;
-							st_q <= (cbp_q[5:4] != 2'd0 ? 4'd9 : 4'd11);
+							st_q <= (cbp_q[5:4] != 2'd0 ? 4'd10 : 4'd12);
 						end
 						else
 							k_q <= k_q + 4'd1;
 					end
-				4'd9: begin
+				4'd10: begin
 					blk_start <= 1'b1;
 					blk_chroma_dc <= 1'b1;
 					blk_nc_class <= 1'sb0;
 					blk_maxc <= 5'd4;
 					ac15_q <= 1'b0;
 					cur_blk_q <= 5'd17 + {4'b0000, comp_q[0]};
-					ret_q <= 4'd9;
-					st_q <= 4'd8;
+					ret_q <= 4'd10;
+					st_q <= 4'd9;
 				end
-				4'd10:
+				4'd11:
 					if (cbp_q[5:4] == 2'd2) begin
 						blk_start <= 1'b1;
 						blk_chroma_dc <= 1'b0;
@@ -1794,102 +1809,112 @@ module mb_dec (
 						blk_maxc <= 5'd15;
 						ac15_q <= 1'b1;
 						cur_blk_q <= (5'd19 + {2'b00, comp_q[0], 2'b00}) + {3'b000, k_q[1:0]};
-						ret_q <= 4'd10;
-						st_q <= 4'd8;
+						ret_q <= 4'd11;
+						st_q <= 4'd9;
 					end
 					else begin
 						nzc_q[comp_q][k_q[1:0]] <= 1'sb0;
 						if (k_q[1:0] == 2'd3) begin
 							k_q <= 1'sb0;
 							if (comp_q[0])
-								st_q <= 4'd11;
+								st_q <= 4'd12;
 							comp_q <= comp_q + 2'd1;
 						end
 						else
 							k_q <= k_q + 4'd1;
 					end
-				4'd8:
+				4'd9:
 					if (blk_err)
-						st_q <= 4'd14;
+						st_q <= 4'd15;
 					else if (blk_done)
 						(* full_case, parallel_case *)
 						case (ret_q)
-							4'd7:
+							4'd8:
 								if (cur_blk_q == 5'd16) begin
 									k_q <= 1'sb0;
-									st_q <= 4'd7;
+									st_q <= 4'd8;
 								end
 								else begin
 									nz_q[k_q] <= blk_tc;
 									if (k_q == 4'd15) begin
 										k_q <= 1'sb0;
 										comp_q <= 1'sb0;
-										st_q <= (cbp_q[5:4] != 2'd0 ? 4'd9 : 4'd11);
+										st_q <= (cbp_q[5:4] != 2'd0 ? 4'd10 : 4'd12);
 									end
 									else begin
 										k_q <= k_q + 4'd1;
-										st_q <= 4'd7;
+										st_q <= 4'd8;
 									end
 								end
-							4'd9:
+							4'd10:
 								if (comp_q[0]) begin
 									comp_q <= 1'sb0;
 									k_q <= 1'sb0;
-									st_q <= (cbp_q[5:4] == 2'd2 ? 4'd10 : 4'd11);
+									st_q <= (cbp_q[5:4] == 2'd2 ? 4'd11 : 4'd12);
 								end
 								else begin
 									comp_q <= 2'd1;
-									st_q <= 4'd9;
+									st_q <= 4'd10;
 								end
-							4'd10: begin
+							4'd11: begin
 								nzc_q[comp_q][k_q[1:0]] <= blk_tc;
 								if (k_q[1:0] == 2'd3) begin
 									k_q <= 1'sb0;
 									if (comp_q[0])
-										st_q <= 4'd11;
+										st_q <= 4'd12;
 									else
-										st_q <= 4'd10;
+										st_q <= 4'd11;
 									comp_q <= comp_q + 2'd1;
 								end
 								else begin
 									k_q <= k_q + 4'd1;
-									st_q <= 4'd10;
+									st_q <= 4'd11;
 								end
 							end
-							default: st_q <= 4'd14;
+							default: st_q <= 4'd15;
 						endcase
-				4'd11: begin
+				4'd12: begin
 					begin : sv2v_autoblock_10
-						reg signed [31:0] b;
-						for (b = 0; b < 4; b = b + 1)
-							begin
-								i4_top[{mbx_q, 2'b00} + b] <= i4m_q[zidx(sv2v_cast_2_signed(b), 2'd3)];
-								nzl_top[{mbx_q, 2'b00} + b] <= nz_q[zidx(sv2v_cast_2_signed(b), 2'd3)];
-								i4_left[b] <= i4m_q[zidx(2'd3, sv2v_cast_2_signed(b))];
-								nzl_left[b] <= nz_q[zidx(2'd3, sv2v_cast_2_signed(b))];
-							end
+						reg [15:0] wi;
+						reg [19:0] wn;
+						begin : sv2v_autoblock_11
+							reg signed [31:0] b;
+							for (b = 0; b < 4; b = b + 1)
+								begin
+									wi[b * 4+:4] = i4m_q[zidx(sv2v_cast_2_signed(b), 2'd3)];
+									wn[b * 5+:5] = nz_q[zidx(sv2v_cast_2_signed(b), 2'd3)];
+									i4_left[b] <= i4m_q[zidx(2'd3, sv2v_cast_2_signed(b))];
+									nzl_left[b] <= nz_q[zidx(2'd3, sv2v_cast_2_signed(b))];
+								end
+						end
+						i4_top[mbx_q] <= wi;
+						nzl_top[mbx_q] <= wn;
 					end
-					begin : sv2v_autoblock_11
-						reg signed [31:0] c2;
-						for (c2 = 0; c2 < 2; c2 = c2 + 1)
-							begin : sv2v_autoblock_12
-								reg signed [31:0] b;
-								for (b = 0; b < 2; b = b + 1)
-									begin
-										nzc_top[c2][{mbx_q, 1'b0} + b] <= (cbp_q[5:4] == 2'd2 ? nzc_q[c2][{1'b1, b[0]}] : 5'd0);
-										nzc_left[c2][b] <= (cbp_q[5:4] == 2'd2 ? nzc_q[c2][{b[0], 1'b1}] : 5'd0);
-									end
-							end
+					begin : sv2v_autoblock_12
+						reg [9:0] wc0;
+						reg [9:0] wc1;
+						begin : sv2v_autoblock_13
+							reg signed [31:0] b;
+							for (b = 0; b < 2; b = b + 1)
+								begin
+									wc0[b * 5+:5] = (cbp_q[5:4] == 2'd2 ? nzc_q[0][{1'b1, b[0]}] : 5'd0);
+									wc1[b * 5+:5] = (cbp_q[5:4] == 2'd2 ? nzc_q[1][{1'b1, b[0]}] : 5'd0);
+									nzc_left[0][b] <= (cbp_q[5:4] == 2'd2 ? nzc_q[0][{b[0], 1'b1}] : 5'd0);
+									nzc_left[1][b] <= (cbp_q[5:4] == 2'd2 ? nzc_q[1][{b[0], 1'b1}] : 5'd0);
+								end
+						end
+						nzc_top0[mbx_q] <= wc0;
+						nzc_top1[mbx_q] <= wc1;
 					end
-					st_q <= 4'd12;
+					st_q <= 4'd13;
 				end
-				4'd12:
+				4'd13:
 					if (rec_done) begin
 						if ((mbx_q + 8'd1) == cfg_mb_w) begin
 							have_left <= 1'b0;
 							mbx_q <= 1'sb0;
 							if ((mby_q + 8'd1) == cfg_mb_h)
-								st_q <= 4'd13;
+								st_q <= 4'd14;
 							else begin
 								mby_q <= mby_q + 8'd1;
 								st_q <= 4'd1;
@@ -1901,9 +1926,9 @@ module mb_dec (
 							st_q <= 4'd1;
 						end
 					end
-				4'd13: st_q <= 4'd0;
-				4'd14: st_q <= 4'd14;
-				default: st_q <= 4'd14;
+				4'd14: st_q <= 4'd0;
+				4'd15: st_q <= 4'd15;
+				default: st_q <= 4'd15;
 			endcase
 		end
 	initial _sv2v_0 = 0;
@@ -2357,10 +2382,32 @@ module mb_recon (
 		input reg [1:0] by;
 		zidx = {by[1], bx[1], by[0], bx[0]};
 	endfunction
-	reg signed [15:0] cram [0:26][0:15];
-	reg [7:0] top_y [0:(MAX_MBW * 16) - 1];
-	reg [7:0] top_u [0:(MAX_MBW * 8) - 1];
-	reg [7:0] top_v [0:(MAX_MBW * 8) - 1];
+	reg [255:0] cram [0:26];
+	reg [4:0] clr_q;
+	reg [4:0] dq_row;
+	wire [255:0] cram_wr_old = cram[coef_blk];
+	reg [255:0] cram_wr_new;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		cram_wr_new = cram_wr_old;
+		cram_wr_new[coef_addr * 16+:16] = coef_data;
+	end
+	wire [255:0] cram_ldc_w = cram[16];
+	reg comp_q;
+	wire [255:0] cram_cdc_w = cram[{4'b1000, comp_q} + 5'd1];
+	wire [255:0] cram_dq_w = cram[dq_row];
+	reg [127:0] top_y [0:MAX_MBW - 1];
+	reg [63:0] top_u [0:MAX_MBW - 1];
+	reg [63:0] top_v [0:MAX_MBW - 1];
+	reg [127:0] tyc_q;
+	reg [127:0] tyn_q;
+	reg [63:0] tuc_q;
+	reg [63:0] tvc_q;
+	wire [127:0] ty_cur_w = top_y[mb_x];
+	wire [127:0] ty_nxt_w = top_y[mb_x + 8'd1];
+	wire [63:0] tu_cur_w = top_u[mb_x];
+	wire [63:0] tv_cur_w = top_v[mb_x];
 	reg [7:0] left_y [0:15];
 	reg [7:0] left_u [0:7];
 	reg [7:0] left_v [0:7];
@@ -2382,10 +2429,9 @@ module mb_recon (
 	reg have_top;
 	reg [3:0] st_q;
 	reg [4:0] k_q;
-	reg comp_q;
 	assign busy = st_q != 4'd0;
-	assign rec_valid = st_q == 4'd10;
-	assign err = st_q == 4'd11;
+	assign rec_valid = st_q == 4'd11;
+	assign err = st_q == 4'd12;
 	reg signed [255:0] ldc_in;
 	wire signed [511:0] ldc_out;
 	always @(*) begin : sv2v_autoblock_1
@@ -2393,7 +2439,7 @@ module mb_recon (
 		if (_sv2v_0)
 			;
 		for (i = 0; i < 16; i = i + 1)
-			ldc_in[(15 - i) * 16+:16] = cram[16][i];
+			ldc_in[(15 - i) * 16+:16] = cram_ldc_w[i * 16+:16];
 	end
 	luma_dc_dequant u_ldc(
 		.c(ldc_in),
@@ -2425,7 +2471,7 @@ module mb_recon (
 		begin : sv2v_autoblock_3
 			reg signed [31:0] i;
 			for (i = 0; i < 4; i = i + 1)
-				cdc_in[(3 - i) * 16+:16] = cram[17 + comp_q][i];
+				cdc_in[(3 - i) * 16+:16] = cram_cdc_w[i * 16+:16];
 		end
 	end
 	chroma_dc_dequant u_cdc(
@@ -2434,6 +2480,14 @@ module mb_recon (
 		.dc(cdc_out)
 	);
 	reg signed [31:0] cdc_q [0:3];
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		if ((st_q == 4'd7) || (st_q == 4'd8))
+			dq_row = (5'd19 + ({3'b000, comp_q} * 5'd4)) + (k_q & 5'd3);
+		else
+			dq_row = k_q;
+	end
 	reg signed [255:0] dq_in;
 	wire signed [511:0] dq_out;
 	wire [5:0] dq_qp;
@@ -2468,10 +2522,6 @@ module mb_recon (
 	reg a_t;
 	reg a_tl;
 	reg a_tr;
-	function automatic signed [11:0] sv2v_cast_12_signed;
-		input reg signed [11:0] inp;
-		sv2v_cast_12_signed = inp;
-	endfunction
 	function automatic signed [31:0] sv2v_cast_32_signed;
 		input reg signed [31:0] inp;
 		sv2v_cast_32_signed = inp;
@@ -2498,7 +2548,7 @@ module mb_recon (
 		begin : sv2v_autoblock_6
 			reg signed [31:0] i;
 			for (i = 0; i < 4; i = i + 1)
-				n_t[(7 - i) * 8+:8] = (by4 == 0 ? top_y[{mbx_q, 4'b0000} + sv2v_cast_12_signed(px + i)] : rec_y[(255 - ((((py - 1) * 16) + px) + i)) * 8+:8]);
+				n_t[(7 - i) * 8+:8] = (by4 == 0 ? tyc_q[(px + i) * 8+:8] : rec_y[(255 - ((((py - 1) * 16) + px) + i)) * 8+:8]);
 		end
 		begin : sv2v_autoblock_7
 			reg signed [31:0] i;
@@ -2508,7 +2558,7 @@ module mb_recon (
 					if (!a_tr)
 						e = n_t[32+:8];
 					else if (by4 == 0)
-						e = top_y[{mbx_q, 4'b0000} + sv2v_cast_12_signed((px + 4) + i)];
+						e = (((px + 4) + i) < 16 ? tyc_q[((px + 4) + i) * 8+:8] : tyn_q[(((px + 4) + i) - 16) * 8+:8]);
 					else
 						e = rec_y[(255 - (((((py - 1) * 16) + px) + 4) + i)) * 8+:8];
 					n_t[(7 - (4 + i)) * 8+:8] = e;
@@ -2519,7 +2569,7 @@ module mb_recon (
 		else if (bx4 == 0)
 			n_tl = left_y[py - 1];
 		else if (by4 == 0)
-			n_tl = top_y[{mbx_q, 4'b0000} + sv2v_cast_12_signed(px - 1)];
+			n_tl = tyc_q[(px - 1) * 8+:8];
 		else
 			n_tl = rec_y[(256 - (((py - 1) * 16) + px)) * 8+:8];
 	end
@@ -2548,7 +2598,7 @@ module mb_recon (
 			for (i = 0; i < 16; i = i + 1)
 				begin
 					i16_l[(15 - i) * 8+:8] = left_y[i];
-					i16_t[(15 - i) * 8+:8] = top_y[{mbx_q, 4'b0000} + sv2v_cast_12_signed(i)];
+					i16_t[(15 - i) * 8+:8] = tyc_q[i * 8+:8];
 				end
 		end
 	end
@@ -2567,10 +2617,6 @@ module mb_recon (
 	reg [7:0] ch_tl;
 	wire [511:0] pch;
 	wire pch_ok;
-	function automatic signed [10:0] sv2v_cast_11_signed;
-		input reg signed [10:0] inp;
-		sv2v_cast_11_signed = inp;
-	endfunction
 	always @(*) begin
 		if (_sv2v_0)
 			;
@@ -2579,7 +2625,7 @@ module mb_recon (
 			for (i = 0; i < 8; i = i + 1)
 				begin
 					ch_l[(7 - i) * 8+:8] = (comp_q ? left_v[i] : left_u[i]);
-					ch_t[(7 - i) * 8+:8] = (comp_q ? top_v[{mbx_q, 3'b000} + sv2v_cast_11_signed(i)] : top_u[{mbx_q, 3'b000} + sv2v_cast_11_signed(i)]);
+					ch_t[(7 - i) * 8+:8] = (comp_q ? tvc_q[i * 8+:8] : tuc_q[i * 8+:8]);
 				end
 		end
 		ch_tl = (comp_q ? tlq_v : tlq_u);
@@ -2613,7 +2659,7 @@ module mb_recon (
 			begin : sv2v_autoblock_13
 				reg signed [31:0] i;
 				for (i = 0; i < 16; i = i + 1)
-					dq_in[(15 - i) * 16+:16] = cram[k_q][i];
+					dq_in[(15 - i) * 16+:16] = cram_dq_w[i * 16+:16];
 			end
 			begin : sv2v_autoblock_14
 				reg signed [31:0] y;
@@ -2633,7 +2679,7 @@ module mb_recon (
 			begin : sv2v_autoblock_17
 				reg signed [31:0] i;
 				for (i = 0; i < 16; i = i + 1)
-					dq_in[(15 - i) * 16+:16] = cram[(19 + ({3'b000, comp_q} * 4)) + (k_q & 5'd3)][i];
+					dq_in[(15 - i) * 16+:16] = cram_dq_w[i * 16+:16];
 			end
 			begin : sv2v_autoblock_18
 				reg signed [31:0] y;
@@ -2679,10 +2725,13 @@ module mb_recon (
 			tlq_y <= 1'sb0;
 			tlq_u <= 1'sb0;
 			tlq_v <= 1'sb0;
+			clr_q <= 1'sb0;
 		end
 		else begin
 			if (coef_we)
-				cram[coef_blk][coef_addr] <= coef_data;
+				cram[coef_blk] <= cram_wr_new;
+			else if (st_q == 4'd10)
+				cram[clr_q] <= 1'sb0;
 			(* full_case, parallel_case *)
 			case (st_q)
 				4'd0:
@@ -2704,9 +2753,13 @@ module mb_recon (
 						tlq_y <= tl_y;
 						tlq_u <= tl_u;
 						tlq_v <= tl_v;
-						tl_y <= top_y[{mb_x, 4'b0000} + 12'd15];
-						tl_u <= top_u[{mb_x, 3'b000} + 11'd7];
-						tl_v <= top_v[{mb_x, 3'b000} + 11'd7];
+						tl_y <= ty_cur_w[127:120];
+						tl_u <= tu_cur_w[63:56];
+						tl_v <= tv_cur_w[63:56];
+						tyc_q <= ty_cur_w;
+						tyn_q <= ((mb_x + 8'd1) < cfg_mb_w ? ty_nxt_w : {128 {1'sb0}});
+						tuc_q <= tu_cur_w;
+						tvc_q <= tv_cur_w;
 						st_q <= (mb_i16 ? 4'd1 : 4'd3);
 						k_q <= 1'sb0;
 					end
@@ -2720,7 +2773,7 @@ module mb_recon (
 				end
 				4'd2:
 					if (!p16_ok)
-						st_q <= 4'd11;
+						st_q <= 4'd12;
 					else begin
 						begin : sv2v_autoblock_23
 							reg signed [31:0] i;
@@ -2731,7 +2784,7 @@ module mb_recon (
 					end
 				4'd3:
 					if (!i16_q && !p4_ok)
-						st_q <= 4'd11;
+						st_q <= 4'd12;
 					else begin
 						begin : sv2v_autoblock_24
 							reg signed [31:0] i;
@@ -2769,7 +2822,7 @@ module mb_recon (
 				end
 				4'd5:
 					if (!pch_ok)
-						st_q <= 4'd11;
+						st_q <= 4'd12;
 					else if (!comp_q) begin
 						begin : sv2v_autoblock_28
 							reg signed [31:0] i;
@@ -2844,41 +2897,42 @@ module mb_recon (
 						st_q <= 4'd7;
 					end
 				end
-				4'd9: begin
-					begin : sv2v_autoblock_37
+				4'd9: begin : sv2v_autoblock_37
+					reg [127:0] wy;
+					reg [63:0] wu;
+					reg [63:0] wv;
+					begin : sv2v_autoblock_38
 						reg signed [31:0] i;
 						for (i = 0; i < 16; i = i + 1)
 							begin
-								top_y[{mbx_q, 4'b0000} + sv2v_cast_12_signed(i)] <= rec_y[(255 - (240 + i)) * 8+:8];
+								wy[i * 8+:8] = rec_y[(255 - (240 + i)) * 8+:8];
 								left_y[i] <= rec_y[(255 - ((i * 16) + 15)) * 8+:8];
 							end
 					end
-					begin : sv2v_autoblock_38
+					begin : sv2v_autoblock_39
 						reg signed [31:0] i;
 						for (i = 0; i < 8; i = i + 1)
 							begin
-								top_u[{mbx_q, 3'b000} + sv2v_cast_11_signed(i)] <= rec_u[(63 - (56 + i)) * 8+:8];
-								top_v[{mbx_q, 3'b000} + sv2v_cast_11_signed(i)] <= rec_v[(63 - (56 + i)) * 8+:8];
+								wu[i * 8+:8] = rec_u[(63 - (56 + i)) * 8+:8];
+								wv[i * 8+:8] = rec_v[(63 - (56 + i)) * 8+:8];
 								left_u[i] <= rec_u[(63 - ((i * 8) + 7)) * 8+:8];
 								left_v[i] <= rec_v[(63 - ((i * 8) + 7)) * 8+:8];
 							end
 					end
+					top_y[mbx_q] <= wy;
+					top_u[mbx_q] <= wu;
+					top_v[mbx_q] <= wv;
+					clr_q <= 1'sb0;
 					st_q <= 4'd10;
 				end
 				4'd10: begin
-					begin : sv2v_autoblock_39
-						reg signed [31:0] b;
-						for (b = 0; b < 27; b = b + 1)
-							begin : sv2v_autoblock_40
-								reg signed [31:0] i;
-								for (i = 0; i < 16; i = i + 1)
-									cram[b][i] <= 1'sb0;
-							end
-					end
-					st_q <= 4'd0;
+					clr_q <= clr_q + 5'd1;
+					if (clr_q == 5'd26)
+						st_q <= 4'd11;
 				end
-				4'd11: st_q <= 4'd11;
-				default: st_q <= 4'd11;
+				4'd11: st_q <= 4'd0;
+				4'd12: st_q <= 4'd12;
+				default: st_q <= 4'd12;
 			endcase
 		end
 	initial _sv2v_0 = 0;

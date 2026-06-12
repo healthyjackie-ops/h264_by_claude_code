@@ -70,13 +70,40 @@ module mb_recon #(
         return {by[1], bx[1], by[0], bx[0]};
     endfunction
 
-    // coefficient store: 27 blocks x 16
-    logic signed [15:0] cram [27][16];
+    // coefficient store: 27 blocks x 256b wide words (16 lanes x 16b).
+    // Single lane-write port + async row reads -> yosys keeps it as a
+    // memory under `memory -nomap` (R4d).
+    logic [255:0] cram [27];
+    logic [4:0] clr_q;                 // serial clear row counter
 
-    // neighbor state
-    logic [7:0] top_y [MAX_MBW * 16];
-    logic [7:0] top_u [MAX_MBW * 8];
-    logic [7:0] top_v [MAX_MBW * 8];
+    // explicit async read ports (continuous assigns keep yosys's memory
+    // inference happy — a function wrapping mem reads gets inlined by
+    // sv2v into an @(cram) sensitivity list the verilog frontend rejects)
+    logic [4:0] dq_row;
+    wire [255:0] cram_wr_old = cram[coef_blk];
+    logic [255:0] cram_wr_new;
+    always_comb begin
+        cram_wr_new = cram_wr_old;
+        cram_wr_new[coef_addr*16 +: 16] = coef_data;
+    end
+    wire [255:0] cram_ldc_w = cram[16];
+    wire [255:0] cram_cdc_w = cram[{4'b1000, comp_q} + 5'd1]; // 17 + comp
+    wire [255:0] cram_dq_w  = cram[dq_row];
+
+    // neighbor line buffers, one wide word per MB column (R4d: single
+    // write port + async row read -> memory inference)
+    logic [127:0] top_y [MAX_MBW];
+    logic [63:0]  top_u [MAX_MBW];
+    logic [63:0]  top_v [MAX_MBW];
+    // prefetched copies for the MB being reconstructed (cur + next for
+    // the I4x4 top-right reach across the MB boundary)
+    logic [127:0] tyc_q, tyn_q;
+    logic [63:0]  tuc_q, tvc_q;
+    // async read ports (assign form keeps yosys memory inference alive)
+    wire [127:0] ty_cur_w = top_y[mb_x];
+    wire [127:0] ty_nxt_w = top_y[mb_x + 8'd1];
+    wire [63:0]  tu_cur_w = top_u[mb_x];
+    wire [63:0]  tv_cur_w = top_v[mb_x];
     logic [7:0] left_y [16];
     logic [7:0] left_u [8];
     logic [7:0] left_v [8];
@@ -93,7 +120,7 @@ module mb_recon #(
 
     typedef enum logic [3:0] {
         S_IDLE, S_LDC, S_YPRED16, S_YBLK, S_YBLK_WR, S_CPRED, S_CDC,
-        S_CBLK, S_CBLK_WR, S_UPD, S_OUT, S_ERR
+        S_CBLK, S_CBLK_WR, S_UPD, S_CLR, S_OUT, S_ERR
     } state_e;
     state_e st_q;
     logic [4:0] k_q;
@@ -107,7 +134,8 @@ module mb_recon #(
     // luma DC
     logic signed [15:0] ldc_in [16];
     logic signed [31:0] ldc_out [16];
-    always_comb for (int i = 0; i < 16; i++) ldc_in[i] = cram[16][i];
+    always_comb
+        for (int i = 0; i < 16; i++) ldc_in[i] = cram_ldc_w[i*16 +: 16];
     luma_dc_dequant u_ldc (.c(ldc_in), .qp(qp_q), .dc(ldc_out));
     logic signed [31:0] ldc_q [16];
 
@@ -121,10 +149,18 @@ module mb_recon #(
         if (qsum < 0) qsum = 0;
         if (qsum > 51) qsum = 51;
         qpc = chroma_qp(6'(qsum));
-        for (int i = 0; i < 4; i++) cdc_in[i] = cram[17 + comp_q][i];
+        for (int i = 0; i < 4; i++)
+            cdc_in[i] = cram_cdc_w[i*16 +: 16];
     end
     chroma_dc_dequant u_cdc (.c(cdc_in), .qp(qpc), .dc(cdc_out));
     logic signed [31:0] cdc_q [4];
+
+    always_comb begin
+        if (st_q == S_CBLK || st_q == S_CBLK_WR)
+            dq_row = 5'd19 + {3'b0, comp_q} * 5'd4 + (k_q & 5'd3);
+        else
+            dq_row = 5'(k_q);
+    end
 
     // current 4x4 residual block -> dequant -> idct_add
     logic signed [15:0] dq_in [16];
@@ -175,20 +211,21 @@ module mb_recon #(
                                 : rec_y[(py + i) * 16 + px - 1];
         end
         for (int i = 0; i < 4; i++) begin
-            n_t[i] = (by4 == 0) ? top_y[{mbx_q, 4'b0} + 12'(px + i)]
+            n_t[i] = (by4 == 0) ? tyc_q[(px + i) * 8 +: 8]
                                 : rec_y[(py - 1) * 16 + px + i];
         end
         for (int i = 0; i < 4; i++) begin
             logic [7:0] e;
             if (!a_tr) e = n_t[3];
-            else if (by4 == 0) e = top_y[{mbx_q, 4'b0} + 12'(px + 4 + i)];
-            else e = rec_y[(py - 1) * 16 + px + 4 + i];
+            else if (by4 == 0) begin
+                e = (px + 4 + i < 16) ? tyc_q[(px + 4 + i) * 8 +: 8]
+                                      : tyn_q[(px + 4 + i - 16) * 8 +: 8];
+            end else e = rec_y[(py - 1) * 16 + px + 4 + i];
             n_t[4 + i] = e;
         end
         if (bx4 == 0 && by4 == 0)      n_tl = tlq_y;
         else if (bx4 == 0)             n_tl = left_y[py - 1];
-        else if (by4 == 0)             n_tl = top_y[{mbx_q, 4'b0} +
-                                                    12'(px - 1)];
+        else if (by4 == 0)             n_tl = tyc_q[(px - 1) * 8 +: 8];
         else                           n_tl = rec_y[(py - 1) * 16 + px - 1];
     end
 
@@ -209,7 +246,7 @@ module mb_recon #(
     always_comb begin
         for (int i = 0; i < 16; i++) begin
             i16_l[i] = left_y[i];
-            i16_t[i] = top_y[{mbx_q, 4'b0} + 12'(i)];
+            i16_t[i] = tyc_q[i * 8 +: 8];
         end
     end
     intra16_pred u_i16 (
@@ -227,8 +264,7 @@ module mb_recon #(
     always_comb begin
         for (int i = 0; i < 8; i++) begin
             ch_l[i] = comp_q ? left_v[i] : left_u[i];
-            ch_t[i] = comp_q ? top_v[{mbx_q, 3'b0} + 11'(i)]
-                             : top_u[{mbx_q, 3'b0} + 11'(i)];
+            ch_t[i] = comp_q ? tvc_q[i * 8 +: 8] : tuc_q[i * 8 +: 8];
         end
         ch_tl = comp_q ? tlq_v : tlq_u;
     end
@@ -249,7 +285,7 @@ module mb_recon #(
             px = int'(bx4) * 4;
             py = int'(by4) * 4;
             for (int i = 0; i < 16; i++)
-                dq_in[i] = cram[5'(k_q)][i];
+                dq_in[i] = cram_dq_w[i*16 +: 16];
             for (int y = 0; y < 4; y++)
                 for (int x = 0; x < 4; x++)
                     id_pred[y*4+x] = i16_q ? rec_y[(py+y)*16 + px+x]
@@ -259,7 +295,7 @@ module mb_recon #(
             px = (int'(k_q) & 1) * 4;
             py = ((int'(k_q) >> 1) & 1) * 4;
             for (int i = 0; i < 16; i++)
-                dq_in[i] = cram[19 + {3'b0, comp_q} * 4 + (k_q & 5'd3)][i];
+                dq_in[i] = cram_dq_w[i*16 +: 16];
             for (int y = 0; y < 4; y++)
                 for (int x = 0; x < 4; x++)
                     id_pred[y*4+x] = comp_q ? rec_v[(py+y)*8 + px+x]
@@ -286,12 +322,16 @@ module mb_recon #(
             have_top <= 1'b0;
             tl_y <= '0; tl_u <= '0; tl_v <= '0;
             tlq_y <= '0; tlq_u <= '0; tlq_v <= '0;
+            clr_q <= '0;
         end else begin
-            // coefficient capture runs in any state
-            if (coef_we) cram[coef_blk][coef_addr] <= coef_data;
-            // a new MB's parse starts right after rec_valid: clear stale
-            // coefficients when the header arrives? mb_dec zeroes nothing,
-            // so clear on S_OUT below instead.
+            // single write port: coefficient capture while parsing, the
+            // serial clear inside S_CLR (mb_dec is stalled there, so the
+            // two never collide)
+            if (coef_we) begin
+                cram[coef_blk] <= cram_wr_new;
+            end else if (st_q == S_CLR) begin
+                cram[clr_q] <= '0;
+            end
 
             unique case (st_q)
             S_IDLE: if (mb_valid) begin
@@ -310,9 +350,14 @@ module mb_recon #(
                 tlq_y <= tl_y;
                 tlq_u <= tl_u;
                 tlq_v <= tl_v;
-                tl_y <= top_y[{mb_x, 4'b0} + 12'd15];
-                tl_u <= top_u[{mb_x, 3'b0} + 11'd7];
-                tl_v <= top_v[{mb_x, 3'b0} + 11'd7];
+                tl_y <= ty_cur_w[127:120];
+                tl_u <= tu_cur_w[63:56];
+                tl_v <= tv_cur_w[63:56];
+                // prefetch the upper-row words (cur + next MB column)
+                tyc_q <= ty_cur_w;
+                tyn_q <= (mb_x + 8'd1 < cfg_mb_w) ? ty_nxt_w : '0;
+                tuc_q <= tu_cur_w;
+                tvc_q <= tv_cur_w;
                 st_q <= mb_i16 ? S_LDC : S_YBLK;
                 k_q <= '0;
             end
@@ -413,24 +458,31 @@ module mb_recon #(
             end
 
             S_UPD: begin
+                logic [127:0] wy;
+                logic [63:0] wu, wv;
                 for (int i = 0; i < 16; i++) begin
-                    top_y[{mbx_q, 4'b0} + 12'(i)] <= rec_y[15*16 + i];
+                    wy[i*8 +: 8] = rec_y[15*16 + i];
                     left_y[i] <= rec_y[i*16 + 15];
                 end
                 for (int i = 0; i < 8; i++) begin
-                    top_u[{mbx_q, 3'b0} + 11'(i)] <= rec_u[7*8 + i];
-                    top_v[{mbx_q, 3'b0} + 11'(i)] <= rec_v[7*8 + i];
+                    wu[i*8 +: 8] = rec_u[7*8 + i];
+                    wv[i*8 +: 8] = rec_v[7*8 + i];
                     left_u[i] <= rec_u[i*8 + 7];
                     left_v[i] <= rec_v[i*8 + 7];
                 end
-                st_q <= S_OUT;
+                top_y[mbx_q] <= wy;
+                top_u[mbx_q] <= wu;
+                top_v[mbx_q] <= wv;
+                clr_q <= '0;
+                st_q <= S_CLR;
             end
 
-            S_OUT: begin
-                for (int b = 0; b < 27; b++)
-                    for (int i = 0; i < 16; i++) cram[b][i] <= '0;
-                st_q <= S_IDLE;
+            S_CLR: begin
+                clr_q <= clr_q + 5'd1;
+                if (clr_q == 5'd26) st_q <= S_OUT;
             end
+
+            S_OUT: st_q <= S_IDLE;
 
             S_ERR: st_q <= S_ERR;
             default: st_q <= S_ERR;

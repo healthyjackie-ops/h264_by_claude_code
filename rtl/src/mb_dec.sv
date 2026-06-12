@@ -82,7 +82,7 @@ module mb_dec #(
     endfunction
 
     typedef enum logic [3:0] {
-        S_IDLE, S_MBTYPE, S_I4MODE, S_CMODE, S_CBP, S_QPD,
+        S_IDLE, S_PRE, S_MBTYPE, S_I4MODE, S_CMODE, S_CBP, S_QPD,
         S_LDC_GO, S_LAC_GO, S_RES_WAIT, S_CDC_GO, S_CAC_GO,
         S_EMIT, S_WAIT_REC, S_DONE, S_ERR
     } state_e;
@@ -99,10 +99,18 @@ module mb_dec #(
     logic [3:0] i4m_q [16];            // modes, z-scan
     logic [4:0] nz_q  [16];            // luma nz, z-scan position
 
-    // neighbor line buffers (per 4x4 column / per chroma column)
-    logic [3:0] i4_top  [MAX_MBW * 4];
-    logic [4:0] nzl_top [MAX_MBW * 4];
-    logic [4:0] nzc_top [2][MAX_MBW * 2];
+    // neighbor line buffers, one word per MB column (R4d wide-word)
+    logic [15:0] i4_top  [MAX_MBW];    // 4 x 4b modes
+    logic [19:0] nzl_top [MAX_MBW];    // 4 x 5b counts
+    logic [9:0]  nzc_top0 [MAX_MBW];   // per-component split: one write
+    logic [9:0]  nzc_top1 [MAX_MBW];   // port each (memory inference)
+    logic [15:0] i4t_q;                // prefetched upper-row words
+    logic [19:0] nzlt_q;
+    logic [9:0]  nzct_q [2];
+    wire [15:0] i4t_w = i4_top[mbx_q];
+    wire [19:0] nzlt_w = nzl_top[mbx_q];
+    wire [9:0]  nzct0_w = nzc_top0[mbx_q];
+    wire [9:0]  nzct1_w = nzc_top1[mbx_q];
     logic [3:0] i4_left  [4];
     logic [4:0] nzl_left [4];
     logic [4:0] nzc_left [2][2];
@@ -167,7 +175,7 @@ module mb_dec #(
         if (by != 0) begin
             predB = i4m_q[zidx(bx, by - 2'd1)];
         end else begin
-            predB = i4_top[{mbx_q, 2'b0} + {6'b0, bx}];
+            predB = i4t_q[bx * 4 +: 4];
         end
     end
     logic [3:0] i4_pred;
@@ -186,7 +194,7 @@ module mb_dec #(
         aB = (by != 0) || (mby_q != 0);
         nA = (bx != 0) ? nz_q[zidx(bx - 2'd1, by)] : nzl_left[by];
         nB = (by != 0) ? nz_q[zidx(bx, by - 2'd1)]
-                       : nzl_top[{mbx_q, 2'b0} + {6'b0, bx}];
+                       : nzlt_q[bx * 5 +: 5];
         if (aA && aB)      nc_l = 5'(({1'b0, nA} + {1'b0, nB} + 6'd1) >> 1);
         else if (aA)       nc_l = nA;
         else if (aB)       nc_l = nB;
@@ -204,7 +212,7 @@ module mb_dec #(
         aB = cy || (mby_q != 0);
         nA = cx ? nzc_q[comp_q][{cy, 1'b0}] : nzc_left[comp_q][cy];
         nB = cy ? nzc_q[comp_q][{1'b0, cx}]
-                : nzc_top[comp_q][{mbx_q, 1'b0} + {7'b0, cx}];
+                : nzct_q[comp_q][cx * 5 +: 5];
         // raster idx: {cy,cx}; A=(cx-1,cy) -> {cy,0} when cx==1; B={0,cx}
         if (aA && aB)      nc_c = 5'(({1'b0, nA} + {1'b0, nB} + 6'd1) >> 1);
         else if (aA)       nc_c = nA;
@@ -283,6 +291,14 @@ module mb_dec #(
                 mby_q <= '0;
                 qp_q <= cfg_qp;
                 have_left <= 1'b0;
+                st_q <= S_PRE;
+            end
+
+            S_PRE: begin
+                i4t_q <= i4t_w;
+                nzlt_q <= nzlt_w;
+                nzct_q[0] <= nzct0_w;
+                nzct_q[1] <= nzct1_w;
                 st_q <= S_MBTYPE;
             end
 
@@ -470,22 +486,32 @@ module mb_dec #(
 
             S_EMIT: begin
                 // update neighbor state, advance MB
-                for (int b = 0; b < 4; b++) begin
-                    i4_top[{mbx_q, 2'b0} + b] <= i4m_q[zidx(2'(b), 2'd3)];
-                    nzl_top[{mbx_q, 2'b0} + b] <= nz_q[zidx(2'(b), 2'd3)];
-                    i4_left[b] <= i4m_q[zidx(2'd3, 2'(b))];
-                    nzl_left[b] <= nz_q[zidx(2'd3, 2'(b))];
-                end
-                for (int c2 = 0; c2 < 2; c2++) begin
-                    for (int b = 0; b < 2; b++) begin
-                        // bottom row {1,b}; right column {b,1}
-                        nzc_top[c2][{mbx_q, 1'b0} + b] <=
-                            (cbp_q[5:4] == 2'd2) ? nzc_q[c2][{1'b1, b[0]}]
-                                                 : 5'd0;
-                        nzc_left[c2][b] <= (cbp_q[5:4] == 2'd2)
-                                               ? nzc_q[c2][{b[0], 1'b1}]
-                                               : 5'd0;
+                begin
+                    logic [15:0] wi;
+                    logic [19:0] wn;
+                    for (int b = 0; b < 4; b++) begin
+                        wi[b*4 +: 4] = i4m_q[zidx(2'(b), 2'd3)];
+                        wn[b*5 +: 5] = nz_q[zidx(2'(b), 2'd3)];
+                        i4_left[b] <= i4m_q[zidx(2'd3, 2'(b))];
+                        nzl_left[b] <= nz_q[zidx(2'd3, 2'(b))];
                     end
+                    i4_top[mbx_q] <= wi;
+                    nzl_top[mbx_q] <= wn;
+                end
+                begin
+                    logic [9:0] wc0, wc1;
+                    for (int b = 0; b < 2; b++) begin
+                        wc0[b*5 +: 5] = (cbp_q[5:4] == 2'd2)
+                                            ? nzc_q[0][{1'b1, b[0]}] : 5'd0;
+                        wc1[b*5 +: 5] = (cbp_q[5:4] == 2'd2)
+                                            ? nzc_q[1][{1'b1, b[0]}] : 5'd0;
+                        nzc_left[0][b] <= (cbp_q[5:4] == 2'd2)
+                                              ? nzc_q[0][{b[0], 1'b1}] : 5'd0;
+                        nzc_left[1][b] <= (cbp_q[5:4] == 2'd2)
+                                              ? nzc_q[1][{b[0], 1'b1}] : 5'd0;
+                    end
+                    nzc_top0[mbx_q] <= wc0;
+                    nzc_top1[mbx_q] <= wc1;
                 end
                 st_q <= S_WAIT_REC;
             end
@@ -497,12 +523,12 @@ module mb_dec #(
                     if (mby_q + 8'd1 == cfg_mb_h) st_q <= S_DONE;
                     else begin
                         mby_q <= mby_q + 8'd1;
-                        st_q <= S_MBTYPE;
+                        st_q <= S_PRE;
                     end
                 end else begin
                     have_left <= 1'b1;
                     mbx_q <= mbx_q + 8'd1;
-                    st_q <= S_MBTYPE;
+                    st_q <= S_PRE;
                 end
             end
 

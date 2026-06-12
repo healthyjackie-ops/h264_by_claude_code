@@ -83,9 +83,38 @@ R4b 的 Mealy 模式复制到 MB 层（mb_type/i4 模式/cmode/CBP/qp_delta 全
 头部语法收益被残差块支配（合理）；真正的吞吐余量在输入加宽与
 recon 并行化。
 
+## R4d — 存储 SRAM 化（已完成）
+
+行缓冲与系数 RAM 重组为 memory 推断形态：宽字组织（每 MB 列一个字：
+top_y 120×128b、cram 27×256b 等）+ 单写口（写整字读改写，chroma nz
+按分量拆两数组消除双写口）+ 异步 assign 读口 + MB 入口预取拍 +
+cram 串行清零（27 拍，放进 mb_dec 的 stall 窗口消除与下一 MB 系数流
+的竞态——全链回归曾精确暴露该竞态：x≥16 的 MB 列全错）。
+
+三个工具链教训：
+1. **函数包 memory 读**会被 sv2v 内联成 `always @(cram)` 敏感列表，
+   yosys 前端直接拒收（"Insufficient array indices"）→ 改连续 assign。
+2. **动态 part-select 写**（`cram[blk][addr*16+:16] <=`）触发 mem2reg
+   → 改整字读改写。
+3. 即便形态全对，yosys 对异步复位 always 内的 memory 写仍默认展开——
+   **JPEG 脚本里的 `read_verilog -nomem2reg` 才是开关**，我们的脚本
+   漏抄了这个 flag。
+
+| 指标 | R4c（全 FF） | R4d（mem 提取） |
+|---|---|---|
+| cells | 449,550 | **211,676（−53%）** |
+| 触发器 | 49,049 | **4,229（−91%）** |
+| 逻辑面积 | 44,838 µm² | 17,364 µm² |
+| SRAM 外挂（fakeram+flop-RF，8 块） | — | 5,137 µm² |
+| **总面积** | 44,838 µm² | **22,501 µm²（−50%）** |
+| Fmax | 298 MHz | **301 MHz（300 达标）** |
+| **综合时间** | ~50 分钟 | **3 分钟（~17×）** |
+
+29 个 $mem_v2 保留（含小数组；大块 8 个按 fakeram/flop-RF 估价如上）。
+回归零退步：40/40 + 38/38。
+
 ## 下一步（R4 余项）
 
-1. 行缓冲/cram SRAM 化 + FF 削减（49K FF 的大头）
-2. req 路径 sizing 收回 300 MHz
-3. 输入加宽(16/32-bit 喂入)解除填充瓶颈
-4. deblock_frame 流式行缓冲重构 + 并入综合
+1. 输入加宽（16/32-bit 喂入）解除填充瓶颈
+2. deblock_frame 流式行缓冲重构 + 并入综合
+3. 小 mem 的 memory_map 回收（nz_q 等本应是 FF 的 16 项小数组）

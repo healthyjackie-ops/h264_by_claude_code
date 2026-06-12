@@ -8,7 +8,7 @@
 # all-combinational dequant+idct and intra-plane chains bound Fmax;
 # pipelining is the next optimization pass.
 
-read_verilog ../sv2v_out.v
+read_verilog -nomem2reg ../sv2v_out.v
 
 hierarchy -top h264_core -check
 
