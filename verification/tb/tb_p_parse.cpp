@@ -1,6 +1,7 @@
-// P-R3b differential: mb_dec in P mode vs H264_RTL_DUMP_P records.
+// P-R3b/c differential: mb_dec + mv_pred in P mode vs H264_RTL_DUMP_P.
 // Streams the FIRST P slice of a .264 into the parser and compares the
-// per-MB skip flag, mb_type, sub types and the parse-order mvd list.
+// per-MB skip flag, mb_type, sub types, the parse-order mvd list and
+// the final z-scan 4x4 MV field from the mv_pred unit.
 //   usage: Vmb_top_p <stream.264> <p.dump>
 #include <cstdio>
 #include <cstring>
@@ -213,6 +214,16 @@ int main(int argc, char **argv) {
                     fails++;
                 }
             }
+            for (int k = 0; k < 16; k++) {
+                int16_t rx = (int16_t)top.mv_out_x[k];
+                int16_t ry = (int16_t)top.mv_out_y[k];
+                if (rx != g.mv[k][0] || ry != g.mv[k][1]) {
+                    printf("[FAIL] MB %zu mv[%d] rtl=(%d,%d) c=(%d,%d)\n",
+                           gi, k, rx, ry, g.mv[k][0], g.mv[k][1]);
+                    fails++;
+                    if (fails >= 5) break;
+                }
+            }
             gi++;
             nmvd = 0;
             if (fails >= 5) break;
@@ -227,7 +238,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (!fails) {
-        printf("[PASS] P parse: %zu MBs syntax-exact vs dump\n", gi);
+        printf("[PASS] P parse: %zu MBs syntax+MV bit-exact vs dump\n", gi);
         return 0;
     }
     return 1;

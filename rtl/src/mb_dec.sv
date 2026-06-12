@@ -53,6 +53,7 @@ module mb_dec #(
     output logic        mvd_valid,
     output logic signed [15:0] mvd_x,
     output logic signed [15:0] mvd_y,
+    output logic        skip_go,       // P_Skip MB derivation beat
 
     // per-MB header pulse
     output logic        mb_valid,
@@ -270,6 +271,7 @@ module mb_dec #(
     end
     assign mb_valid = (st_q == S_EMIT) || (st_q == S_WAIT_REC);
     assign mb_skip = skip_flag_q;
+    assign skip_go = (st_q == S_PSKIP_FILL);
     assign mvd_valid = (st_q == S_PMVD_Y) && win_ok && eg_ok;
     assign mvd_x = mvdx_q;
     assign mvd_y = 16'(eg_se);

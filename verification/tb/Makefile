@@ -49,6 +49,7 @@ mb: $(CMODEL_OBJS)
 	  -I$(REPO)/rtl/include \
 	  $(RTL_DIR)/mb_top.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/bitreader.sv \
 	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/expgolomb.sv \
+	  $(RTL_DIR)/mv_pred.sv \
 	  tb_mb_dec.cpp $(MB_OBJS)
 	@echo "built; run: ./obj_dir_mb/Vmb_top <stream> <dump>"
 
@@ -232,6 +233,7 @@ pparse:
 	  -I$(REPO)/rtl/include \
 	  $(RTL_DIR)/mb_top.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/bitreader.sv \
 	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/expgolomb.sv \
+	  $(RTL_DIR)/mv_pred.sv \
 	  tb_p_parse.cpp $(MB_OBJS)
 	@echo built
 

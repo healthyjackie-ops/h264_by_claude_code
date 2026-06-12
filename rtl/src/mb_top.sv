@@ -32,6 +32,8 @@ module mb_top #(
     output logic        mvd_valid,
     output logic signed [15:0] mvd_x,
     output logic signed [15:0] mvd_y,
+    output logic signed [15:0] mv_out_x [16],
+    output logic signed [15:0] mv_out_y [16],
     output logic        mb_valid,
     output logic [7:0]  mb_x,
     output logic [7:0]  mb_y,
@@ -59,6 +61,7 @@ module mb_top #(
 
     logic        m_req_valid, b_req_valid;
     logic [4:0]  m_req_bits, b_req_bits;
+    logic        skip_go_w;
 
     assign br_req_valid = align_valid | m_req_valid | b_req_valid;
     assign br_req_bits  = align_valid ? align_bits
@@ -106,7 +109,7 @@ module mb_top #(
         .blk_coef_addr(blk_coef_addr), .blk_coef_data(blk_coef_data),
         .mb_skip(mb_skip), .mb_inter(mb_inter), .mb_ptype(mb_ptype),
         .mb_sub(mb_sub), .mvd_valid(mvd_valid), .mvd_x(mvd_x),
-        .mvd_y(mvd_y),
+        .mvd_y(mvd_y), .skip_go(skip_go_w),
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
@@ -114,6 +117,18 @@ module mb_top #(
         .coef_data(coef_data),
         .slice_done(slice_done), .err(err),
         .rec_done(1'b1)
+    );
+
+    // MV prediction runs beside the parser off the P-syntax stream;
+    // rec_done is tied high here so mb_valid is the single accept beat.
+    mv_pred #(.MAX_MBW(MAX_MBW)) u_mv (
+        .clk(clk), .rst_n(rst_n),
+        .cfg_mb_w(cfg_mb_w), .start(start),
+        .mb_ptype(mb_ptype), .mb_sub(mb_sub),
+        .mvd_valid(mvd_valid), .mvd_x(mvd_x), .mvd_y(mvd_y),
+        .skip_go(skip_go_w), .commit(mb_valid),
+        .mb_inter(mb_inter), .mb_skip(mb_skip),
+        .mv_out_x(mv_out_x), .mv_out_y(mv_out_y)
     );
 
 endmodule
