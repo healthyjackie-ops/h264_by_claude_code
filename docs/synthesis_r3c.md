@@ -187,6 +187,23 @@ flop-RF 计价 3,391 µm² → 单 fakeram_64x28 宏 301 µm²。
 逻辑 18,435 + SRAM 18,059 = 36,494 µm²**——比 R3c 不含 deblock 的
 44.7k µm² 还小 18%，功能却是完整解码器。
 
+## Wave 14 — P 帧核（P-R3e 终态）
+
+完整 baseline I/P 核（h264_core + mv_pred + mc_fetch/mc_core +
+P bS deblock + nz/mv sideband）：
+
+| 指标 | R4h（I-only） | P-R3e（I/P 完整核） |
+|---|---|---|
+| 逻辑面积 | 18,435 µm² | **29,746 µm²**（+61%：MC 15 相位插值器 + mv_pred/sideband 阵列 + bS 推导） |
+| mem 实例 | 44 | 61 |
+| SRAM 外挂 | 18,059 µm² | ≈19,489 µm²（+ mv_pred 行缓冲 2×480×16 = 688、deblock row_mi 120×133 = 742） |
+| **总面积** | 36.5k µm² | **≈49.2k µm²** |
+| 时序 | 300 MHz | **300 MHz 收敛**（ABC delay 3327.8ps < 3333 目标） |
+
+P 路径的面积大头是 mc_core 的全相位组合插值器（hrow 9×4 6-tap
+阵列 + j-family 二级 6-tap）。吞吐余项：MC 取数逐 4x4 块串行
+（48 块/MB，~600 拍），需要更高 P 帧吞吐时做行读流水/批取数。
+
 ## 余项（按需）
 
-recon/deblock 内部并行化（更高吞吐时再做）。
+recon/deblock 内部并行化、MC 取数流水化（更高吞吐时再做）。
