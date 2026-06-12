@@ -136,7 +136,10 @@ ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
 |---|---|---|
 | **P-R1** ✅ | mc_core.sv（mc4x4_luma 15 qpel 相位 9x9 窗口 + mc4x4_chroma 1/8 双线性 5x5）| 60000 随机 trial（全相位+边缘 clamp）bit-exact vs mc.o，第一发全过 |
 | **P-R2** ✅ | mc_fetch.sv：参考帧留系统侧（DDR/pad 帧），核发 clamp 语义窗口行读（req x/y/w → rsp 9px 行）；坐标推导（xInt=px+mv>>2、相位=mv&3）入 RTL；统一 4x4 粒度（分块插值与整块数学等价） | 20000 块（随机 MV 越界+全相位+取数协议）bit-exact，第一发全过 |
-| P-R3 | P MB 层 FSM（MV 预测/skip/分区）+ 集成 | P 流帧级 bit-exact |
+| **P-R3a** ✅ | P 语法基建：H264_RTL_DUMP_P（140B/MB：skip/type/sub/mvd 解析序/最终 MV z-scan，gate=CAVLC P+nref1+no-8x8）+ inter CBP ROM（Table 9-4）+ mb_dec/mb_top cfg_is_p 通路 | dump 三 call site 全捕获；I 回归 40/40 不退化 |
+| **P-R3b** ✅ | mb_dec P MB 层 FSM：mb_skip_run 链（7.3.4 do/while——run 终结的 coded MB 不再读 skip_run）+ P mb_type（0..4 inter / ≥5 转 I）+ P_8x8(ref0) sub_mb_type + mvd 对流（计数 0→1/1,2→2/3→4）+ inter CBP + inter 残差复用 I 通路（i16=0 路径零增码）；tb_p_parse 差分台 + make p-regress | **24 条 CAVLC baseline P 流逐 MB 语法 bit-exact**（skip/type/sub/mvd 全比对，phase13/15/16/17 含多参考首帧），I 回归 40/40+40/40 |
+| P-R3c | MV 预测单元（中值/skip 推导 + mv/ref 行缓冲）对拍 dump 最终 MV 场 | 逐 4x4 块 MV bit-exact |
+| P-R3d | MC 调度集成 mb_recon + 参考帧回写 | P 流帧级 bit-exact |
 
 ## Wave 13 — RTL（进行中）
 

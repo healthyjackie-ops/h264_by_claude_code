@@ -225,3 +225,35 @@ mcf:
 	./obj_dir_mcf/Vmc_fetch
 
 .PHONY: mcf
+
+pparse:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module mb_top \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_pparse \
+	  -I$(REPO)/rtl/include \
+	  $(RTL_DIR)/mb_top.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/bitreader.sv \
+	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/expgolomb.sv \
+	  tb_p_parse.cpp $(MB_OBJS)
+	@echo built
+
+# P-syntax differential over every CAVLC baseline P stream that the
+# dump gate accepts (others come back empty and are counted as skips).
+p-regress: pparse
+	@pass=0; skip=0; fail=0; \
+	for V in $(REPO)/verification/vectors/phase1[3-9]/*.264; do \
+	  rm -f /tmp/pregress.dump; \
+	  H264_RTL_DUMP_P=/tmp/pregress.dump \
+	    $(CMODEL_DIR)/build/h264_decode $$V /tmp/pregress.yuv \
+	    >/dev/null 2>&1; \
+	  if [ ! -s /tmp/pregress.dump ]; then skip=$$((skip+1)); continue; fi; \
+	  r=$$(./obj_dir_pparse/Vmb_top $$V /tmp/pregress.dump 2>&1 | tail -1); \
+	  case "$$r" in \
+	    \[PASS\]*) pass=$$((pass+1));; \
+	    \[SKIP\]*) skip=$$((skip+1));; \
+	    *) fail=$$((fail+1)); echo "$$(basename $$V): $$r";; \
+	  esac; \
+	done; \
+	rm -f /tmp/pregress.dump /tmp/pregress.yuv; \
+	echo "=== p-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
+	test $$fail -eq 0
+
+.PHONY: pparse p-regress

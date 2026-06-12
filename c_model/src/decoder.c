@@ -1306,7 +1306,8 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         rtl_p_rec_t prec;
         int prec_nmvd = 0;
         int prec_on = (sh->is_p && !use_cabac && !sh->is_b &&
-                       sh->num_ref_l0 == 1 && rtl_dump_p_file() != NULL);
+                       sh->num_ref_l0 == 1 && !pps->transform_8x8 &&
+                       rtl_dump_p_file() != NULL);
         if (prec_on) {
             memset(&prec, 0, sizeof(prec));
             prec.mbx = (uint8_t)mbx;
@@ -1396,6 +1397,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 if (mb_type < 5) {
                     is_inter = 1;
                 } else {
+                    if (prec_on) prec.mb_type = (uint8_t)mb_type;
                     mb_type -= 5;          /* intra MB inside a P slice */
                 }
             }
@@ -1707,6 +1709,11 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                 if (r0 < 0) goto fail;
                 if (read_mvd_pair(bs, &cbx, use_cabac, &c, 0, sid, gx0, gy0,
                                   &dx, &dy, &adx, &ady, &out->err)) goto fail;
+                if (prec_on && prec_nmvd < 16) {
+                    prec.mvd[prec_nmvd][0] = dx;
+                    prec.mvd[prec_nmvd][1] = dy;
+                    prec_nmvd++;
+                }
                 mv_pred(&c, 0, sid, gx0, gy0, 4, 0, r0, &pmx, &pmy);
                 inter_pred_part(&c, r0, gx0, gy0, 4, 4,
                                 (int16_t)(pmx + dx), (int16_t)(pmy + dy));

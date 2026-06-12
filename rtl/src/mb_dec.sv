@@ -20,6 +20,7 @@ module mb_dec #(
     input  logic [7:0]  cfg_mb_w,
     input  logic [7:0]  cfg_mb_h,
     input  logic [5:0]  cfg_qp,        // SliceQPy
+    input  logic        cfg_is_p,      // P slice (P-R3b)
 
     input  logic        start,         // begin slice_data (bitreader primed)
 
@@ -42,6 +43,16 @@ module mb_dec #(
     input  logic        blk_coef_we,
     input  logic [3:0]  blk_coef_addr,
     input  logic signed [15:0] blk_coef_data,
+
+    // P-syntax output stream: skip/type/sub on the header pulse, mvd
+    // pairs as they parse (consumer: MV prediction / golden compare)
+    output logic        mb_skip,
+    output logic        mb_inter,
+    output logic [2:0]  mb_ptype,      // 0..4 when inter
+    output logic [7:0]  mb_sub,        // 4 x 2b sub types (P_8x8)
+    output logic        mvd_valid,
+    output logic signed [15:0] mvd_x,
+    output logic signed [15:0] mvd_y,
 
     // per-MB header pulse
     output logic        mb_valid,
@@ -82,14 +93,26 @@ module mb_dec #(
         return {by[1], bx[1], by[0], bx[0]};
     endfunction
 
-    typedef enum logic [3:0] {
+    typedef enum logic [4:0] {
         S_IDLE, S_PRE, S_MBTYPE, S_I4MODE, S_CMODE, S_CBP, S_QPD,
         S_LDC_GO, S_LAC_GO, S_RES_WAIT, S_CDC_GO, S_CAC_GO,
-        S_EMIT, S_WAIT_REC, S_DONE, S_ERR
+        S_EMIT, S_WAIT_REC, S_DONE, S_ERR,
+        S_SKIPRUN, S_PSUB, S_PMVD_X, S_PMVD_Y, S_PSKIP_FILL
     } state_e;
     state_e st_q, ret_q;               // ret_q: state after S_RES_WAIT
 
     logic [7:0] mbx_q, mby_q;
+    logic [15:0] skip_q;               // remaining skip MBs
+    logic        coded_next_q;         // next MB is the coded MB after a
+                                       // skip run (no mb_skip_run field)
+    logic        skip_rd_q;            // skip_run consumed this slice pos
+    logic        inter_q;
+    logic [2:0]  ptype_q;
+    logic [7:0]  sub_q;                // packed 4 x 2b
+    logic [2:0]  part_q;               // partition / sub-block counter
+    logic [4:0]  nmvd_q;
+    logic signed [15:0] mvdx_q;
+    logic        skip_flag_q;
     logic       i16_q;
     logic [1:0] i16m_q;
     logic [1:0] cmode_q;
@@ -125,7 +148,7 @@ module mb_dec #(
         req_valid = 1'b0;
         req_bits = '0;
         if (win_ok) unique case (st_q)
-        S_MBTYPE: if (eg_ok) begin
+        S_MBTYPE, S_SKIPRUN, S_PSUB, S_PMVD_X, S_PMVD_Y: if (eg_ok) begin
             req_valid = 1'b1;
             req_bits = eg_len;
         end
@@ -246,6 +269,13 @@ module mb_dec #(
         for (int i = 0; i < 16; i++) mb_i4m[i*4 +: 4] = i4m_q[i];
     end
     assign mb_valid = (st_q == S_EMIT) || (st_q == S_WAIT_REC);
+    assign mb_skip = skip_flag_q;
+    assign mvd_valid = (st_q == S_PMVD_Y) && win_ok && eg_ok;
+    assign mvd_x = mvdx_q;
+    assign mvd_y = 16'(eg_se);
+    assign mb_inter = inter_q;
+    assign mb_ptype = ptype_q;
+    assign mb_sub = sub_q;
     assign slice_done = (st_q == S_DONE);
     assign err = (st_q == S_ERR);
 
@@ -290,6 +320,8 @@ module mb_dec #(
                 mby_q <= '0;
                 qp_q <= cfg_qp;
                 have_left <= 1'b0;
+                skip_q <= '0;
+                coded_next_q <= 1'b0;
                 st_q <= S_PRE;
             end
 
@@ -298,21 +330,84 @@ module mb_dec #(
                 nzlt_q <= nbr_w[35:16];
                 nzct_q[0] <= nbr_w[45:36];
                 nzct_q[1] <= nbr_w[55:46];
-                st_q <= S_MBTYPE;
+                skip_flag_q <= 1'b0;
+                inter_q <= 1'b0;
+                ptype_q <= '0;
+                sub_q <= '0;
+                if (cfg_is_p && skip_q != 16'd0) begin
+                    // inside a skip run: this MB is skipped
+                    skip_q <= skip_q - 16'd1;
+                    if (skip_q == 16'd1) coded_next_q <= 1'b1;
+                    skip_flag_q <= 1'b1;
+                    inter_q <= 1'b1;
+                    st_q <= S_PSKIP_FILL;
+                end else begin
+                    // the coded MB terminating a skip run carries no
+                    // mb_skip_run of its own (7.3.4 do/while shape)
+                    st_q <= (cfg_is_p && !coded_next_q) ? S_SKIPRUN
+                                                        : S_MBTYPE;
+                    coded_next_q <= 1'b0;
+                end
+            end
+
+            S_SKIPRUN: if (win_ok && eg_ok) begin
+                if (eg_ue != 12'd0) begin
+                    skip_q <= 12'(eg_ue) - 12'd1;
+                    if (eg_ue == 12'd1) coded_next_q <= 1'b1;
+                    skip_flag_q <= 1'b1;
+                    inter_q <= 1'b1;
+                    st_q <= S_PSKIP_FILL;
+                end else begin
+                    st_q <= S_MBTYPE;
+                end
+            end
+
+            // skip MB: neighbor state (nz 0, modes DC) then emit
+            S_PSKIP_FILL: begin
+                for (int k = 0; k < 16; k++) begin
+                    i4m_q[k] <= 4'd2;
+                    nz_q[k] <= '0;
+                end
+                nzc_q[0][0] <= '0; nzc_q[0][1] <= '0;
+                nzc_q[0][2] <= '0; nzc_q[0][3] <= '0;
+                nzc_q[1][0] <= '0; nzc_q[1][1] <= '0;
+                nzc_q[1][2] <= '0; nzc_q[1][3] <= '0;
+                cbp_q <= '0;
+                i16_q <= 1'b0;
+                cmode_q <= '0;
+                st_q <= S_EMIT;
             end
 
             S_MBTYPE: if (win_ok) begin
+                logic [11:0] eff;
+                eff = (cfg_is_p && eg_ue >= 12'd5) ? (eg_ue - 12'd5)
+                                                   : eg_ue;
                 if (!eg_ok) st_q <= S_ERR;
+                else if (cfg_is_p && eg_ue < 12'd5) begin
+                    // inter MB: partition shape, then mvds
+                    inter_q <= 1'b1;
+                    ptype_q <= 3'(eg_ue);
+                    i16_q <= 1'b0;
+                    for (int i = 0; i < 16; i++) i4m_q[i] <= 4'd2;
+                    part_q <= '0;
+                    if (eg_ue >= 12'd3) begin  /* P_8x8 / ref0 */
+                        nmvd_q <= '0;
+                        st_q <= S_PSUB;
+                    end else begin
+                        nmvd_q <= (eg_ue == 12'd0) ? 5'd1 : 5'd2;
+                        st_q <= S_PMVD_X;
+                    end
+                end
                 else begin
-                    if (eg_ue == 12'd0) begin
+                    if (eff == 12'd0) begin
                         i16_q <= 1'b0;
                         i16m_q <= '0;          // dump field is 0 for I_4x4
                         k_q <= '0;
                         st_q <= S_I4MODE;
-                    end else if (eg_ue <= 12'd24) begin
+                    end else if (eff <= 12'd24) begin
                         logic [11:0] m;
                         logic [1:0]  cc;
-                        m = eg_ue - 12'd1;
+                        m = eff - 12'd1;
                         cc = 2'((m >> 2) % 12'd3);
                         i16_q <= 1'b1;
                         i16m_q <= 2'(m & 12'd3);
@@ -322,6 +417,38 @@ module mb_dec #(
                     end else begin
                         st_q <= S_ERR;     // I_PCM / invalid: out of subset
                     end
+                end
+            end
+
+            S_PSUB: if (win_ok) begin
+                if (!eg_ok || eg_ue > 12'd3) st_q <= S_ERR;
+                else begin
+                    logic [4:0] add;
+                    sub_q[part_q[1:0]*2 +: 2] <= 2'(eg_ue);
+                    add = (eg_ue == 12'd0) ? 5'd1
+                        : (eg_ue == 12'd3) ? 5'd4 : 5'd2;
+                    nmvd_q <= nmvd_q + add;
+                    if (part_q == 3'd3) begin
+                        part_q <= '0;
+                        st_q <= S_PMVD_X;
+                    end else part_q <= part_q + 3'd1;
+                end
+            end
+
+            S_PMVD_X: if (win_ok) begin
+                if (!eg_ok) st_q <= S_ERR;
+                else begin
+                    mvdx_q <= 16'(eg_se);
+                    st_q <= S_PMVD_Y;
+                end
+            end
+
+            S_PMVD_Y: if (win_ok) begin
+                if (!eg_ok) st_q <= S_ERR;
+                else begin
+                    // mvd pair complete (pulse handled combinationally)
+                    nmvd_q <= nmvd_q - 5'd1;
+                    st_q <= (nmvd_q == 5'd1) ? S_CBP : S_PMVD_X;
                 end
             end
 
@@ -349,11 +476,19 @@ module mb_dec #(
 
             S_CBP: if (win_ok) begin
                 logic [5:0] cbp;
-                cbp = cavlc_intra_cbp(6'(eg_ue));
+                cbp = inter_q ? cavlc_inter_cbp(6'(eg_ue))
+                              : cavlc_intra_cbp(6'(eg_ue));
                 if (!eg_ok || eg_ue > 12'd47 || cbp == 6'd63) st_q <= S_ERR;
                 else begin
                     cbp_q <= cbp;
-                    st_q <= (cbp == 6'd0) ? S_EMIT : S_QPD;
+                    if (cbp == 6'd0) begin
+                        for (int k = 0; k < 16; k++) nz_q[k] <= '0;
+                        for (int k = 0; k < 4; k++) begin
+                            nzc_q[0][k[1:0]] <= '0;
+                            nzc_q[1][k[1:0]] <= '0;
+                        end
+                        st_q <= S_EMIT;
+                    end else st_q <= S_QPD;
                 end
             end
 
