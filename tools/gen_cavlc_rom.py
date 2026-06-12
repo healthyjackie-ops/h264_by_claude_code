@@ -256,6 +256,23 @@ def main() -> int:
     out.append("  return r;")
     out.append("endfunction")
 
+    # ---- inter CBP mapping (Table 9-4 inter column, decoder.c) ----
+    dtext = (ROOT / "c_model" / "src" / "decoder.c").read_text()
+    icbp = parse_array(dtext, "golomb_to_inter_cbp")
+    assert len(icbp) == 48
+    out.append("")
+    out.append("// Table 9-4 inter CBP mapping (ue code -> cbp)")
+    out.append("function automatic logic [5:0] cavlc_inter_cbp(")
+    out.append("    input logic [5:0] code);")
+    out.append("  logic [5:0] r;")
+    out.append("  unique case (code)")
+    for i, v in enumerate(icbp):
+        out.append(f"    6'd{i}: r = 6'd{v};")
+    out.append("    default: r = 6'd63;          // invalid marker")
+    out.append("  endcase")
+    out.append("  return r;")
+    out.append("endfunction")
+
     ttext = (ROOT / "c_model" / "src" / "transform.c").read_text()
     zz = parse_array(ttext, "h264_zigzag4x4")
     assert len(zz) == 16 and sorted(zz) == list(range(16))

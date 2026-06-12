@@ -643,6 +643,64 @@ function automatic logic [5:0] cavlc_intra_cbp(
   return r;
 endfunction
 
+// Table 9-4 inter CBP mapping (ue code -> cbp)
+function automatic logic [5:0] cavlc_inter_cbp(
+    input logic [5:0] code);
+  logic [5:0] r;
+  unique case (code)
+    6'd0: r = 6'd0;
+    6'd1: r = 6'd16;
+    6'd2: r = 6'd1;
+    6'd3: r = 6'd2;
+    6'd4: r = 6'd4;
+    6'd5: r = 6'd8;
+    6'd6: r = 6'd32;
+    6'd7: r = 6'd3;
+    6'd8: r = 6'd5;
+    6'd9: r = 6'd10;
+    6'd10: r = 6'd12;
+    6'd11: r = 6'd15;
+    6'd12: r = 6'd47;
+    6'd13: r = 6'd7;
+    6'd14: r = 6'd11;
+    6'd15: r = 6'd13;
+    6'd16: r = 6'd14;
+    6'd17: r = 6'd6;
+    6'd18: r = 6'd9;
+    6'd19: r = 6'd31;
+    6'd20: r = 6'd35;
+    6'd21: r = 6'd37;
+    6'd22: r = 6'd42;
+    6'd23: r = 6'd44;
+    6'd24: r = 6'd33;
+    6'd25: r = 6'd34;
+    6'd26: r = 6'd36;
+    6'd27: r = 6'd40;
+    6'd28: r = 6'd39;
+    6'd29: r = 6'd43;
+    6'd30: r = 6'd45;
+    6'd31: r = 6'd46;
+    6'd32: r = 6'd17;
+    6'd33: r = 6'd18;
+    6'd34: r = 6'd20;
+    6'd35: r = 6'd24;
+    6'd36: r = 6'd19;
+    6'd37: r = 6'd21;
+    6'd38: r = 6'd26;
+    6'd39: r = 6'd28;
+    6'd40: r = 6'd23;
+    6'd41: r = 6'd27;
+    6'd42: r = 6'd29;
+    6'd43: r = 6'd30;
+    6'd44: r = 6'd22;
+    6'd45: r = 6'd25;
+    6'd46: r = 6'd38;
+    6'd47: r = 6'd41;
+    default: r = 6'd63;          // invalid marker
+  endcase
+  return r;
+endfunction
+
 // 4x4 zigzag scan -> raster position
 function automatic logic [3:0] zz4(input logic [3:0] s);
   logic [3:0] r;

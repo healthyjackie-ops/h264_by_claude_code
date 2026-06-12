@@ -91,6 +91,38 @@ static void rtl_dump_rec(const uint8_t *y, size_t ls, const uint8_t *u,
     for (int r = 0; r < 8; r++) fwrite(v + (size_t)r * cs, 1, 8, f);
 }
 
+/* P-syntax dump (P-R3a): one record per P-slice macroblock for the
+ * RTL parser testbench. Gated to the P-R3 subset: CAVLC, single
+ * reference, no B. Layout (little-endian, 140 bytes):
+ *   u8 mbx, mby, skip, mb_type(0..4 inter, 5+ intra), sub[4], qp
+ *   s16 mvd[16][2]  (parse order, zero-filled)
+ *   s16 mv[16][2]   (final per-4x4, z-scan order)  */
+static FILE *rtl_dump_p_file(void) {
+    static FILE *f;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        const char *path = getenv("H264_RTL_DUMP_P");
+        if (path) f = fopen(path, "wb");
+    }
+    return f;
+}
+
+typedef struct {
+    uint8_t mbx, mby, skip, mb_type;
+    uint8_t sub[4];
+    uint8_t qp;
+    uint8_t pad[3];
+    int16_t mvd[16][2];
+    int16_t mv[16][2];
+} rtl_p_rec_t;
+
+static void rtl_dump_p(const rtl_p_rec_t *r) {
+    FILE *f = rtl_dump_p_file();
+    if (!f) return;
+    fwrite(r, sizeof(*r), 1, f);
+}
+
 /* A reference frame: padded planes + motion field (for B direct). */
 typedef struct {
     uint8_t *Y, *U, *V;
@@ -1271,6 +1303,17 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             c.mb_ref[gi] = -2;
         }
 
+        rtl_p_rec_t prec;
+        int prec_nmvd = 0;
+        int prec_on = (sh->is_p && !use_cabac && !sh->is_b &&
+                       sh->num_ref_l0 == 1 && rtl_dump_p_file() != NULL);
+        if (prec_on) {
+            memset(&prec, 0, sizeof(prec));
+            prec.mbx = (uint8_t)mbx;
+            prec.mby = (uint8_t)mby;
+            prec.qp = (uint8_t)qp;
+        }
+
         int this_skip = 0;
         if ((sh->is_p || sh->is_b) && use_cabac) {
             this_skip = cabac_mb_skip(&cbx, &c, sid, sh->is_b, mbx, mby);
@@ -1322,6 +1365,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             c.mb_cmode[mby * c.mb_w + mbx] = 0;
             c.mb_skip[mby * c.mb_w + mbx] = 1;
             last_qpd_nz = 0;
+            if (prec_on) prec.skip = 1;
             goto mb_done;
         }
         uint32_t mb_type;
@@ -1370,6 +1414,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             int adx, ady;
             int all_sub8x8 = 1;
             int nref = (int)sh->num_ref_l0;
+            if (prec_on) prec.mb_type = (uint8_t)mb_type;
             if (is_inter == 2) {
                 /* ---- B macroblock (Table 7-14) ---- */
                 if (dbg >= 2) fprintf(stderr, "BMB %u,%u type=%u\n",
@@ -1694,6 +1739,11 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                                       px, py, &dx, &dy, &adx, &ady,
                                       &out->err))
                         goto fail;
+                    if (prec_on && prec_nmvd < 16) {
+                        prec.mvd[prec_nmvd][0] = dx;
+                        prec.mvd[prec_nmvd][1] = dy;
+                        prec_nmvd++;
+                    }
                     mv_pred(&c, 0, sid, px, py, (mb_type == 1) ? 4 : 2,
                             (mb_type == 1 ? 1 : 3) + part, r[part],
                             &pmx, &pmy);
@@ -1711,6 +1761,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                     sub[b] = use_cabac ? cabac_p_sub_type(&cbx) : bs_ue(bs);
                     if (sub[b] > 3) { out->err = H264_ERR_BAD_STREAM; goto fail; }
                     if (sub[b] != 0) all_sub8x8 = 0;
+                    if (prec_on) prec.sub[b] = (uint8_t)sub[b];
                 }
                 for (int b = 0; b < 4; b++) {
                     int bx0 = gx0 + (b & 1) * 2, by0 = gy0 + (b >> 1) * 2;
@@ -1743,6 +1794,11 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                         if (read_mvd_pair(bs, &cbx, use_cabac, &c, 0, sid,
                                           sx, sy, &dx, &dy, &adx, &ady,
                                           &out->err)) goto fail;
+                        if (prec_on && prec_nmvd < 16) {
+                            prec.mvd[prec_nmvd][0] = dx;
+                            prec.mvd[prec_nmvd][1] = dy;
+                            prec_nmvd++;
+                        }
                         mv_pred(&c, 0, sid, sx, sy, w4, 0, r8[b],
                                 &pmx, &pmy);
                         inter_pred_part(&c, r8[b], sx, sy, w4, h4,
@@ -2447,6 +2503,17 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         }
 
 mb_done:
+        if (prec_on) {
+            for (int k = 0; k < 16; k++) {
+                uint32_t gi = (mby * 4 + zscan_y[k]) * bw +
+                              mbx * 4 + zscan_x[k];
+                prec.mv[k][0] = (c.mb_ref[gi] == -2) ? (int16_t)0
+                                                     : c.mv_x[gi];
+                prec.mv[k][1] = (c.mb_ref[gi] == -2) ? (int16_t)0
+                                                     : c.mv_y[gi];
+            }
+            rtl_dump_p(&prec);
+        }
         /* Intra MBs (and PCM) never wrote motion state: turn the -2
          * sentinels into -1 = intra, mv (0,0) for neighbor prediction. */
         for (int k = 0; k < 16; k++) {
