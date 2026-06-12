@@ -131,6 +131,38 @@ static void rtl_dump_prec(const uint8_t *y, size_t ls, const uint8_t *u,
     for (int r = 0; r < 8; r++) fwrite(v + (size_t)r * cs, 1, 8, f);
 }
 
+/* B-syntax dump (W16-a): one record per gated B-slice macroblock.
+ * Layout (LE, 284 bytes):
+ *   u8 mbx, mby, skip, mb_type(0..22 inter, 23+ intra), sub[4], qp,
+ *   u8 direct_spatial, pad[2]
+ *   s16 mvd[2][16][2]  (parse order per list, zero-filled)
+ *   s16 mv[2][16][2]   (final per-4x4 z-scan, both lists)
+ *   u8 pmode[16]       (z-scan: bit0 L0 used, bit1 L1 used; 0=intra) */
+typedef struct {
+    uint8_t mbx, mby, skip, mb_type;
+    uint8_t sub[4];
+    uint8_t qp, dsp, pad[2];
+    int16_t mvd[2][16][2];
+    int16_t mv[2][16][2];
+    uint8_t pmode[16];
+} rtl_b_rec_t;
+
+static FILE *rtl_dump_b_file(void) {
+    static FILE *f;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        const char *path = getenv("H264_RTL_DUMP_B");
+        if (path) f = fopen(path, "wb");
+    }
+    return f;
+}
+
+static void rtl_dump_b(const rtl_b_rec_t *r) {
+    FILE *f = rtl_dump_b_file();
+    if (f) fwrite(r, sizeof(*r), 1, f);
+}
+
 /* One-shot reference-plane dump for the P-R3d bench: the FIRST gated
  * P slice's list0[0] uncropped planes (the bench implements the MC
  * clamp over these). Layout: u16 mb_w, u16 mb_h (LE), then Y, U, V. */
@@ -1352,6 +1384,24 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         int prec_on = (sh->is_p && !use_cabac && !sh->is_b &&
                        sh->num_ref_l0 == 1 && !pps->transform_8x8 &&
                        rtl_dump_p_file() != NULL);
+        rtl_b_rec_t brec;
+        int brec_nmvd[2] = {0, 0};
+        int brec_on = (sh->is_b && !use_cabac &&
+                       sh->num_ref_l0 == 1 && sh->num_ref_l1 == 1 &&
+                       !pps->weighted_pred && !pps->weighted_bipred &&
+                       !pps->transform_8x8 && rtl_dump_b_file() != NULL);
+        if (brec_on) {
+            memset(&brec, 0, sizeof(brec));
+            brec.mbx = (uint8_t)mbx;
+            brec.mby = (uint8_t)mby;
+            brec.dsp = (uint8_t)sh->direct_spatial;
+        }
+#define BREC_MVD(lst, vx, vy) do { \
+            if (brec_on && brec_nmvd[lst] < 16) { \
+                brec.mvd[lst][brec_nmvd[lst]][0] = (vx); \
+                brec.mvd[lst][brec_nmvd[lst]][1] = (vy); \
+                brec_nmvd[lst]++; \
+            } } while (0)
         if (prec_on) {
             if (c.list0[0])
                 rtl_dump_ref_once(c.mb_w, c.mb_h, c.list0[0]->Y,
@@ -1414,6 +1464,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             c.mb_skip[mby * c.mb_w + mbx] = 1;
             last_qpd_nz = 0;
             if (prec_on) prec.skip = 1;
+            if (brec_on) brec.skip = 1;
             goto mb_done;
         }
         uint32_t mb_type;
@@ -1439,7 +1490,10 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             if (bs->error) { out->err = H264_ERR_TRUNC; goto fail; }
             if (sh->is_b) {
                 if (mb_type < 23) is_inter = 2;
-                else mb_type -= 23;
+                else {
+                    if (brec_on) brec.mb_type = (uint8_t)mb_type;
+                    mb_type -= 23;
+                }
             } else if (sh->is_p) {
                 if (mb_type < 5) {
                     is_inter = 1;
@@ -1464,6 +1518,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             int all_sub8x8 = 1;
             int nref = (int)sh->num_ref_l0;
             if (prec_on) prec.mb_type = (uint8_t)mb_type;
+            if (brec_on) brec.mb_type = (uint8_t)mb_type;
             if (is_inter == 2) {
                 /* ---- B macroblock (Table 7-14) ---- */
                 if (dbg >= 2) fprintf(stderr, "BMB %u,%u type=%u\n",
@@ -1497,6 +1552,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                         if (read_mvd_pair(bs, &cbx, use_cabac, &c, 0, sid,
                                           gx0, gy0, &dx, &dy, &adx, &ady,
                                           &out->err)) goto fail;
+                        BREC_MVD(0, dx, dy);
                         mv_pred(&c, 0, sid, gx0, gy0, 4, 0, r0, &pmx2, &pmy2);
                         m0x = (int16_t)(pmx2 + dx);
                         m0y = (int16_t)(pmy2 + dy);
@@ -1508,6 +1564,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                         if (read_mvd_pair(bs, &cbx, use_cabac, &c, 1, sid,
                                           gx0, gy0, &dx, &dy, &adx, &ady,
                                           &out->err)) goto fail;
+                        BREC_MVD(1, dx, dy);
                         mv_pred(&c, 1, sid, gx0, gy0, 4, 0, r1, &pmx2, &pmy2);
                         m1x = (int16_t)(pmx2 + dx);
                         m1y = (int16_t)(pmy2 + dy);
@@ -1582,6 +1639,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                                               &adx, &ady, &out->err))
                                 goto fail;
                             int16_t pmx2, pmy2;
+                            BREC_MVD(list, dx, dy);
                             mv_pred(&c, list, sid, px, py, w4,
                                     (is8x16 ? 3 : 1) + part, rr[list][part],
                                     &pmx2, &pmy2);
@@ -1630,6 +1688,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                     for (int b = 0; b < 4; b++) {
                         sub[b] = use_cabac ? cabac_b_sub_type(&cbx)
                                            : bs_ue(bs);
+                        if (brec_on) brec.sub[b] = (uint8_t)sub[b];
                         if (sub[b] > 12) {
                             out->err = H264_ERR_BAD_STREAM;
                 goto fail;
@@ -1707,6 +1766,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                                                   &dx, &dy, &adx, &ady,
                                                   &out->err)) goto fail;
                                 int16_t pmx2, pmy2;
+                                BREC_MVD(list, dx, dy);
                                 mv_pred(&c, list, sid, sx, sy, w4, 0,
                                         r8b[list][b], &pmx2, &pmy2);
                                 smv[list][b][s][0] = (int16_t)(pmx2 + dx);
@@ -2557,6 +2617,21 @@ static int decode_picture(slice_ent_t *ents, int nslices,
         }
 
 mb_done:
+        if (brec_on) {
+            brec.qp = (uint8_t)qp;
+            for (int k = 0; k < 16; k++) {
+                uint32_t gi = (mby * 4 + zscan_y[k]) * bw +
+                              mbx * 4 + zscan_x[k];
+                int l0 = (c.mb_ref[gi] >= 0);
+                int l1 = (c.mb_ref1[gi] >= 0);
+                brec.mv[0][k][0] = l0 ? c.mv_x[gi] : (int16_t)0;
+                brec.mv[0][k][1] = l0 ? c.mv_y[gi] : (int16_t)0;
+                brec.mv[1][k][0] = l1 ? c.mv1_x[gi] : (int16_t)0;
+                brec.mv[1][k][1] = l1 ? c.mv1_y[gi] : (int16_t)0;
+                brec.pmode[k] = (uint8_t)(l0 | (l1 << 1));
+            }
+            rtl_dump_b(&brec);
+        }
         if (prec_on) {
             for (int k = 0; k < 16; k++) {
                 uint32_t gi = (mby * 4 + zscan_y[k]) * bw +
