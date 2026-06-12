@@ -1,8 +1,7 @@
-// h264_core — synthesis top (rtl_spec.md R3c): the per-MB decode engine
-// (bitreader -> mb_dec -> cavlc_block -> mb_recon) without the frame
-// buffer; reconstructed macroblocks stream out and deblocking runs
-// against external storage in a real system. deblock_edge is included
-// standalone for its own timing/area numbers.
+// h264_core — synthesis top (rtl_spec.md R3c, deblock integrated R4g):
+// bitreader -> mb_dec -> cavlc_block -> mb_recon -> deblock_stream.
+// The complete baseline-I decoder: bitstream in, filtered macroblock
+// rows out, with only line buffers inside (no frame storage).
 module h264_core #(
     parameter int MAX_MBW = 120        // 1080p line buffers
 )(
@@ -18,21 +17,23 @@ module h264_core #(
     input  logic [7:0]  cfg_mb_h,
     input  logic [5:0]  cfg_qp,
     input  logic signed [5:0] cfg_cqp_off,
+    input  logic signed [5:0] cfg_a_off,
+    input  logic signed [5:0] cfg_b_off,
+    input  logic        cfg_deblock,
 
     input  logic        start,
     input  logic        align_valid,
     input  logic [4:0]  align_bits,
-    input  logic        rec_taken,     // downstream consumed the MB
 
-    output logic        mb_out_valid,
-    output logic [7:0]  mb_out_x,
-    output logic [7:0]  mb_out_y,
-    output logic [5:0]  mb_out_qp,
-    output logic [7:0]  out_y [256],
-    output logic [7:0]  out_u [64],
-    output logic [7:0]  out_v [64],
+    // filtered output row stream (deblock_stream contract)
+    output logic        out_valid,
+    output logic [7:0]  out_mbx,
+    output logic [7:0]  out_mby,
+    output logic [1:0]  out_plane,
+    output logic [3:0]  out_row,
+    output logic [127:0] out_data,
 
-    output logic        slice_done,
+    output logic        frame_done,
     output logic        err
 );
 
@@ -108,8 +109,14 @@ module h264_core #(
         .coef_we(coef_we), .coef_blk(coef_blk), .coef_addr(coef_addr),
         .coef_data(coef_data),
         .slice_done(slice_done), .err(mb_err),
-        .rec_done(rec_accept && rec_taken)
+        .rec_done(rec_accept)
     );
+
+    logic [7:0] rec_py [256];
+    logic [7:0] rec_pu [64];
+    logic [7:0] rec_pv [64];
+    logic dbf_ready, rec_busy;
+    logic slice_done;
 
     mb_recon #(.MAX_MBW(MAX_MBW)) u_rec (
         .clk(clk), .rst_n(rst_n),
@@ -119,17 +126,43 @@ module h264_core #(
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
-        .busy(), .accepted(rec_accept),
+        .busy(rec_busy), .accepted(rec_accept), .out_ready(dbf_ready),
         .rec_x(rec_x), .rec_yc(rec_yc), .rec_qp(rec_qp),
         .rec_valid(rec_valid),
-        .rec_y(out_y), .rec_u(out_u), .rec_v(out_v),
+        .rec_y(rec_py), .rec_u(rec_pu), .rec_v(rec_pv),
         .err(rec_err)
     );
 
-    assign mb_out_valid = rec_valid;
-    assign mb_out_x = rec_x;
-    assign mb_out_y = rec_yc;
-    assign mb_out_qp = rec_qp;
+    // flush once parsing is done and the last MB has reconstructed
+    logic slice_done_q, flush_q, dbf_done;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            slice_done_q <= 1'b0;
+            flush_q <= 1'b0;
+        end else begin
+            if (slice_done) slice_done_q <= 1'b1;
+            if (slice_done_q && !rec_busy && !rec_valid && dbf_ready &&
+                !flush_q) begin
+                flush_q <= 1'b1;       // one-shot
+            end
+        end
+    end
+
+    deblock_stream #(.MAX_MBW(MAX_MBW)) u_dbf (
+        .clk(clk), .rst_n(rst_n),
+        .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h),
+        .cfg_cqp_off(cfg_cqp_off),
+        .cfg_a_off(cfg_a_off), .cfg_b_off(cfg_b_off),
+        .cfg_enable(cfg_deblock),
+        .mb_push(rec_valid), .mb_x(rec_x), .mb_y(rec_yc), .mb_qp(rec_qp),
+        .in_y(rec_py), .in_u(rec_pu), .in_v(rec_pv),
+        .mb_ready(dbf_ready),
+        .flush(flush_q && !dbf_done), .flush_done(dbf_done),
+        .out_valid(out_valid), .out_mbx(out_mbx), .out_mby(out_mby),
+        .out_plane(out_plane), .out_row(out_row), .out_data(out_data)
+    );
+
+    assign frame_done = dbf_done;
     assign err = mb_err | rec_err | blk_err;
 
 endmodule

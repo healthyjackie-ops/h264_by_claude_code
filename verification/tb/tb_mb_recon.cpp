@@ -73,6 +73,7 @@ int main(int argc, char **argv) {
     top.rst_n = 0;
     top.coef_we = 0;
     top.mb_valid = 0;
+    top.out_ready = 1;
     tick();
     top.rst_n = 1;
     tick();

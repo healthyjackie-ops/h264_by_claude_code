@@ -38,7 +38,8 @@ module mb_recon #(
     output logic [7:0]  rec_x,         // latched coords for the consumer
     output logic [7:0]  rec_yc,
     output logic [5:0]  rec_qp,
-    output logic        rec_valid,     // one-cycle pulse, planes readable
+    input  logic        out_ready,     // downstream accepts the MB
+    output logic        rec_valid,     // held until out_ready
     output logic [7:0]  rec_y [256],
     output logic [7:0]  rec_u [64],
     output logic [7:0]  rec_v [64],
@@ -497,7 +498,7 @@ module mb_recon #(
                 st_q <= S_OUT;
             end
 
-            S_OUT: st_q <= S_CLR;
+            S_OUT: if (out_ready) st_q <= S_CLR;
 
             S_CLR: begin
                 clr_q <= clr_q + 5'd1;

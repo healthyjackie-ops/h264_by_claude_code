@@ -128,7 +128,7 @@ module h264_top #(
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
-        .busy(rec_busy), .accepted(rec_accept),
+        .busy(rec_busy), .accepted(rec_accept), .out_ready(1'b1),
         .rec_x(rec_x), .rec_yc(rec_yc), .rec_qp(rec_qp),
         .rec_valid(rec_valid),
         .rec_y(rec_y), .rec_u(rec_u), .rec_v(rec_v),
