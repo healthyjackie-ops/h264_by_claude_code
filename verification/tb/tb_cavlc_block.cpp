@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <algorithm>
 
 #include "Vcavlc_top.h"
 #include "verilated.h"
@@ -87,10 +88,15 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 8; i++) feed.push_back(0xAA);
         size_t fi = 0;
         while (fi < feed.size()) {
+            int nb = (int)std::min<size_t>(4, feed.size() - fi);
+            uint32_t w = 0;
+            for (int k = 0; k < nb; k++)
+                w |= (uint32_t)feed[fi + k] << (24 - k * 8);
             top.in_valid = top.in_ready ? 1 : 0;
-            top.in_byte = feed[fi];
+            top.in_word = w;
+            top.in_bytes = (uint8_t)nb;
             tick();
-            if (top.in_valid) fi++;
+            if (top.in_valid) fi += top.in_bytes;
             top.in_valid = 0;
             if (top.avail >= 56) break;
         }
@@ -118,11 +124,16 @@ int main(int argc, char **argv) {
         while (guard++ < 2000) {
             top.in_valid = 0;
             if (fi < feed.size() && top.in_ready) {
+                int nb = (int)std::min<size_t>(4, feed.size() - fi);
+                uint32_t w = 0;
+                for (int k = 0; k < nb; k++)
+                    w |= (uint32_t)feed[fi + k] << (24 - k * 8);
                 top.in_valid = 1;
-                top.in_byte = feed[fi];
+                top.in_word = w;
+                top.in_bytes = (uint8_t)nb;
             }
             tick();
-            if (top.in_valid) { fi++; top.in_valid = 0; }
+            if (top.in_valid) { fi += top.in_bytes; top.in_valid = 0; }
             if (top.coef_we) got[top.coef_addr] = (int16_t)top.coef_data;
             if (top.done || top.err) finished = true;
             if (finished && ++tail >= 3) break;

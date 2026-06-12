@@ -10,7 +10,8 @@ module mb_top #(
     input  logic        rst_n,
 
     input  logic        in_valid,
-    input  logic [7:0]  in_byte,
+    input  logic [31:0] in_word,
+    input  logic [2:0]  in_bytes,
     output logic        in_ready,
 
     input  logic [7:0]  cfg_mb_w,
@@ -57,7 +58,8 @@ module mb_top #(
 
     bitreader u_br (
         .clk(clk), .rst_n(rst_n),
-        .in_valid(in_valid), .in_byte(in_byte), .in_ready(in_ready),
+        .in_valid(in_valid), .in_word(in_word), .in_bytes(in_bytes),
+        .in_ready(in_ready),
         .req_valid(br_req_valid), .req_bits(br_req_bits),
         .req_ready(br_req_ready),
         .show(show), .avail(avail)

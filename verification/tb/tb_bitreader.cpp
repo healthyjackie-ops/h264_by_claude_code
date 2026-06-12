@@ -68,8 +68,13 @@ int main(int argc, char **argv) {
         auto pump = [&] {
             d.top.in_valid = 0;
             if (feed < bytes.size() && d.top.in_ready) {
+                int nb = (int)std::min<size_t>(4, bytes.size() - feed);
+                uint32_t w = 0;
+                for (int k = 0; k < nb; k++)
+                    w |= (uint32_t)bytes[feed + k] << (24 - k * 8);
                 d.top.in_valid = 1;
-                d.top.in_byte = bytes[feed];
+                d.top.in_word = w;
+                d.top.in_bytes = (uint8_t)nb;
             }
         };
 
@@ -77,7 +82,7 @@ int main(int argc, char **argv) {
         for (int i = 0; i < 16; i++) {
             pump();
             d.tick();
-            if (d.top.in_valid) feed++;
+            if (d.top.in_valid) feed += d.top.in_bytes;
         }
 
         for (int op = 0; op < 600; op++) {
@@ -87,7 +92,7 @@ int main(int argc, char **argv) {
             while (d.top.avail < 32 && feed < bytes.size()) {
                 pump();
                 d.tick();
-                if (d.top.in_valid) feed++;
+                if (d.top.in_valid) feed += d.top.in_bytes;
             }
             if (bs.byte + 8 > bytes.size()) break;
 
@@ -147,7 +152,7 @@ int main(int argc, char **argv) {
             d.top.req_bits = (uint8_t)rtl_len;
             pump();
             d.tick();
-            if (d.top.in_valid) feed++;
+            if (d.top.in_valid) feed += d.top.in_bytes;
             d.top.req_valid = 0;
         }
     }

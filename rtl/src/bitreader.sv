@@ -1,18 +1,20 @@
-// bitreader — RBSP bit consumer for the CAVLC datapath (rtl_spec.md R1).
+// bitreader — RBSP bit consumer for the CAVLC datapath (rtl_spec.md R1,
+// input widened to 32 bits in R4e).
 //
-// Left-aligned 64-bit buffer: bit 63 is the next bitstream bit. Bytes are
-// accepted whenever 8 bits of room exist; the consumer sees a 24-bit
-// lookahead window (`show`) plus the available-bit count and retires
-// 1..24 bits per cycle through the req interface. Starting bit offsets
-// that are not byte-aligned (CAVLC slice_data) are handled by consuming
-// the residue bits up front.
+// Left-aligned 64-bit buffer: bit 63 is the next bitstream bit. Words of
+// 1..4 bytes (MSB-first, in_bytes counts them) are accepted whenever the
+// buffer has room; the consumer sees a 24-bit lookahead window plus the
+// available-bit count and retires 1..24 bits per cycle. The widened feed
+// outruns the single-cycle decode FSMs, so the avail>=24 starvation
+// gates never engage mid-stream.
 module bitreader (
     input  logic        clk,
     input  logic        rst_n,
 
-    // byte feed
+    // word feed: in_word[31:24] is the first byte of the group
     input  logic        in_valid,
-    input  logic [7:0]  in_byte,
+    input  logic [31:0] in_word,
+    input  logic [2:0]  in_bytes,      // 1..4 valid bytes
     output logic        in_ready,
 
     // bit consume
@@ -25,12 +27,13 @@ module bitreader (
     output logic [6:0]  avail
 );
 
-    logic [63:0] buf_q;
-    logic [6:0]  fill_q;               // 0..64 valid bits, left-aligned
-
-    assign in_ready  = (fill_q <= 7'd56);
+    logic [95:0] buf_q;                // widened with the 32b feed (R4e):
+    logic [6:0]  fill_q;               // a 64b buffer left the accept
+                                       // window (fill<=32) colliding with
+                                       // the avail>=24 starvation gate
+    assign in_ready  = (fill_q <= 7'd64);
     assign req_ready = req_valid && (fill_q >= {2'b0, req_bits});
-    assign show      = buf_q[63:40];
+    assign show      = buf_q[95:72];
     assign avail     = fill_q;
 
     // one byte in and one consume can both happen in a cycle
@@ -39,7 +42,7 @@ module bitreader (
             buf_q  <= '0;
             fill_q <= '0;
         end else begin
-            logic [63:0] b;
+            logic [95:0] b;
             logic [6:0]  f;
             b = buf_q;
             f = fill_q;
@@ -47,9 +50,16 @@ module bitreader (
                 b = b << req_bits;
                 f = f - {2'b0, req_bits};
             end
-            if (in_valid && (fill_q <= 7'd56)) begin
-                b = b | ({56'b0, in_byte} << (7'd56 - f));
-                f = f + 7'd8;
+            if (in_valid && (fill_q <= 7'd64)) begin
+                logic [31:0] wd;
+                unique case (in_bytes)
+                    3'd1: wd = {in_word[31:24], 24'b0};
+                    3'd2: wd = {in_word[31:16], 16'b0};
+                    3'd3: wd = {in_word[31:8], 8'b0};
+                    default: wd = in_word;
+                endcase
+                b = b | ({64'b0, wd} << (7'd64 - f));
+                f = f + {2'b0, in_bytes, 3'b0};    // bytes * 8
             end
             buf_q  <= b;
             fill_q <= f;

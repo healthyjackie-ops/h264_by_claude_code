@@ -134,14 +134,19 @@ int main(int argc, char **argv) {
     auto pump = [&] {
         top.in_valid = 0;
         if (fi < rbsp.size() && top.in_ready) {
+            int nb = (int)std::min<size_t>(4, rbsp.size() - fi);
+            uint32_t w = 0;
+            for (int k = 0; k < nb; k++)
+                w |= (uint32_t)rbsp[fi + k] << (24 - k * 8);
             top.in_valid = 1;
-            top.in_byte = rbsp[fi];
+            top.in_word = w;
+            top.in_bytes = (uint8_t)nb;
         }
     };
     for (int i = 0; i < 16; i++) {
         pump();
         tick();
-        if (top.in_valid) fi++;
+        if (top.in_valid) fi += top.in_bytes;
         top.in_valid = 0;
     }
     if (sd_bit) {                      // consume residue bits
@@ -149,7 +154,7 @@ int main(int argc, char **argv) {
         top.align_bits = (uint8_t)sd_bit;
         pump();
         tick();
-        if (top.in_valid) fi++;
+        if (top.in_valid) fi += top.in_bytes;
         top.align_valid = 0;
         top.in_valid = 0;
         tick();
@@ -169,7 +174,7 @@ int main(int argc, char **argv) {
     while (!top.slice_done && !top.err && guard++ < 8000000) {
         pump();
         tick();
-        if (top.in_valid) { fi++; top.in_valid = 0; }
+        if (top.in_valid) { fi += top.in_bytes; top.in_valid = 0; }
         if (top.coef_we) {
             int blk = top.coef_blk;
             int a = top.coef_addr;
@@ -201,7 +206,7 @@ int main(int argc, char **argv) {
             // S_EMIT exits before we sample again
             pump();
             tick();
-            if (top.in_valid) { fi++; top.in_valid = 0; }
+            if (top.in_valid) { fi += top.in_bytes; top.in_valid = 0; }
         }
     }
 

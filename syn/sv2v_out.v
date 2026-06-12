@@ -2,7 +2,8 @@ module h264_core (
 	clk,
 	rst_n,
 	in_valid,
-	in_byte,
+	in_word,
+	in_bytes,
 	in_ready,
 	cfg_mb_w,
 	cfg_mb_h,
@@ -26,7 +27,8 @@ module h264_core (
 	input wire clk;
 	input wire rst_n;
 	input wire in_valid;
-	input wire [7:0] in_byte;
+	input wire [31:0] in_word;
+	input wire [2:0] in_bytes;
 	output wire in_ready;
 	input wire [7:0] cfg_mb_w;
 	input wire [7:0] cfg_mb_h;
@@ -60,7 +62,8 @@ module h264_core (
 		.clk(clk),
 		.rst_n(rst_n),
 		.in_valid(in_valid),
-		.in_byte(in_byte),
+		.in_word(in_word),
+		.in_bytes(in_bytes),
 		.in_ready(in_ready),
 		.req_valid(br_req_valid),
 		.req_bits(br_req_bits),
@@ -190,7 +193,8 @@ module bitreader (
 	clk,
 	rst_n,
 	in_valid,
-	in_byte,
+	in_word,
+	in_bytes,
 	in_ready,
 	req_valid,
 	req_bits,
@@ -201,7 +205,8 @@ module bitreader (
 	input wire clk;
 	input wire rst_n;
 	input wire in_valid;
-	input wire [7:0] in_byte;
+	input wire [31:0] in_word;
+	input wire [2:0] in_bytes;
 	output wire in_ready;
 	input wire req_valid;
 	input wire [4:0] req_bits;
@@ -210,7 +215,7 @@ module bitreader (
 	output wire [6:0] avail;
 	reg [63:0] buf_q;
 	reg [6:0] fill_q;
-	assign in_ready = fill_q <= 7'd56;
+	assign in_ready = fill_q <= 7'd32;
 	assign req_ready = req_valid && (fill_q >= {2'b00, req_bits});
 	assign show = buf_q[63:40];
 	assign avail = fill_q;
@@ -228,9 +233,17 @@ module bitreader (
 				b = b << req_bits;
 				f = f - {2'b00, req_bits};
 			end
-			if (in_valid && (fill_q <= 7'd56)) begin
-				b = b | ({56'b00000000000000000000000000000000000000000000000000000000, in_byte} << (7'd56 - f));
-				f = f + 7'd8;
+			if (in_valid && (fill_q <= 7'd32)) begin : sv2v_autoblock_2
+				reg [31:0] wd;
+				(* full_case, parallel_case *)
+				case (in_bytes)
+					3'd1: wd = {in_word[31:24], 24'b000000000000000000000000};
+					3'd2: wd = {in_word[31:16], 16'b0000000000000000};
+					3'd3: wd = {in_word[31:8], 8'b00000000};
+					default: wd = in_word;
+				endcase
+				b = b | ({32'b00000000000000000000000000000000, wd} << (7'd32 - f));
+				f = f + {2'b00, in_bytes, 3'b000};
 			end
 			buf_q <= b;
 			fill_q <= f;

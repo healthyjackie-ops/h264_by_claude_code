@@ -6,7 +6,8 @@ module br_eg_top (
     input  logic        rst_n,
 
     input  logic        in_valid,
-    input  logic [7:0]  in_byte,
+    input  logic [31:0] in_word,
+    input  logic [2:0]  in_bytes,
     output logic        in_ready,
 
     input  logic        req_valid,
@@ -26,7 +27,8 @@ module br_eg_top (
         .clk      (clk),
         .rst_n    (rst_n),
         .in_valid (in_valid),
-        .in_byte  (in_byte),
+        .in_word  (in_word),
+        .in_bytes (in_bytes),
         .in_ready (in_ready),
         .req_valid(req_valid),
         .req_bits (req_bits),
