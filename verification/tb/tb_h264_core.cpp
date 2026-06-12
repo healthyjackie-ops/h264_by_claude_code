@@ -67,14 +67,20 @@ int main(int argc, char **argv) {
         } else if (n.type == 5 || n.type == 1) {
             if (parse_slice_header(&bs, &sps, &pps, n.type, n.ref_idc,
                                    &sh, &errc)) return 1;
-            if (pps.entropy_coding_mode || sh.is_p || sh.is_b) {
+            if (sh.is_p || sh.is_b ||
+                (pps.entropy_coding_mode && pps.transform_8x8)) {
                 printf("[SKIP] out of subset\n");
                 return 1;
             }
             rbsp.assign(n.rbsp, n.rbsp + n.size);
             for (int pi = 0; pi < 8; pi++) rbsp.push_back(0);
-            sd_byte = bs.byte;
-            sd_bit = bs.bit;
+            if (pps.entropy_coding_mode) {     // cabac aligns
+                sd_byte = bs.bit ? bs.byte + 1 : bs.byte;
+                sd_bit = 0;
+            } else {
+                sd_byte = bs.byte;
+                sd_bit = bs.bit;
+            }
             found = true;
             nal_free(&n);
             break;
@@ -127,6 +133,7 @@ int main(int argc, char **argv) {
     top.cfg_a_off = (uint8_t)(sh.alpha_c0_offset & 0x3F);
     top.cfg_b_off = (uint8_t)(sh.beta_offset & 0x3F);
     top.cfg_deblock = (sh.disable_deblock != 1);
+    top.cfg_cabac = pps.entropy_coding_mode ? 1 : 0;
 
     size_t fi = sd_byte;
     auto pump = [&] {

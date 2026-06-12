@@ -23,6 +23,7 @@ module h264_core #(
     input  logic signed [5:0] cfg_b_off,
     input  logic        cfg_deblock,
     input  logic        cfg_is_p,
+    input  logic        cfg_cabac,
 
     input  logic        start,
     input  logic        align_valid,
@@ -55,10 +56,12 @@ module h264_core #(
     logic [23:0] show;
     logic [6:0]  avail;
 
-    logic m_req_valid, b_req_valid;
-    logic [4:0] m_req_bits, b_req_bits;
-    assign br_req_valid = align_valid | m_req_valid | b_req_valid;
+    logic m_req_valid, b_req_valid, c_req_valid;
+    logic [4:0] m_req_bits, b_req_bits, c_req_bits;
+    assign br_req_valid = align_valid | m_req_valid | b_req_valid |
+                          c_req_valid;
     assign br_req_bits = align_valid ? align_bits
+                         : c_req_valid ? c_req_bits
                          : (b_req_valid ? b_req_bits : m_req_bits);
 
     bitreader u_br (
@@ -90,16 +93,18 @@ module h264_core #(
         .coef_data(blk_coef_data)
     );
 
-    logic mb_valid;
-    logic [7:0] mb_x, mb_y;
-    logic mb_i16;
-    logic [5:0] mb_cbp, mb_qp;
-    logic [1:0] mb_i16_mode, mb_cmode;
-    logic [63:0] mb_i4m;
-    logic coef_we;
-    logic [4:0] coef_blk;
-    logic [3:0] coef_addr;
-    logic signed [15:0] coef_data;
+    logic mb_valid, mb_valid_v;
+    logic [7:0] mb_x, mb_y, mb_x_v, mb_y_v;
+    logic mb_i16, mb_i16_v;
+    logic [5:0] mb_cbp, mb_qp, mb_cbp_v, mb_qp_v;
+    logic [1:0] mb_i16_mode, mb_cmode, mb_i16_mode_v, mb_cmode_v;
+    logic [63:0] mb_i4m, mb_i4m_v;
+    logic coef_we, coef_we_v;
+    logic [4:0] coef_blk, coef_blk_v;
+    logic [3:0] coef_addr, coef_addr_v;
+    logic signed [15:0] coef_data, coef_data_v;
+    logic [15:0] mb_nz_v;
+    logic slice_done_v, mb_err_v;
     logic mb_err, rec_valid, rec_err, rec_accept;
     logic [7:0] rec_x, rec_yc;
     logic [5:0] rec_qp;
@@ -117,7 +122,7 @@ module h264_core #(
         .clk(clk), .rst_n(rst_n),
         .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_qp(cfg_qp),
         .cfg_is_p(cfg_is_p),
-        .start(start),
+        .start(start && !cfg_cabac),
         .req_valid(m_req_valid), .req_bits(m_req_bits),
         .req_ready(br_req_ready), .show(show), .avail(avail),
         .blk_start(blk_start), .blk_chroma_dc(blk_chroma_dc),
@@ -127,15 +132,60 @@ module h264_core #(
         .blk_coef_addr(blk_coef_addr), .blk_coef_data(blk_coef_data),
         .mb_skip(mb_skip), .mb_inter(mb_inter), .mb_ptype(mb_ptype),
         .mb_sub(mb_sub), .mvd_valid(mvd_valid), .mvd_x(mvd_x),
-        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(mb_nz_w),
-        .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
-        .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
-        .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
-        .coef_we(coef_we), .coef_blk(coef_blk), .coef_addr(coef_addr),
-        .coef_data(coef_data),
-        .slice_done(slice_done), .err(mb_err),
+        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(mb_nz_v),
+        .mb_valid(mb_valid_v), .mb_x(mb_x_v), .mb_y(mb_y_v),
+        .mb_i16(mb_i16_v),
+        .mb_cbp(mb_cbp_v), .mb_qp(mb_qp_v), .mb_i16_mode(mb_i16_mode_v),
+        .mb_cmode(mb_cmode_v), .mb_i4m(mb_i4m_v),
+        .coef_we(coef_we_v), .coef_blk(coef_blk_v),
+        .coef_addr(coef_addr_v), .coef_data(coef_data_v),
+        .slice_done(slice_done_v), .err(mb_err_v),
         .rec_done(rec_accept)
     );
+
+    // CABAC twin: same downstream contract, selected by cfg_cabac
+    logic        mb_valid_c, slice_done_c, mb_err_c, coef_we_c;
+    logic [7:0]  mb_x_c, mb_y_c;
+    logic        mb_i16_c;
+    logic [5:0]  mb_cbp_c, mb_qp_c;
+    logic [1:0]  mb_i16_mode_c, mb_cmode_c;
+    logic [63:0] mb_i4m_c;
+    logic [4:0]  coef_blk_c;
+    logic [3:0]  coef_addr_c;
+    logic signed [15:0] coef_data_c;
+
+    cabac_mb #(.MAX_MBW(MAX_MBW)) u_cm (
+        .clk(clk), .rst_n(rst_n),
+        .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_qp(cfg_qp),
+        .start(start && cfg_cabac),
+        .req_valid(c_req_valid), .req_bits(c_req_bits),
+        .req_ready(br_req_ready), .show(show), .avail(avail),
+        .mb_valid(mb_valid_c), .mb_x(mb_x_c), .mb_y(mb_y_c),
+        .mb_i16(mb_i16_c),
+        .mb_cbp(mb_cbp_c), .mb_qp(mb_qp_c), .mb_i16_mode(mb_i16_mode_c),
+        .mb_cmode(mb_cmode_c), .mb_i4m(mb_i4m_c),
+        .coef_we(coef_we_c), .coef_blk(coef_blk_c),
+        .coef_addr(coef_addr_c), .coef_data(coef_data_c),
+        .slice_done(slice_done_c), .err(mb_err_c),
+        .rec_done(rec_accept)
+    );
+
+    assign mb_valid = cfg_cabac ? mb_valid_c : mb_valid_v;
+    assign mb_x = cfg_cabac ? mb_x_c : mb_x_v;
+    assign mb_y = cfg_cabac ? mb_y_c : mb_y_v;
+    assign mb_i16 = cfg_cabac ? mb_i16_c : mb_i16_v;
+    assign mb_cbp = cfg_cabac ? mb_cbp_c : mb_cbp_v;
+    assign mb_qp = cfg_cabac ? mb_qp_c : mb_qp_v;
+    assign mb_i16_mode = cfg_cabac ? mb_i16_mode_c : mb_i16_mode_v;
+    assign mb_cmode = cfg_cabac ? mb_cmode_c : mb_cmode_v;
+    assign mb_i4m = cfg_cabac ? mb_i4m_c : mb_i4m_v;
+    assign coef_we = cfg_cabac ? coef_we_c : coef_we_v;
+    assign coef_blk = cfg_cabac ? coef_blk_c : coef_blk_v;
+    assign coef_addr = cfg_cabac ? coef_addr_c : coef_addr_v;
+    assign coef_data = cfg_cabac ? coef_data_c : coef_data_v;
+    assign slice_done = cfg_cabac ? slice_done_c : slice_done_v;
+    assign mb_err = cfg_cabac ? mb_err_c : mb_err_v;
+    assign mb_nz_w = cfg_cabac ? 16'd0 : mb_nz_v;
 
 
     mv_pred #(.MAX_MBW(MAX_MBW)) u_mv (

@@ -191,13 +191,15 @@ core:
 	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/mb_recon.sv $(RTL_DIR)/mc_fetch.sv $(RTL_DIR)/mc_core.sv \
 	  $(RTL_DIR)/intra4x4_pred.sv $(RTL_DIR)/intra_full_pred.sv \
 	  $(RTL_DIR)/deblock_stream.sv $(RTL_DIR)/deblock_edge.sv \
+	  $(RTL_DIR)/cabac_mb.sv $(RTL_DIR)/cabac_core.sv \
 	  tb_h264_core.cpp $(MB_OBJS)
 	@echo "built"
 
 core-regress: core
 	@pass=0; fail=0; \
 	for V in $(REPO)/verification/vectors/phase05/*.264 \
-	         $(REPO)/verification/vectors/phase06/*.264; do \
+	         $(REPO)/verification/vectors/phase06/*.264 \
+	         $(REPO)/verification/vectors/phase08/*.264; do \
 	  r=$$(./obj_dir_core/Vh264_core $$V $${V%.264}.yuv 2>&1 | tail -1); \
 	  case "$$r" in \
 	    \[PASS\]*) pass=$$((pass+1));; \
