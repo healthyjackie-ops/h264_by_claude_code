@@ -177,7 +177,16 @@ mem 在异步复位块清零非法（row_vld → 打包位向量）。
 完整核（含 deblock）39.6k µm² @ 301 MHz，而 R3c 的 44.7k µm² @
 286 MHz 还**不含** deblock。periods/frame 64x64：4522 → 3993。
 
+## R4h — 邻行缓冲合并（已完成）
+
+mb_dec 的 4 个窄行缓冲（i4_top 16b / nzl_top 20b / nzc_top×2 10b）
+打包成单个 56b 宽字 mem（读写本就同拍同地址——零 FSM 改动）：
+flop-RF 计价 3,391 µm² → 单 fakeram_64x28 宏 301 µm²。
+
+**完整核终态：225,903 cells / 44 mem / 300 MHz /
+逻辑 18,435 + SRAM 18,059 = 36,494 µm²**——比 R3c 不含 deblock 的
+44.7k µm² 还小 18%，功能却是完整解码器。
+
 ## 余项（按需）
 
-recon/deblock 内部并行化（更高吞吐）；fakeram 宏的 flop-RF 项
-（i4_top/nzc_top）合并位宽优化。
+recon/deblock 内部并行化（更高吞吐时再做）。

@@ -100,18 +100,16 @@ module mb_dec #(
     logic [3:0] i4m_q [16];            // modes, z-scan
     logic [4:0] nz_q  [16];            // luma nz, z-scan position
 
-    // neighbor line buffers, one word per MB column (R4d wide-word)
-    logic [15:0] i4_top  [MAX_MBW];    // 4 x 4b modes
-    logic [19:0] nzl_top [MAX_MBW];    // 4 x 5b counts
-    logic [9:0]  nzc_top0 [MAX_MBW];   // per-component split: one write
-    logic [9:0]  nzc_top1 [MAX_MBW];   // port each (memory inference)
+    // neighbor line buffer, ONE word per MB column (R4h merge): the
+    // four small arrays packed into 56 bits so the memory tiles onto a
+    // single fakeram macro instead of three flop register files.
+    // Layout: [15:0] i4 modes, [35:16] nz luma, [45:36] nzc Cb,
+    // [55:46] nzc Cr.
+    logic [55:0] nbr_top [MAX_MBW];
     logic [15:0] i4t_q;                // prefetched upper-row words
     logic [19:0] nzlt_q;
     logic [9:0]  nzct_q [2];
-    wire [15:0] i4t_w = i4_top[mbx_q];
-    wire [19:0] nzlt_w = nzl_top[mbx_q];
-    wire [9:0]  nzct0_w = nzc_top0[mbx_q];
-    wire [9:0]  nzct1_w = nzc_top1[mbx_q];
+    wire [55:0] nbr_w = nbr_top[mbx_q];
     logic [3:0] i4_left  [4];
     logic [4:0] nzl_left [4];
     logic [4:0] nzc_left [2][2];
@@ -296,10 +294,10 @@ module mb_dec #(
             end
 
             S_PRE: begin
-                i4t_q <= i4t_w;
-                nzlt_q <= nzlt_w;
-                nzct_q[0] <= nzct0_w;
-                nzct_q[1] <= nzct1_w;
+                i4t_q <= nbr_w[15:0];
+                nzlt_q <= nbr_w[35:16];
+                nzct_q[0] <= nbr_w[45:36];
+                nzct_q[1] <= nbr_w[55:46];
                 st_q <= S_MBTYPE;
             end
 
@@ -488,31 +486,24 @@ module mb_dec #(
             S_EMIT: begin
                 // update neighbor state, advance MB
                 begin
-                    logic [15:0] wi;
-                    logic [19:0] wn;
+                    logic [55:0] w;
                     for (int b = 0; b < 4; b++) begin
-                        wi[b*4 +: 4] = i4m_q[zidx(2'(b), 2'd3)];
-                        wn[b*5 +: 5] = nz_q[zidx(2'(b), 2'd3)];
+                        w[b*4 +: 4] = i4m_q[zidx(2'(b), 2'd3)];
+                        w[16 + b*5 +: 5] = nz_q[zidx(2'(b), 2'd3)];
                         i4_left[b] <= i4m_q[zidx(2'd3, 2'(b))];
                         nzl_left[b] <= nz_q[zidx(2'd3, 2'(b))];
                     end
-                    i4_top[mbx_q] <= wi;
-                    nzl_top[mbx_q] <= wn;
-                end
-                begin
-                    logic [9:0] wc0, wc1;
                     for (int b = 0; b < 2; b++) begin
-                        wc0[b*5 +: 5] = (cbp_q[5:4] == 2'd2)
+                        w[36 + b*5 +: 5] = (cbp_q[5:4] == 2'd2)
                                             ? nzc_q[0][{1'b1, b[0]}] : 5'd0;
-                        wc1[b*5 +: 5] = (cbp_q[5:4] == 2'd2)
+                        w[46 + b*5 +: 5] = (cbp_q[5:4] == 2'd2)
                                             ? nzc_q[1][{1'b1, b[0]}] : 5'd0;
                         nzc_left[0][b] <= (cbp_q[5:4] == 2'd2)
                                               ? nzc_q[0][{b[0], 1'b1}] : 5'd0;
                         nzc_left[1][b] <= (cbp_q[5:4] == 2'd2)
                                               ? nzc_q[1][{b[0], 1'b1}] : 5'd0;
                     end
-                    nzc_top0[mbx_q] <= wc0;
-                    nzc_top1[mbx_q] <= wc1;
+                    nbr_top[mbx_q] <= w;
                 end
                 // the consumer may accept on this very cycle (it idles
                 // while we parse): advance straight through, else hold

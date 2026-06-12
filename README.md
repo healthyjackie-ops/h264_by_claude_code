@@ -72,11 +72,14 @@ c_model/src/
 路径与 >>4 相消、在 DC 路径不消 —— luma/chroma DC 反量化差 16 倍，修正后
 全矩阵一次通过。
 
-## RTL（rtl_spec.md R0-R3c 完成）
+## RTL（R0-R4h 完成——完整硬件解码器）
 
-baseline-I 子集的硬件解码器，**.264 进 yuv 出，38/38 帧与 C 模型
-bit-exact**（Verilator 全链），ASAP7 综合基线 **286 MHz / 44.7k µm² /
-449K cells**（docs/synthesis_r3c.md）。
+baseline-I 完整解码核：**码流进、滤波后行流出，内部仅行缓冲
+（1080p）**。Verilator 全链 .264→yuv **40/40 bit-exact**
+（make core-regress），ASAP7 综合 **300 MHz / 36.5k µm²（含 SRAM）/
+4.6K FF**，64x64 帧 3993 拍（deblock 与解码重叠）。优化历程
+R4a-R4h（流水/单拍化/SRAM 化/双缓冲/流式 deblock）见
+docs/synthesis_r3c.md。
 
 | 模块 | 验证 |
 |---|---|
@@ -86,14 +89,15 @@ bit-exact**（Verilator 全链），ASAP7 综合基线 **286 MHz / 44.7k µm² /
 | transform + intra 预测全家 | 80,000 随机 trial |
 | mb_recon（重建 + 邻样本管理） | 40/40 逐像素对拍 |
 | deblock（线核 + 帧级） | 200,000 线 + 14/14 帧 |
-| **h264_top 全链** | **38/38 .264→yuv bit-exact** |
+| **h264_top 全链** | 38/38 .264→yuv bit-exact |
+| **h264_core 完整核（含流式 deblock）** | **40/40 bit-exact + ASAP7 300MHz/36.5k µm²** |
 
 一键回归：`make -C verification/tb rtl-regress`；综合：`make -C syn synth`。
 
 ## 下一步（docs/roadmap.md）
 
-RTL R4 性能轮：SRAM 化 / dequant→IDCT 流水（300 MHz+）/ CAVLC 单拍 /
-deblock 流式。C 模型侧零开放项。
+C 模型与 RTL 两侧均零开放项。可选扩展：RTL P 帧支持、
+CABAC 硬化、recon 并行化。
 I_PCM 已实现（CAVLC 路径）但 x264 不产 PCM 流，待 JM 编码器补向量；
 CABAC+PCM 的引擎重初始化交接同样待 JM 向量后落地。
 

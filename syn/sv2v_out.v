@@ -1430,17 +1430,11 @@ module mb_dec (
 	reg [1:0] comp_q;
 	reg [3:0] i4m_q [0:15];
 	reg [4:0] nz_q [0:15];
-	reg [15:0] i4_top [0:MAX_MBW - 1];
-	reg [19:0] nzl_top [0:MAX_MBW - 1];
-	reg [9:0] nzc_top0 [0:MAX_MBW - 1];
-	reg [9:0] nzc_top1 [0:MAX_MBW - 1];
+	reg [55:0] nbr_top [0:MAX_MBW - 1];
 	reg [15:0] i4t_q;
 	reg [19:0] nzlt_q;
 	reg [9:0] nzct_q [0:1];
-	wire [15:0] i4t_w = i4_top[mbx_q];
-	wire [19:0] nzlt_w = nzl_top[mbx_q];
-	wire [9:0] nzct0_w = nzc_top0[mbx_q];
-	wire [9:0] nzct1_w = nzc_top1[mbx_q];
+	wire [55:0] nbr_w = nbr_top[mbx_q];
 	reg [3:0] i4_left [0:3];
 	reg [4:0] nzl_left [0:3];
 	reg [4:0] nzc_left [0:1][0:1];
@@ -1748,10 +1742,10 @@ module mb_dec (
 						st_q <= 4'd1;
 					end
 				4'd1: begin
-					i4t_q <= i4t_w;
-					nzlt_q <= nzlt_w;
-					nzct_q[0] <= nzct0_w;
-					nzct_q[1] <= nzct1_w;
+					i4t_q <= nbr_w[15:0];
+					nzlt_q <= nbr_w[35:16];
+					nzct_q[0] <= nbr_w[45:36];
+					nzct_q[1] <= nbr_w[55:46];
 					st_q <= 4'd2;
 				end
 				4'd2:
@@ -1942,36 +1936,28 @@ module mb_dec (
 						endcase
 				4'd12: begin
 					begin : sv2v_autoblock_10
-						reg [15:0] wi;
-						reg [19:0] wn;
+						reg [55:0] w;
 						begin : sv2v_autoblock_11
 							reg signed [31:0] b;
 							for (b = 0; b < 4; b = b + 1)
 								begin
-									wi[b * 4+:4] = i4m_q[zidx(sv2v_cast_2_signed(b), 2'd3)];
-									wn[b * 5+:5] = nz_q[zidx(sv2v_cast_2_signed(b), 2'd3)];
+									w[b * 4+:4] = i4m_q[zidx(sv2v_cast_2_signed(b), 2'd3)];
+									w[16 + (b * 5)+:5] = nz_q[zidx(sv2v_cast_2_signed(b), 2'd3)];
 									i4_left[b] <= i4m_q[zidx(2'd3, sv2v_cast_2_signed(b))];
 									nzl_left[b] <= nz_q[zidx(2'd3, sv2v_cast_2_signed(b))];
 								end
 						end
-						i4_top[mbx_q] <= wi;
-						nzl_top[mbx_q] <= wn;
-					end
-					begin : sv2v_autoblock_12
-						reg [9:0] wc0;
-						reg [9:0] wc1;
-						begin : sv2v_autoblock_13
+						begin : sv2v_autoblock_12
 							reg signed [31:0] b;
 							for (b = 0; b < 2; b = b + 1)
 								begin
-									wc0[b * 5+:5] = (cbp_q[5:4] == 2'd2 ? nzc_q[0][{1'b1, b[0]}] : 5'd0);
-									wc1[b * 5+:5] = (cbp_q[5:4] == 2'd2 ? nzc_q[1][{1'b1, b[0]}] : 5'd0);
+									w[36 + (b * 5)+:5] = (cbp_q[5:4] == 2'd2 ? nzc_q[0][{1'b1, b[0]}] : 5'd0);
+									w[46 + (b * 5)+:5] = (cbp_q[5:4] == 2'd2 ? nzc_q[1][{1'b1, b[0]}] : 5'd0);
 									nzc_left[0][b] <= (cbp_q[5:4] == 2'd2 ? nzc_q[0][{b[0], 1'b1}] : 5'd0);
 									nzc_left[1][b] <= (cbp_q[5:4] == 2'd2 ? nzc_q[1][{b[0], 1'b1}] : 5'd0);
 								end
 						end
-						nzc_top0[mbx_q] <= wc0;
-						nzc_top1[mbx_q] <= wc1;
+						nbr_top[mbx_q] <= w;
 					end
 					if (rec_done) begin
 						if ((mbx_q + 8'd1) == cfg_mb_w) begin
