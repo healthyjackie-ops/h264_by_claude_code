@@ -161,7 +161,9 @@ top-regress: top
 .PHONY: top top-regress
 
 # one-shot RTL regression: every unit bench + both integration sweeps
-rtl-regress: br cavlc-regen i4 ifull xf dbe mb-regress top-regress
+rtl-regress: br cavlc-regen i4 ifull xf dbe mb-regress top-regress \
+             core-regress mc mcf cabac cmb-regress \
+             p-regress prec-regress corep-regress
 	@echo "=== rtl-regress: all suites passed ==="
 
 # cavlc replay needs a fresh log from the current c_model
