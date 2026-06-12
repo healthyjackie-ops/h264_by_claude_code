@@ -13,6 +13,8 @@ module h264_core (
 	cfg_b_off,
 	cfg_deblock,
 	cfg_is_p,
+	cfg_cabac,
+	cfg_init_idc,
 	start,
 	align_valid,
 	align_bits,
@@ -47,6 +49,8 @@ module h264_core (
 	input wire signed [5:0] cfg_b_off;
 	input wire cfg_deblock;
 	input wire cfg_is_p;
+	input wire cfg_cabac;
+	input wire [1:0] cfg_init_idc;
 	input wire start;
 	input wire align_valid;
 	input wire [4:0] align_bits;
@@ -72,10 +76,12 @@ module h264_core (
 	wire [6:0] avail;
 	wire m_req_valid;
 	wire b_req_valid;
+	wire c_req_valid;
 	wire [4:0] m_req_bits;
 	wire [4:0] b_req_bits;
-	assign br_req_valid = (align_valid | m_req_valid) | b_req_valid;
-	assign br_req_bits = (align_valid ? align_bits : (b_req_valid ? b_req_bits : m_req_bits));
+	wire [4:0] c_req_bits;
+	assign br_req_valid = ((align_valid | m_req_valid) | b_req_valid) | c_req_valid;
+	assign br_req_bits = (align_valid ? align_bits : (c_req_valid ? c_req_bits : (b_req_valid ? b_req_bits : m_req_bits)));
 	bitreader u_br(
 		.clk(clk),
 		.rst_n(rst_n),
@@ -121,18 +127,34 @@ module h264_core (
 		.coef_data(blk_coef_data)
 	);
 	wire mb_valid;
+	wire mb_valid_v;
 	wire [7:0] mb_x;
 	wire [7:0] mb_y;
+	wire [7:0] mb_x_v;
+	wire [7:0] mb_y_v;
 	wire mb_i16;
+	wire mb_i16_v;
 	wire [5:0] mb_cbp;
 	wire [5:0] mb_qp;
+	wire [5:0] mb_cbp_v;
+	wire [5:0] mb_qp_v;
 	wire [1:0] mb_i16_mode;
 	wire [1:0] mb_cmode;
+	wire [1:0] mb_i16_mode_v;
+	wire [1:0] mb_cmode_v;
 	wire [63:0] mb_i4m;
+	wire [63:0] mb_i4m_v;
 	wire coef_we;
+	wire coef_we_v;
 	wire [4:0] coef_blk;
+	wire [4:0] coef_blk_v;
 	wire [3:0] coef_addr;
+	wire [3:0] coef_addr_v;
 	wire signed [15:0] coef_data;
+	wire signed [15:0] coef_data_v;
+	wire [15:0] mb_nz_v;
+	wire slice_done_v;
+	wire mb_err_v;
 	wire mb_err;
 	wire rec_valid;
 	wire rec_err;
@@ -151,7 +173,6 @@ module h264_core (
 	wire signed [15:0] mvd_y;
 	wire signed [255:0] mv_x_w;
 	wire signed [255:0] mv_y_w;
-	wire slice_done;
 	mb_dec #(.MAX_MBW(MAX_MBW)) u_mb(
 		.clk(clk),
 		.rst_n(rst_n),
@@ -159,7 +180,7 @@ module h264_core (
 		.cfg_mb_h(cfg_mb_h),
 		.cfg_qp(cfg_qp),
 		.cfg_is_p(cfg_is_p),
-		.start(start),
+		.start(start && !cfg_cabac),
 		.req_valid(m_req_valid),
 		.req_bits(m_req_bits),
 		.req_ready(br_req_ready),
@@ -184,38 +205,135 @@ module h264_core (
 		.mvd_x(mvd_x),
 		.mvd_y(mvd_y),
 		.skip_go(skip_go_w),
-		.mb_nz(mb_nz_w),
-		.mb_valid(mb_valid),
-		.mb_x(mb_x),
-		.mb_y(mb_y),
-		.mb_i16(mb_i16),
-		.mb_cbp(mb_cbp),
-		.mb_qp(mb_qp),
-		.mb_i16_mode(mb_i16_mode),
-		.mb_cmode(mb_cmode),
-		.mb_i4m(mb_i4m),
-		.coef_we(coef_we),
-		.coef_blk(coef_blk),
-		.coef_addr(coef_addr),
-		.coef_data(coef_data),
-		.slice_done(slice_done),
-		.err(mb_err),
+		.mb_nz(mb_nz_v),
+		.mb_valid(mb_valid_v),
+		.mb_x(mb_x_v),
+		.mb_y(mb_y_v),
+		.mb_i16(mb_i16_v),
+		.mb_cbp(mb_cbp_v),
+		.mb_qp(mb_qp_v),
+		.mb_i16_mode(mb_i16_mode_v),
+		.mb_cmode(mb_cmode_v),
+		.mb_i4m(mb_i4m_v),
+		.coef_we(coef_we_v),
+		.coef_blk(coef_blk_v),
+		.coef_addr(coef_addr_v),
+		.coef_data(coef_data_v),
+		.slice_done(slice_done_v),
+		.err(mb_err_v),
 		.rec_done(rec_accept)
 	);
+	wire mb_valid_c;
+	wire slice_done_c;
+	wire mb_err_c;
+	wire coef_we_c;
+	wire [7:0] mb_x_c;
+	wire [7:0] mb_y_c;
+	wire mb_i16_c;
+	wire [5:0] mb_cbp_c;
+	wire [5:0] mb_qp_c;
+	wire [1:0] mb_i16_mode_c;
+	wire [1:0] mb_cmode_c;
+	wire [63:0] mb_i4m_c;
+	wire [4:0] coef_blk_c;
+	wire [3:0] coef_addr_c;
+	wire signed [15:0] coef_data_c;
+	wire mb_skip_c;
+	wire mb_inter_c;
+	wire mvd_valid_c;
+	wire skip_go_c;
+	wire [2:0] mb_ptype_c;
+	wire [7:0] mb_sub_c;
+	wire signed [15:0] mvd_x_c;
+	wire signed [15:0] mvd_y_c;
+	wire [15:0] mb_nz_c;
+	cabac_mb #(.MAX_MBW(MAX_MBW)) u_cm(
+		.clk(clk),
+		.rst_n(rst_n),
+		.cfg_mb_w(cfg_mb_w),
+		.cfg_mb_h(cfg_mb_h),
+		.cfg_qp(cfg_qp),
+		.start(start && cfg_cabac),
+		.req_valid(c_req_valid),
+		.req_bits(c_req_bits),
+		.req_ready(br_req_ready),
+		.show(show),
+		.avail(avail),
+		.cfg_is_p(cfg_is_p),
+		.cfg_init_idc(cfg_init_idc),
+		.mb_skip(mb_skip_c),
+		.mb_inter(mb_inter_c),
+		.mb_ptype(mb_ptype_c),
+		.mb_sub(mb_sub_c),
+		.mvd_valid(mvd_valid_c),
+		.mvd_x(mvd_x_c),
+		.mvd_y(mvd_y_c),
+		.skip_go(skip_go_c),
+		.mb_nz(mb_nz_c),
+		.mb_valid(mb_valid_c),
+		.mb_x(mb_x_c),
+		.mb_y(mb_y_c),
+		.mb_i16(mb_i16_c),
+		.mb_cbp(mb_cbp_c),
+		.mb_qp(mb_qp_c),
+		.mb_i16_mode(mb_i16_mode_c),
+		.mb_cmode(mb_cmode_c),
+		.mb_i4m(mb_i4m_c),
+		.coef_we(coef_we_c),
+		.coef_blk(coef_blk_c),
+		.coef_addr(coef_addr_c),
+		.coef_data(coef_data_c),
+		.slice_done(slice_done_c),
+		.err(mb_err_c),
+		.rec_done(rec_accept)
+	);
+	assign mb_valid = (cfg_cabac ? mb_valid_c : mb_valid_v);
+	assign mb_x = (cfg_cabac ? mb_x_c : mb_x_v);
+	assign mb_y = (cfg_cabac ? mb_y_c : mb_y_v);
+	assign mb_i16 = (cfg_cabac ? mb_i16_c : mb_i16_v);
+	assign mb_cbp = (cfg_cabac ? mb_cbp_c : mb_cbp_v);
+	assign mb_qp = (cfg_cabac ? mb_qp_c : mb_qp_v);
+	assign mb_i16_mode = (cfg_cabac ? mb_i16_mode_c : mb_i16_mode_v);
+	assign mb_cmode = (cfg_cabac ? mb_cmode_c : mb_cmode_v);
+	assign mb_i4m = (cfg_cabac ? mb_i4m_c : mb_i4m_v);
+	assign coef_we = (cfg_cabac ? coef_we_c : coef_we_v);
+	assign coef_blk = (cfg_cabac ? coef_blk_c : coef_blk_v);
+	assign coef_addr = (cfg_cabac ? coef_addr_c : coef_addr_v);
+	assign coef_data = (cfg_cabac ? coef_data_c : coef_data_v);
+	wire slice_done;
+	assign slice_done = (cfg_cabac ? slice_done_c : slice_done_v);
+	assign mb_err = (cfg_cabac ? mb_err_c : mb_err_v);
+	assign mb_nz_w = (cfg_cabac ? mb_nz_c : mb_nz_v);
+	wire mb_skip_m;
+	wire mb_inter_m;
+	wire mvd_valid_m;
+	wire skip_go_m;
+	wire [2:0] mb_ptype_m;
+	wire [7:0] mb_sub_m;
+	wire signed [15:0] mvd_x_m;
+	wire signed [15:0] mvd_y_m;
+	assign mb_skip_m = (cfg_cabac ? mb_skip_c : mb_skip);
+	assign mb_inter_m = (cfg_cabac ? mb_inter_c : mb_inter);
+	assign mb_ptype_m = (cfg_cabac ? mb_ptype_c : mb_ptype);
+	assign mb_sub_m = (cfg_cabac ? mb_sub_c : mb_sub);
+	assign mvd_valid_m = (cfg_cabac ? mvd_valid_c : mvd_valid);
+	assign mvd_x_m = (cfg_cabac ? mvd_x_c : mvd_x);
+	assign mvd_y_m = (cfg_cabac ? mvd_y_c : mvd_y);
+	assign skip_go_m = (cfg_cabac ? skip_go_c : skip_go_w);
 	mv_pred #(.MAX_MBW(MAX_MBW)) u_mv(
 		.clk(clk),
 		.rst_n(rst_n),
 		.cfg_mb_w(cfg_mb_w),
 		.start(start),
-		.mb_ptype(mb_ptype),
-		.mb_sub(mb_sub),
-		.mvd_valid(mvd_valid),
-		.mvd_x(mvd_x),
-		.mvd_y(mvd_y),
-		.skip_go(skip_go_w),
+		.mb_ptype(mb_ptype_m),
+		.mb_sub(mb_sub_m),
+		.mvd_valid(mvd_valid_m),
+		.mvd_x(mvd_x_m),
+		.mvd_y(mvd_y_m),
+		.skip_go(skip_go_m),
 		.commit(rec_accept),
-		.mb_inter(mb_inter),
-		.mb_skip(mb_skip),
+		.mb_inter(mb_inter_m),
+		.mb_skip(mb_skip_m),
 		.mv_out_x(mv_x_w),
 		.mv_out_y(mv_y_w)
 	);
@@ -229,7 +347,7 @@ module h264_core (
 	wire signed [255:0] rec_mvy;
 	wire [15:0] rec_nz;
 	mb_recon #(.MAX_MBW(MAX_MBW)) u_rec(
-		.mb_inter(mb_inter),
+		.mb_inter(mb_inter_m),
 		.mb_nz(mb_nz_w),
 		.mb_mvx(mv_x_w),
 		.mb_mvy(mv_y_w),
@@ -2879,12 +2997,16 @@ module mb_recon (
 	wire mc_busy_w;
 	wire mc_done_w;
 	wire [127:0] mc_pred_w;
+	wire [5:0] mlk;
 	wire [3:0] mck;
 	wire mc_is_c;
 	reg [11:0] mc_px;
 	reg [10:0] mc_py;
-	assign mck = mk_q[3:0];
-	assign mc_is_c = mk_q[5:4] != 2'd0;
+	assign mlk = (mc_done_w ? mk_q + 6'd1 : mk_q);
+	assign mck = mlk[3:0];
+	assign mc_is_c = mlk[5:4] != 2'd0;
+	wire [3:0] wck;
+	assign wck = mk_q[3:0];
 	function automatic [11:0] sv2v_cast_12;
 		input reg [11:0] inp;
 		sv2v_cast_12 = inp;
@@ -2905,13 +3027,14 @@ module mb_recon (
 			mc_py = sv2v_cast_11({mby_q, 4'b0000}) + sv2v_cast_11({zsy(mck), 2'b00});
 		end
 	end
-	assign mc_start_w = ((st_q == 4'd13) && !mc_busy_w) && !mc_done_w;
+	assign mc_start_w = (st_q == 4'd13) && (!mc_busy_w || (mc_done_w && (mk_q != 6'd47)));
 	assign mc_req_plane = mk_q[5:4];
 	mc_fetch u_mc(
 		.clk(clk),
 		.rst_n(rst_n),
 		.start(mc_start_w),
 		.is_chroma(mc_is_c),
+		.c2x2(mc_is_c),
 		.px(mc_px),
 		.py(mc_py),
 		.mvx(mvq_x[mck]),
@@ -3289,13 +3412,13 @@ module mb_recon (
 					end
 				4'd13:
 					if (mc_done_w) begin
-						if (!mc_is_c) begin : sv2v_autoblock_24
+						if (mk_q[5:4] == 2'd0) begin : sv2v_autoblock_24
 							reg signed [31:0] y;
 							for (y = 0; y < 4; y = y + 1)
 								begin : sv2v_autoblock_25
 									reg signed [31:0] x;
 									for (x = 0; x < 4; x = x + 1)
-										rec_y[(255 - (((((sv2v_cast_32_signed(zsy(mck)) * 4) + y) * 16) + (sv2v_cast_32_signed(zsx(mck)) * 4)) + x)) * 8+:8] <= mc_pred_w[(15 - ((y * 4) + x)) * 8+:8];
+										rec_y[(255 - (((((sv2v_cast_32_signed(zsy(wck)) * 4) + y) * 16) + (sv2v_cast_32_signed(zsx(wck)) * 4)) + x)) * 8+:8] <= mc_pred_w[(15 - ((y * 4) + x)) * 8+:8];
 								end
 						end
 						else if (!mk_q[5]) begin : sv2v_autoblock_26
@@ -3304,7 +3427,7 @@ module mb_recon (
 								begin : sv2v_autoblock_27
 									reg signed [31:0] x;
 									for (x = 0; x < 2; x = x + 1)
-										rec_u[(63 - (((((sv2v_cast_32_signed(zsy(mck)) * 2) + y) * 8) + (sv2v_cast_32_signed(zsx(mck)) * 2)) + x)) * 8+:8] <= mc_pred_w[(15 - ((y * 4) + x)) * 8+:8];
+										rec_u[(63 - (((((sv2v_cast_32_signed(zsy(wck)) * 2) + y) * 8) + (sv2v_cast_32_signed(zsx(wck)) * 2)) + x)) * 8+:8] <= mc_pred_w[(15 - ((y * 4) + x)) * 8+:8];
 								end
 						end
 						else begin : sv2v_autoblock_28
@@ -3313,7 +3436,7 @@ module mb_recon (
 								begin : sv2v_autoblock_29
 									reg signed [31:0] x;
 									for (x = 0; x < 2; x = x + 1)
-										rec_v[(63 - (((((sv2v_cast_32_signed(zsy(mck)) * 2) + y) * 8) + (sv2v_cast_32_signed(zsx(mck)) * 2)) + x)) * 8+:8] <= mc_pred_w[(15 - ((y * 4) + x)) * 8+:8];
+										rec_v[(63 - (((((sv2v_cast_32_signed(zsy(wck)) * 2) + y) * 8) + (sv2v_cast_32_signed(zsx(wck)) * 2)) + x)) * 8+:8] <= mc_pred_w[(15 - ((y * 4) + x)) * 8+:8];
 								end
 						end
 						if (mk_q == 6'd47) begin
@@ -3505,6 +3628,7 @@ module mc_fetch (
 	rst_n,
 	start,
 	is_chroma,
+	c2x2,
 	px,
 	py,
 	mvx,
@@ -3524,6 +3648,7 @@ module mc_fetch (
 	input wire rst_n;
 	input wire start;
 	input wire is_chroma;
+	input wire c2x2;
 	input wire [11:0] px;
 	input wire [10:0] py;
 	input wire signed [15:0] mvx;
@@ -3552,7 +3677,8 @@ module mc_fetch (
 	assign busy = st_q != 2'd0;
 	assign done = st_q == 2'd2;
 	wire [3:0] nrows;
-	assign nrows = (chroma_q ? 4'd5 : 4'd9);
+	reg c2_q;
+	assign nrows = (c2_q ? 4'd3 : (chroma_q ? 4'd5 : 4'd9));
 	assign req_valid = (st_q == 2'd1) && (row_q < nrows);
 	assign req_x = x0_q;
 	function automatic [11:0] sv2v_cast_12;
@@ -3560,7 +3686,7 @@ module mc_fetch (
 		sv2v_cast_12 = inp;
 	endfunction
 	assign req_y = y0_q + sv2v_cast_12(row_q);
-	assign req_w = (chroma_q ? 4'd5 : 4'd9);
+	assign req_w = (c2_q ? 4'd3 : (chroma_q ? 4'd5 : 4'd9));
 	wire [127:0] lpred;
 	wire [127:0] cpred;
 	mc4x4_luma u_l(
@@ -3606,6 +3732,7 @@ module mc_fetch (
 			row_q <= 1'sb0;
 			got_q <= 1'sb0;
 			chroma_q <= 1'b0;
+			c2_q <= 1'b0;
 			x0_q <= 1'sb0;
 			y0_q <= 1'sb0;
 			lfx_q <= 1'sb0;
@@ -3619,6 +3746,7 @@ module mc_fetch (
 				2'd0:
 					if (start) begin
 						chroma_q <= is_chroma;
+						c2_q <= c2x2;
 						if (is_chroma) begin
 							x0_q <= sv2v_cast_13_signed($signed({1'b0, px}) + (mvx >>> 3));
 							y0_q <= sv2v_cast_12_signed($signed({1'b0, py}) + (mvy >>> 3));
@@ -3654,7 +3782,28 @@ module mc_fetch (
 							st_q <= 2'd2;
 					end
 				end
-				2'd2: st_q <= 2'd0;
+				2'd2:
+					if (start) begin
+						chroma_q <= is_chroma;
+						c2_q <= c2x2;
+						if (is_chroma) begin
+							x0_q <= sv2v_cast_13_signed($signed({1'b0, px}) + (mvx >>> 3));
+							y0_q <= sv2v_cast_12_signed($signed({1'b0, py}) + (mvy >>> 3));
+							cfx_q <= sv2v_cast_3_signed(mvx & 16'sd7);
+							cfy_q <= sv2v_cast_3_signed(mvy & 16'sd7);
+						end
+						else begin
+							x0_q <= sv2v_cast_13_signed(($signed({1'b0, px}) + (mvx >>> 2)) - 13'sd2);
+							y0_q <= sv2v_cast_12_signed(($signed({1'b0, py}) + (mvy >>> 2)) - 12'sd2);
+							lfx_q <= sv2v_cast_2_signed(mvx & 16'sd3);
+							lfy_q <= sv2v_cast_2_signed(mvy & 16'sd3);
+						end
+						row_q <= 1'sb0;
+						got_q <= 1'sb0;
+						st_q <= 2'd1;
+					end
+					else
+						st_q <= 2'd0;
 				default: st_q <= 2'd0;
 			endcase
 	initial _sv2v_0 = 0;
@@ -4269,6 +4418,3875 @@ module mv_pred (
 				end
 		end
 	end
+	initial _sv2v_0 = 0;
+endmodule
+module cabac_mb (
+	clk,
+	rst_n,
+	cfg_mb_w,
+	cfg_mb_h,
+	cfg_qp,
+	cfg_is_p,
+	cfg_init_idc,
+	start,
+	req_valid,
+	req_bits,
+	req_ready,
+	show,
+	avail,
+	mb_valid,
+	mb_x,
+	mb_y,
+	mb_i16,
+	mb_cbp,
+	mb_qp,
+	mb_i16_mode,
+	mb_cmode,
+	mb_i4m,
+	mb_skip,
+	mb_inter,
+	mb_ptype,
+	mb_sub,
+	mvd_valid,
+	mvd_x,
+	mvd_y,
+	skip_go,
+	mb_nz,
+	coef_we,
+	coef_blk,
+	coef_addr,
+	coef_data,
+	slice_done,
+	err,
+	rec_done
+);
+	reg _sv2v_0;
+	parameter signed [31:0] MAX_MBW = 120;
+	input wire clk;
+	input wire rst_n;
+	input wire [7:0] cfg_mb_w;
+	input wire [7:0] cfg_mb_h;
+	input wire [5:0] cfg_qp;
+	input wire cfg_is_p;
+	input wire [1:0] cfg_init_idc;
+	input wire start;
+	output wire req_valid;
+	output wire [4:0] req_bits;
+	input wire req_ready;
+	input wire [23:0] show;
+	input wire [6:0] avail;
+	output wire mb_valid;
+	output wire [7:0] mb_x;
+	output wire [7:0] mb_y;
+	output wire mb_i16;
+	output wire [5:0] mb_cbp;
+	output wire [5:0] mb_qp;
+	output wire [1:0] mb_i16_mode;
+	output wire [1:0] mb_cmode;
+	output reg [63:0] mb_i4m;
+	output wire mb_skip;
+	output wire mb_inter;
+	output wire [2:0] mb_ptype;
+	output wire [7:0] mb_sub;
+	output wire mvd_valid;
+	output wire signed [15:0] mvd_x;
+	output wire signed [15:0] mvd_y;
+	output wire skip_go;
+	output wire [15:0] mb_nz;
+	output reg coef_we;
+	output reg [4:0] coef_blk;
+	output reg [3:0] coef_addr;
+	output reg signed [15:0] coef_data;
+	output wire slice_done;
+	output wire err;
+	input wire rec_done;
+	function automatic [1:0] zsx;
+		input reg [3:0] k;
+		zsx = {k[2], k[0]};
+	endfunction
+	function automatic [1:0] zsy;
+		input reg [3:0] k;
+		zsy = {k[3], k[1]};
+	endfunction
+	function automatic [3:0] zidx;
+		input reg [1:0] bx;
+		input reg [1:0] by;
+		zidx = {by[1], bx[1], by[0], bx[0]};
+	endfunction
+	reg ci_start;
+	wire ci_busy;
+	reg op_valid;
+	wire op_ready;
+	wire bin;
+	reg [1:0] op;
+	reg [8:0] op_ctx;
+	cabac_core u_core(
+		.clk(clk),
+		.rst_n(rst_n),
+		.req_valid(req_valid),
+		.req_bits(req_bits),
+		.req_ready(req_ready),
+		.show(show),
+		.avail(avail),
+		.init_start(ci_start),
+		.init_qp(cfg_qp),
+		.init_model((cfg_is_p ? cfg_init_idc : 2'd3)),
+		.init_busy(ci_busy),
+		.op_valid(op_valid),
+		.op(op),
+		.op_ctx(op_ctx),
+		.op_ready(op_ready),
+		.bin(bin),
+		.dbg_range(),
+		.dbg_value()
+	);
+	wire step;
+	assign step = op_valid && op_ready;
+	reg [91:0] nrow [0:MAX_MBW - 1];
+	reg [7:0] mbx_q;
+	wire [91:0] nrow_rd = nrow[mbx_q];
+	reg [91:0] nrow_q;
+	reg l_valid;
+	reg l_cat;
+	reg l_cmode;
+	reg [5:0] l_cbp;
+	reg l_ldc;
+	reg [1:0] l_cdc;
+	reg [3:0] l_cbfl;
+	reg [1:0] l_cbfc [0:1];
+	reg [3:0] l_i4m [0:3];
+	reg l_skip;
+	reg [6:0] l_avx [0:3];
+	reg [6:0] l_avy [0:3];
+	reg [7:0] mby_q;
+	reg i16_q;
+	reg [1:0] i16m_q;
+	reg [1:0] cmode_q;
+	reg [5:0] cbp_q;
+	reg [5:0] qp_q;
+	reg [3:0] i4m_q [0:15];
+	reg [15:0] cbfl_q;
+	reg [3:0] cbfc_q [0:1];
+	reg [1:0] cdc_q;
+	reg ldc_q;
+	reg lastqpd_q;
+	reg skip_q;
+	reg inter_q;
+	reg [2:0] ptype_q;
+	reg [7:0] sub_q;
+	reg [1:0] pb_q;
+	reg [1:0] ps_q;
+	reg axis_q;
+	reg [15:0] uegv_q;
+	reg [2:0] uctx_q;
+	reg [4:0] egk3_q;
+	reg [15:0] egv3_q;
+	reg signed [15:0] mvdx_q;
+	reg signed [15:0] mvdy_q;
+	reg mvdv_q;
+	reg [6:0] cur_avx [0:15];
+	reg [6:0] cur_avy [0:15];
+	reg [15:0] av_w;
+	wire have_left;
+	wire have_top;
+	assign have_left = mbx_q != 8'd0;
+	assign have_top = mby_q != 8'd0;
+	reg [4:0] st_q;
+	reg [2:0] bcnt_q;
+	reg [4:0] t_q;
+	reg [3:0] k_q;
+	reg [2:0] m_q;
+	reg [6:0] uval_q;
+	reg [1:0] rph_q;
+	reg comp_q;
+	reg [2:0] rcat;
+	reg [4:0] rmax;
+	reg [3:0] ridx [0:15];
+	reg [4:0] rcnt_q;
+	reg [4:0] rsig_q;
+	reg [2:0] node_q;
+	reg [4:0] abs_q;
+	reg [4:0] egk_q;
+	reg [15:0] egv_q;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		(* full_case, parallel_case *)
+		case (rph_q)
+			2'd0: begin
+				rcat = 3'd0;
+				rmax = 5'd16;
+			end
+			2'd1: begin
+				rcat = (i16_q ? 3'd1 : 3'd2);
+				rmax = (i16_q ? 5'd15 : 5'd16);
+			end
+			2'd2: begin
+				rcat = 3'd3;
+				rmax = 5'd4;
+			end
+			default: begin
+				rcat = 3'd4;
+				rmax = 5'd15;
+			end
+		endcase
+	end
+	localparam [29:0] SIG_OFF = 30'h003ddb2f;
+	localparam [29:0] LVL_OFF = 30'h002947a7;
+	function automatic [3:0] l1ctx;
+		input reg [2:0] n;
+		(* full_case, parallel_case *)
+		case (n)
+			3'd0: l1ctx = 4'd1;
+			3'd1: l1ctx = 4'd2;
+			3'd2: l1ctx = 4'd3;
+			3'd3: l1ctx = 4'd4;
+			default: l1ctx = 4'd0;
+		endcase
+	endfunction
+	function automatic [3:0] sv2v_cast_4;
+		input reg [3:0] inp;
+		sv2v_cast_4 = inp;
+	endfunction
+	function automatic [3:0] gt1ctx;
+		input reg [2:0] n;
+		gt1ctx = (n < 3'd4 ? 4'd5 : sv2v_cast_4(4'd2 + sv2v_cast_4(n)));
+	endfunction
+	function automatic [2:0] tr_eq1;
+		input reg [2:0] n;
+		(* full_case, parallel_case *)
+		case (n)
+			3'd0: tr_eq1 = 3'd1;
+			3'd1: tr_eq1 = 3'd2;
+			3'd2: tr_eq1 = 3'd3;
+			3'd3: tr_eq1 = 3'd3;
+			3'd4: tr_eq1 = 3'd4;
+			3'd5: tr_eq1 = 3'd5;
+			3'd6: tr_eq1 = 3'd6;
+			default: tr_eq1 = 3'd7;
+		endcase
+	endfunction
+	function automatic [2:0] tr_gt1;
+		input reg [2:0] n;
+		tr_gt1 = (n < 3'd4 ? 3'd4 : (n == 3'd7 ? 3'd7 : n + 3'd1));
+	endfunction
+	reg [2:0] g_bx0;
+	reg [2:0] g_by0;
+	reg [2:0] g_w4;
+	reg [2:0] g_h4;
+	reg [1:0] sub2;
+	reg [2:0] nsub;
+	function automatic [2:0] sv2v_cast_3;
+		input reg [2:0] inp;
+		sv2v_cast_3 = inp;
+	endfunction
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		sub2 = sub_q[{pb_q, 1'b0}+:2];
+		nsub = (sub2 == 2'd0 ? 3'd1 : (sub2 == 2'd3 ? 3'd4 : 3'd2));
+		g_bx0 = 1'sb0;
+		g_by0 = 1'sb0;
+		g_w4 = 3'd4;
+		g_h4 = 3'd4;
+		(* full_case, parallel_case *)
+		case (ptype_q)
+			3'd0:
+				;
+			3'd1: begin
+				g_by0 = {1'b0, pb_q[0], 1'b0};
+				g_h4 = 3'd2;
+			end
+			3'd2: begin
+				g_bx0 = {1'b0, pb_q[0], 1'b0};
+				g_w4 = 3'd2;
+			end
+			default: begin
+				g_bx0 = {2'b00, pb_q[0]} << 1;
+				g_by0 = {2'b00, pb_q[1]} << 1;
+				(* full_case, parallel_case *)
+				case (sub2)
+					2'd0: begin
+						g_w4 = 3'd2;
+						g_h4 = 3'd2;
+					end
+					2'd1: begin
+						g_w4 = 3'd2;
+						g_h4 = 3'd1;
+						g_by0 = g_by0 + sv2v_cast_3(ps_q[0]);
+					end
+					2'd2: begin
+						g_w4 = 3'd1;
+						g_h4 = 3'd2;
+						g_bx0 = g_bx0 + sv2v_cast_3(ps_q[0]);
+					end
+					default: begin
+						g_w4 = 3'd1;
+						g_h4 = 3'd1;
+						g_bx0 = g_bx0 + sv2v_cast_3(ps_q[0]);
+						g_by0 = g_by0 + sv2v_cast_3(ps_q[1]);
+					end
+				endcase
+			end
+		endcase
+	end
+	reg [8:0] amvd;
+	function automatic [8:0] sv2v_cast_9;
+		input reg [8:0] inp;
+		sv2v_cast_9 = inp;
+	endfunction
+	always @(*) begin : sv2v_autoblock_1
+		reg [6:0] aa;
+		reg [6:0] bb;
+		reg [1:0] bx;
+		reg [1:0] by;
+		if (_sv2v_0)
+			;
+		bx = g_bx0[1:0];
+		by = g_by0[1:0];
+		aa = 1'sb0;
+		bb = 1'sb0;
+		if (bx != 2'd0) begin
+			if (av_w[{by, bx - 2'd1}])
+				aa = (axis_q ? cur_avy[{by, bx - 2'd1}] : cur_avx[{by, bx - 2'd1}]);
+		end
+		else if (have_left)
+			aa = (axis_q ? l_avy[by] : l_avx[by]);
+		if (by != 2'd0) begin
+			if (av_w[{by - 2'd1, bx}])
+				bb = (axis_q ? cur_avy[{by - 2'd1, bx}] : cur_avx[{by - 2'd1, bx}]);
+		end
+		else if (have_top)
+			bb = (axis_q ? nrow_q[(36 + (bx * 14)) + 7+:7] : nrow_q[36 + (bx * 14)+:7]);
+		amvd = sv2v_cast_9(aa) + sv2v_cast_9(bb);
+	end
+	wire [1:0] mvd_inc;
+	function automatic [1:0] sv2v_cast_2;
+		input reg [1:0] inp;
+		sv2v_cast_2 = inp;
+	endfunction
+	assign mvd_inc = sv2v_cast_2(amvd > 9'd2) + sv2v_cast_2(amvd > 9'd32);
+	reg cond_a;
+	reg cond_b;
+	always @(*) begin : sv2v_autoblock_2
+		reg [1:0] bx;
+		reg [1:0] by;
+		if (_sv2v_0)
+			;
+		bx = zsx(k_q);
+		by = zsy(k_q);
+		cond_a = !inter_q;
+		cond_b = !inter_q;
+		(* full_case, parallel_case *)
+		case (rph_q)
+			2'd0: begin
+				if (have_left)
+					cond_a = (l_cat ? l_ldc : 1'b0);
+				if (have_top)
+					cond_b = (nrow_q[0] ? nrow_q[8] : 1'b0);
+			end
+			2'd1: begin
+				if (bx != 2'd0)
+					cond_a = cbfl_q[{by, bx - 2'd1}];
+				else if (have_left)
+					cond_a = l_cbfl[by];
+				if (by != 2'd0)
+					cond_b = cbfl_q[{by - 2'd1, bx}];
+				else if (have_top)
+					cond_b = nrow_q[11 + bx];
+			end
+			2'd2: begin
+				if (have_left)
+					cond_a = l_cdc[comp_q];
+				if (have_top)
+					cond_b = nrow_q[9 + comp_q];
+			end
+			default: begin
+				if (k_q[0])
+					cond_a = cbfc_q[comp_q][{k_q[1], 1'b0}];
+				else if (have_left)
+					cond_a = l_cbfc[comp_q][k_q[1]];
+				if (k_q[1])
+					cond_b = cbfc_q[comp_q][{1'b0, k_q[0]}];
+				else if (have_top)
+					cond_b = nrow_q[(15 + (comp_q * 2)) + k_q[0]];
+			end
+		endcase
+	end
+	reg [1:0] mbt_inc;
+	reg [1:0] cmd_inc;
+	reg [1:0] skp_inc;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		mbt_inc = sv2v_cast_2(have_left && l_cat) + sv2v_cast_2(have_top && nrow_q[0]);
+		cmd_inc = sv2v_cast_2(have_left && l_cmode) + sv2v_cast_2(have_top && nrow_q[1]);
+		skp_inc = sv2v_cast_2(have_left && !l_skip) + sv2v_cast_2(have_top && !nrow_q[35]);
+	end
+	wire [5:0] cbp_a;
+	wire [5:0] cbp_b;
+	assign cbp_a = (have_left ? l_cbp : 6'h0f);
+	assign cbp_b = (have_top ? nrow_q[7:2] : 6'h0f);
+	reg [1:0] cbp_ctx;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		(* full_case, parallel_case *)
+		case (bcnt_q)
+			3'd0: cbp_ctx = sv2v_cast_2(!cbp_a[1]) + {!cbp_b[2], 1'b0};
+			3'd1: cbp_ctx = sv2v_cast_2(!cbp_q[0]) + {!cbp_b[3], 1'b0};
+			3'd2: cbp_ctx = sv2v_cast_2(!cbp_a[3]) + {!cbp_q[0], 1'b0};
+			3'd3: cbp_ctx = sv2v_cast_2(!cbp_q[2]) + {!cbp_q[1], 1'b0};
+			3'd4: cbp_ctx = sv2v_cast_2(cbp_a[5:4] != 2'd0) + {cbp_b[5:4] != 2'd0, 1'b0};
+			default: cbp_ctx = sv2v_cast_2(cbp_a[5:4] == 2'd2) + {cbp_b[5:4] == 2'd2, 1'b0};
+		endcase
+	end
+	reg [3:0] predA;
+	reg [3:0] predB;
+	reg availA;
+	reg availB;
+	always @(*) begin : sv2v_autoblock_3
+		reg [1:0] bx;
+		reg [1:0] by;
+		if (_sv2v_0)
+			;
+		bx = zsx(k_q);
+		by = zsy(k_q);
+		availA = (bx != 0) || have_left;
+		availB = (by != 0) || have_top;
+		predA = (bx != 0 ? i4m_q[zidx(bx - 2'd1, by)] : l_i4m[by]);
+		predB = (by != 0 ? i4m_q[zidx(bx, by - 2'd1)] : nrow_q[19 + (bx * 4)+:4]);
+	end
+	wire [3:0] i4_pred;
+	assign i4_pred = (!availA || !availB ? 4'd2 : (predA < predB ? predA : predB));
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		op_valid = 1'b0;
+		op = 2'd0;
+		op_ctx = 1'sb0;
+		(* full_case, parallel_case *)
+		case (st_q)
+			5'd3: begin
+				op_valid = 1'b1;
+				(* full_case, parallel_case *)
+				case (bcnt_q)
+					3'd0: op_ctx = 9'd3 + sv2v_cast_9(mbt_inc);
+					3'd1: op = 2'd2;
+					3'd2: op_ctx = 9'd6;
+					3'd3: op_ctx = 9'd7;
+					3'd4: op_ctx = 9'd8;
+					3'd5: op_ctx = 9'd9;
+					default: op_ctx = 9'd10;
+				endcase
+			end
+			5'd21: begin
+				op_valid = 1'b1;
+				op_ctx = 9'd11 + sv2v_cast_9(skp_inc);
+			end
+			5'd22: begin
+				op_valid = 1'b1;
+				(* full_case, parallel_case *)
+				case (bcnt_q)
+					3'd0: op_ctx = 9'd14;
+					3'd1: op_ctx = 9'd15;
+					3'd2: op_ctx = 9'd16;
+					default: op_ctx = 9'd17;
+				endcase
+			end
+			5'd23: begin
+				op_valid = 1'b1;
+				(* full_case, parallel_case *)
+				case (bcnt_q)
+					3'd0: op_ctx = 9'd17;
+					3'd1: op = 2'd2;
+					3'd2: op_ctx = 9'd18;
+					3'd3: op_ctx = 9'd19;
+					3'd4: op_ctx = 9'd19;
+					3'd5: op_ctx = 9'd20;
+					default: op_ctx = 9'd20;
+				endcase
+			end
+			5'd24: begin
+				op_valid = 1'b1;
+				op_ctx = (bcnt_q == 3'd0 ? 9'd21 : (bcnt_q == 3'd1 ? 9'd22 : 9'd23));
+			end
+			5'd25: begin
+				op_valid = 1'b1;
+				op_ctx = (axis_q ? 9'd47 : 9'd40) + sv2v_cast_9(mvd_inc);
+			end
+			5'd26: begin
+				op_valid = 1'b1;
+				op_ctx = ((axis_q ? 9'd47 : 9'd40) + 9'd3) + sv2v_cast_9(uctx_q);
+			end
+			5'd27, 5'd28, 5'd29: begin
+				op_valid = 1'b1;
+				op = 2'd1;
+			end
+			5'd4: begin
+				op_valid = 1'b1;
+				op_ctx = (bcnt_q == 3'd0 ? 9'd68 : 9'd69);
+			end
+			5'd5: begin
+				op_valid = 1'b1;
+				op_ctx = (bcnt_q == 3'd0 ? 9'd64 + sv2v_cast_9(cmd_inc) : 9'd67);
+			end
+			5'd6: begin
+				op_valid = 1'b1;
+				op_ctx = (bcnt_q < 3'd4 ? 9'd73 + sv2v_cast_9(cbp_ctx) : (bcnt_q == 3'd4 ? 9'd77 + sv2v_cast_9(cbp_ctx) : 9'd81 + sv2v_cast_9(cbp_ctx)));
+			end
+			5'd7: begin
+				op_valid = 1'b1;
+				op_ctx = (bcnt_q == 3'd0 ? (lastqpd_q ? 9'd61 : 9'd60) : (bcnt_q == 3'd1 ? 9'd62 : 9'd63));
+			end
+			5'd9: begin
+				op_valid = 1'b1;
+				op_ctx = ((9'd85 + (sv2v_cast_9(rcat) * 4)) + sv2v_cast_9(cond_a)) + (sv2v_cast_9(cond_b) * 2);
+			end
+			5'd10: begin
+				op_valid = 1'b1;
+				op_ctx = (9'd105 + sv2v_cast_9(SIG_OFF[(4 - rcat) * 6+:6])) + sv2v_cast_9(rsig_q);
+			end
+			5'd11: begin
+				op_valid = 1'b1;
+				op_ctx = (9'd166 + sv2v_cast_9(SIG_OFF[(4 - rcat) * 6+:6])) + sv2v_cast_9(rsig_q);
+			end
+			5'd12: begin
+				op_valid = 1'b1;
+				op_ctx = (9'd227 + sv2v_cast_9(LVL_OFF[(4 - rcat) * 6+:6])) + sv2v_cast_9(l1ctx(node_q));
+			end
+			5'd13: begin
+				op_valid = 1'b1;
+				op_ctx = (9'd227 + sv2v_cast_9(LVL_OFF[(4 - rcat) * 6+:6])) + sv2v_cast_9(gt1ctx(node_q));
+			end
+			5'd14, 5'd15, 5'd16: begin
+				op_valid = 1'b1;
+				op = 2'd1;
+			end
+			5'd17: begin
+				op_valid = 1'b1;
+				op = 2'd2;
+			end
+			default:
+				;
+		endcase
+	end
+	wire [3:0] wpos;
+	assign wpos = ridx[rcnt_q - 5'd1];
+	function automatic [3:0] zz4;
+		input reg [3:0] s;
+		reg [3:0] r;
+		begin
+			(* full_case, parallel_case *)
+			case (s)
+				4'd0: r = 4'd0;
+				4'd1: r = 4'd1;
+				4'd2: r = 4'd4;
+				4'd3: r = 4'd8;
+				4'd4: r = 4'd5;
+				4'd5: r = 4'd2;
+				4'd6: r = 4'd3;
+				4'd7: r = 4'd6;
+				4'd8: r = 4'd9;
+				4'd9: r = 4'd12;
+				4'd10: r = 4'd13;
+				4'd11: r = 4'd10;
+				4'd12: r = 4'd7;
+				4'd13: r = 4'd11;
+				4'd14: r = 4'd14;
+				4'd15: r = 4'd15;
+			endcase
+			zz4 = r;
+		end
+	endfunction
+	function automatic [4:0] sv2v_cast_5;
+		input reg [4:0] inp;
+		sv2v_cast_5 = inp;
+	endfunction
+	function automatic [15:0] sv2v_cast_16;
+		input reg [15:0] inp;
+		sv2v_cast_16 = inp;
+	endfunction
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		coef_we = (st_q == 5'd16) && step;
+		(* full_case, parallel_case *)
+		case (rph_q)
+			2'd0: begin
+				coef_blk = 5'd16;
+				coef_addr = zz4(wpos);
+			end
+			2'd1: begin
+				coef_blk = sv2v_cast_5(k_q);
+				coef_addr = (i16_q ? zz4(wpos + 4'd1) : zz4(wpos));
+			end
+			2'd2: begin
+				coef_blk = 5'd17 + sv2v_cast_5(comp_q);
+				coef_addr = wpos;
+			end
+			default: begin
+				coef_blk = (5'd19 + (sv2v_cast_5(comp_q) * 4)) + sv2v_cast_5(k_q);
+				coef_addr = zz4(wpos + 4'd1);
+			end
+		endcase
+		coef_data = (bin ? -sv2v_cast_16(abs_q) : sv2v_cast_16(abs_q));
+		if (((st_q == 5'd16) && (abs_q == 5'd15)) && (egv_q != 16'd0))
+			coef_data = (bin ? -(egv_q + 16'd14) : egv_q + 16'd14);
+	end
+	assign mb_x = mbx_q;
+	assign mb_y = mby_q;
+	assign mb_i16 = i16_q;
+	assign mb_cbp = cbp_q;
+	assign mb_qp = qp_q;
+	assign mb_i16_mode = i16m_q;
+	assign mb_cmode = cmode_q;
+	always @(*) begin : sv2v_autoblock_4
+		reg signed [31:0] i;
+		if (_sv2v_0)
+			;
+		for (i = 0; i < 16; i = i + 1)
+			mb_i4m[i * 4+:4] = i4m_q[i];
+	end
+	assign mb_valid = st_q == 5'd18;
+	assign slice_done = st_q == 5'd19;
+	assign err = st_q == 5'd20;
+	assign mb_skip = skip_q;
+	assign mb_inter = inter_q;
+	assign mb_ptype = ptype_q;
+	assign mb_sub = sub_q;
+	assign mvd_valid = mvdv_q;
+	assign mvd_x = mvdx_q;
+	assign mvd_y = mvdy_q;
+	assign mb_nz = cbfl_q;
+	reg skipgo_q;
+	assign skip_go = skipgo_q;
+	wire [4:0] eff;
+	assign eff = t_q - 5'd1;
+	task automatic adv_block;
+		(* full_case, parallel_case *)
+		case (rph_q)
+			2'd0: begin
+				rph_q <= 2'd1;
+				k_q <= 1'sb0;
+				st_q <= 5'd8;
+			end
+			2'd1:
+				if (k_q == 4'd15) begin
+					rph_q <= 2'd2;
+					comp_q <= 1'b0;
+					st_q <= 5'd8;
+				end
+				else begin
+					k_q <= k_q + 4'd1;
+					st_q <= 5'd8;
+				end
+			2'd2:
+				if (!comp_q) begin
+					comp_q <= 1'b1;
+					st_q <= 5'd8;
+				end
+				else begin
+					rph_q <= 2'd3;
+					comp_q <= 1'b0;
+					k_q <= 1'sb0;
+					st_q <= 5'd8;
+				end
+			default:
+				if ((k_q == 4'd3) && comp_q)
+					st_q <= 5'd17;
+				else if (k_q == 4'd3) begin
+					comp_q <= 1'b1;
+					k_q <= 1'sb0;
+					st_q <= 5'd8;
+				end
+				else begin
+					k_q <= k_q + 4'd1;
+					st_q <= 5'd8;
+				end
+		endcase
+	endtask
+	reg [6:0] avxc_q;
+	function automatic [1:0] chroma_part;
+		input reg [4:0] e;
+		reg [4:0] r;
+		begin
+			r = (e >= 5'd12 ? e - 5'd12 : e);
+			chroma_part = (r < 5'd4 ? 2'd0 : (r < 5'd8 ? 2'd1 : 2'd2));
+		end
+	endfunction
+	function automatic signed [31:0] sv2v_cast_32_signed;
+		input reg signed [31:0] inp;
+		sv2v_cast_32_signed = inp;
+	endfunction
+	task automatic finish_comp;
+		input reg signed [15:0] v;
+		input reg [6:0] vclip;
+		if (!axis_q) begin
+			mvdx_q <= v;
+			avxc_q <= vclip;
+			axis_q <= 1'b1;
+			st_q <= 5'd25;
+		end
+		else begin
+			mvdy_q <= v;
+			mvdv_q <= 1'b1;
+			begin : sv2v_autoblock_5
+				reg signed [31:0] j;
+				for (j = 0; j < 4; j = j + 1)
+					begin : sv2v_autoblock_6
+						reg signed [31:0] i;
+						for (i = 0; i < 4; i = i + 1)
+							if ((((i >= sv2v_cast_32_signed(g_bx0)) && (i < (sv2v_cast_32_signed(g_bx0) + sv2v_cast_32_signed(g_w4)))) && (j >= sv2v_cast_32_signed(g_by0))) && (j < (sv2v_cast_32_signed(g_by0) + sv2v_cast_32_signed(g_h4)))) begin
+								cur_avx[(j * 4) + i] <= avxc_q;
+								cur_avy[(j * 4) + i] <= vclip;
+								av_w[(j * 4) + i] <= 1'b1;
+							end
+					end
+			end
+			axis_q <= 1'b0;
+			if (ptype_q == 3'd0)
+				st_q <= 5'd6;
+			else if ((ptype_q == 3'd1) || (ptype_q == 3'd2)) begin
+				if (pb_q[0])
+					st_q <= 5'd6;
+				else begin
+					pb_q <= 2'd1;
+					st_q <= 5'd25;
+				end
+			end
+			else if ((sv2v_cast_3(ps_q) + 3'd1) == nsub) begin
+				if (pb_q == 2'd3)
+					st_q <= 5'd6;
+				else begin
+					pb_q <= pb_q + 2'd1;
+					ps_q <= 1'sb0;
+					st_q <= 5'd25;
+				end
+			end
+			else begin
+				ps_q <= ps_q + 2'd1;
+				st_q <= 5'd25;
+			end
+		end
+	endtask
+	function automatic [3:0] luma_part;
+		input reg [4:0] e;
+		luma_part = (e >= 5'd12 ? 4'hf : 4'h0);
+	endfunction
+	task automatic set_cbf;
+		(* full_case, parallel_case *)
+		case (rph_q)
+			2'd0: ldc_q <= 1'b1;
+			2'd1: cbfl_q[{zsy(k_q), zsx(k_q)}] <= 1'b1;
+			2'd2: cdc_q[comp_q] <= 1'b1;
+			default: cbfc_q[comp_q][{k_q[1], k_q[0]}] <= 1'b1;
+		endcase
+	endtask
+	function automatic [7:0] sv2v_cast_8;
+		input reg [7:0] inp;
+		sv2v_cast_8 = inp;
+	endfunction
+	function automatic signed [12:0] sv2v_cast_13_signed;
+		input reg signed [12:0] inp;
+		sv2v_cast_13_signed = inp;
+	endfunction
+	function automatic [5:0] sv2v_cast_6;
+		input reg [5:0] inp;
+		sv2v_cast_6 = inp;
+	endfunction
+	function automatic signed [1:0] sv2v_cast_2_signed;
+		input reg signed [1:0] inp;
+		sv2v_cast_2_signed = inp;
+	endfunction
+	always @(posedge clk or negedge rst_n)
+		if (!rst_n) begin
+			st_q <= 5'd0;
+			ci_start <= 1'b0;
+			mbx_q <= 1'sb0;
+			mby_q <= 1'sb0;
+			qp_q <= 1'sb0;
+			lastqpd_q <= 1'b0;
+			l_valid <= 1'b0;
+			bcnt_q <= 1'sb0;
+			t_q <= 1'sb0;
+			k_q <= 1'sb0;
+			m_q <= 1'sb0;
+			rph_q <= 1'sb0;
+			comp_q <= 1'b0;
+			rcnt_q <= 1'sb0;
+			rsig_q <= 1'sb0;
+			node_q <= 1'sb0;
+			abs_q <= 1'sb0;
+			egk_q <= 1'sb0;
+			egv_q <= 1'sb0;
+			uval_q <= 1'sb0;
+			i16_q <= 1'b0;
+			i16m_q <= 1'sb0;
+			cmode_q <= 1'sb0;
+			cbp_q <= 1'sb0;
+			cbfl_q <= 1'sb0;
+			cdc_q <= 1'sb0;
+			ldc_q <= 1'b0;
+			l_cat <= 1'b0;
+			l_cmode <= 1'b0;
+			l_cbp <= 1'sb0;
+			l_ldc <= 1'b0;
+			l_cdc <= 1'sb0;
+			l_cbfl <= 1'sb0;
+			nrow_q <= 1'sb0;
+			skip_q <= 1'b0;
+			inter_q <= 1'b0;
+			ptype_q <= 1'sb0;
+			sub_q <= 1'sb0;
+			pb_q <= 1'sb0;
+			ps_q <= 1'sb0;
+			axis_q <= 1'b0;
+			uegv_q <= 1'sb0;
+			uctx_q <= 1'sb0;
+			egk3_q <= 1'sb0;
+			egv3_q <= 1'sb0;
+			mvdx_q <= 1'sb0;
+			mvdy_q <= 1'sb0;
+			mvdv_q <= 1'b0;
+			av_w <= 1'sb0;
+			avxc_q <= 1'sb0;
+			skipgo_q <= 1'b0;
+			l_skip <= 1'b0;
+		end
+		else begin
+			ci_start <= 1'b0;
+			mvdv_q <= 1'b0;
+			skipgo_q <= 1'b0;
+			(* full_case, parallel_case *)
+			case (st_q)
+				5'd0:
+					if (start) begin
+						mbx_q <= 1'sb0;
+						mby_q <= 1'sb0;
+						qp_q <= cfg_qp;
+						lastqpd_q <= 1'b0;
+						l_valid <= 1'b0;
+						ci_start <= 1'b1;
+						st_q <= 5'd1;
+					end
+				5'd1:
+					if (!ci_start && !ci_busy)
+						st_q <= 5'd2;
+				5'd2: begin
+					nrow_q <= nrow_rd;
+					begin : sv2v_autoblock_7
+						reg signed [31:0] k;
+						for (k = 0; k < 16; k = k + 1)
+							i4m_q[k] <= 4'd2;
+					end
+					cbfl_q <= 1'sb0;
+					cbfc_q[0] <= 1'sb0;
+					cbfc_q[1] <= 1'sb0;
+					cdc_q <= 1'sb0;
+					ldc_q <= 1'b0;
+					cmode_q <= 1'sb0;
+					cbp_q <= 1'sb0;
+					i16_q <= 1'b0;
+					i16m_q <= 1'sb0;
+					t_q <= 1'sb0;
+					bcnt_q <= 1'sb0;
+					k_q <= 1'sb0;
+					skip_q <= 1'b0;
+					inter_q <= 1'b0;
+					ptype_q <= 1'sb0;
+					sub_q <= 1'sb0;
+					pb_q <= 1'sb0;
+					ps_q <= 1'sb0;
+					axis_q <= 1'b0;
+					av_w <= 1'sb0;
+					begin : sv2v_autoblock_8
+						reg signed [31:0] i;
+						for (i = 0; i < 16; i = i + 1)
+							begin
+								cur_avx[i] <= 1'sb0;
+								cur_avy[i] <= 1'sb0;
+							end
+					end
+					st_q <= (cfg_is_p ? 5'd21 : 5'd3);
+				end
+				5'd21:
+					if (step) begin
+						if (bin) begin
+							skip_q <= 1'b1;
+							inter_q <= 1'b1;
+							cbp_q <= 1'sb0;
+							lastqpd_q <= 1'b0;
+							skipgo_q <= 1'b1;
+							st_q <= 5'd17;
+						end
+						else
+							st_q <= 5'd22;
+					end
+				5'd22:
+					if (step)
+						(* full_case, parallel_case *)
+						case (bcnt_q)
+							3'd0:
+								if (bin) begin
+									bcnt_q <= 1'sb0;
+									st_q <= 5'd23;
+								end
+								else begin
+									inter_q <= 1'b1;
+									bcnt_q <= 3'd1;
+								end
+							3'd1: bcnt_q <= (bin ? 3'd3 : 3'd2);
+							3'd2: begin
+								ptype_q <= (bin ? 3'd3 : 3'd0);
+								bcnt_q <= 1'sb0;
+								pb_q <= 1'sb0;
+								ps_q <= 1'sb0;
+								axis_q <= 1'b0;
+								st_q <= (bin ? 5'd24 : 5'd25);
+							end
+							default: begin
+								ptype_q <= (bin ? 3'd1 : 3'd2);
+								bcnt_q <= 1'sb0;
+								pb_q <= 1'sb0;
+								ps_q <= 1'sb0;
+								axis_q <= 1'b0;
+								st_q <= 5'd25;
+							end
+						endcase
+				5'd23:
+					if (step)
+						(* full_case, parallel_case *)
+						case (bcnt_q)
+							3'd0:
+								if (!bin) begin
+									k_q <= 1'sb0;
+									bcnt_q <= 1'sb0;
+									st_q <= 5'd4;
+								end
+								else begin
+									t_q <= 5'd1;
+									bcnt_q <= 3'd1;
+								end
+							3'd1:
+								if (bin)
+									st_q <= 5'd20;
+								else
+									bcnt_q <= 3'd2;
+							3'd2: begin
+								if (bin)
+									t_q <= t_q + 5'd12;
+								bcnt_q <= 3'd3;
+							end
+							3'd3: bcnt_q <= (bin ? 3'd4 : 3'd5);
+							3'd4: begin
+								t_q <= t_q + (bin ? 5'd8 : 5'd4);
+								bcnt_q <= 3'd5;
+							end
+							3'd5: begin
+								if (bin)
+									t_q <= t_q + 5'd2;
+								bcnt_q <= 3'd6;
+							end
+							default: begin
+								i16_q <= 1'b1;
+								st_q <= 5'd5;
+								bcnt_q <= 1'sb0;
+								if (bin)
+									t_q <= t_q + 5'd1;
+							end
+						endcase
+				5'd24:
+					if (step)
+						(* full_case, parallel_case *)
+						case (bcnt_q)
+							3'd0:
+								if (bin) begin
+									sub_q[{pb_q, 1'b0}+:2] <= 2'd0;
+									if (pb_q == 2'd3) begin
+										pb_q <= 1'sb0;
+										ps_q <= 1'sb0;
+										axis_q <= 1'b0;
+										st_q <= 5'd25;
+									end
+									else
+										pb_q <= pb_q + 2'd1;
+								end
+								else
+									bcnt_q <= 3'd1;
+							3'd1:
+								if (!bin) begin
+									sub_q[{pb_q, 1'b0}+:2] <= 2'd1;
+									bcnt_q <= 1'sb0;
+									if (pb_q == 2'd3) begin
+										pb_q <= 1'sb0;
+										ps_q <= 1'sb0;
+										axis_q <= 1'b0;
+										st_q <= 5'd25;
+									end
+									else
+										pb_q <= pb_q + 2'd1;
+								end
+								else
+									bcnt_q <= 3'd2;
+							default: begin
+								sub_q[{pb_q, 1'b0}+:2] <= (bin ? 2'd2 : 2'd3);
+								bcnt_q <= 1'sb0;
+								if (pb_q == 2'd3) begin
+									pb_q <= 1'sb0;
+									ps_q <= 1'sb0;
+									axis_q <= 1'b0;
+									st_q <= 5'd25;
+								end
+								else
+									pb_q <= pb_q + 2'd1;
+							end
+						endcase
+				5'd25:
+					if (step) begin
+						if (!bin)
+							finish_comp(16'd0, 7'd0);
+						else begin
+							uegv_q <= 16'd1;
+							uctx_q <= 1'sb0;
+							st_q <= 5'd26;
+						end
+					end
+				5'd26:
+					if (step) begin
+						if (bin) begin
+							if (uegv_q == 16'd8) begin
+								uegv_q <= 16'd9;
+								egk3_q <= 5'd3;
+								st_q <= 5'd27;
+							end
+							else begin
+								if (uegv_q < 16'd4)
+									uctx_q <= uctx_q + 3'd1;
+								uegv_q <= uegv_q + 16'd1;
+							end
+						end
+						else
+							st_q <= 5'd29;
+					end
+				5'd27:
+					if (step) begin
+						if (bin) begin
+							uegv_q <= uegv_q + (16'd1 << egk3_q);
+							egk3_q <= egk3_q + 5'd1;
+							if (egk3_q > 5'd24)
+								st_q <= 5'd20;
+						end
+						else if (egk3_q == 5'd0)
+							st_q <= 5'd29;
+						else
+							st_q <= 5'd28;
+					end
+				5'd28:
+					if (step) begin
+						uegv_q <= uegv_q + (sv2v_cast_16(bin) << (egk3_q - 5'd1));
+						if (egk3_q == 5'd1)
+							st_q <= 5'd29;
+						else
+							egk3_q <= egk3_q - 5'd1;
+					end
+				5'd29:
+					if (step)
+						finish_comp((bin ? -uegv_q : uegv_q), (uegv_q < 16'd70 ? uegv_q[6:0] : 7'd70));
+				5'd3:
+					if (step)
+						(* full_case, parallel_case *)
+						case (bcnt_q)
+							3'd0:
+								if (!bin) begin
+									k_q <= 1'sb0;
+									bcnt_q <= 1'sb0;
+									st_q <= 5'd4;
+								end
+								else begin
+									t_q <= 5'd1;
+									bcnt_q <= 3'd1;
+								end
+							3'd1:
+								if (bin)
+									st_q <= 5'd20;
+								else
+									bcnt_q <= 3'd2;
+							3'd2: begin
+								if (bin)
+									t_q <= t_q + 5'd12;
+								bcnt_q <= 3'd3;
+							end
+							3'd3: bcnt_q <= (bin ? 3'd4 : 3'd5);
+							3'd4: begin
+								t_q <= t_q + (bin ? 5'd8 : 5'd4);
+								bcnt_q <= 3'd5;
+							end
+							3'd5: begin
+								if (bin)
+									t_q <= t_q + 5'd2;
+								bcnt_q <= 3'd6;
+							end
+							default: begin
+								i16_q <= 1'b1;
+								st_q <= 5'd5;
+								bcnt_q <= 1'sb0;
+								if (bin)
+									t_q <= t_q + 5'd1;
+							end
+						endcase
+				5'd4:
+					if (step)
+						(* full_case, parallel_case *)
+						case (bcnt_q)
+							3'd0:
+								if (bin) begin
+									i4m_q[k_q] <= i4_pred;
+									if (k_q == 4'd15) begin
+										bcnt_q <= 1'sb0;
+										st_q <= 5'd5;
+									end
+									else
+										k_q <= k_q + 4'd1;
+								end
+								else begin
+									m_q <= 1'sb0;
+									bcnt_q <= 3'd1;
+								end
+							3'd1: begin
+								m_q[0] <= bin;
+								bcnt_q <= 3'd2;
+							end
+							3'd2: begin
+								m_q[1] <= bin;
+								bcnt_q <= 3'd3;
+							end
+							default: begin : sv2v_autoblock_9
+								reg [3:0] m;
+								m = {1'b0, bin, m_q[1], m_q[0]};
+								i4m_q[k_q] <= m + sv2v_cast_4({1'b0, m} >= {1'b0, i4_pred});
+								bcnt_q <= 1'sb0;
+								if (k_q == 4'd15)
+									st_q <= 5'd5;
+								else
+									k_q <= k_q + 4'd1;
+							end
+						endcase
+				5'd5:
+					if (step)
+						(* full_case, parallel_case *)
+						case (bcnt_q)
+							3'd0:
+								if (!bin) begin
+									cmode_q <= 2'd0;
+									st_q <= (i16_q ? 5'd7 : 5'd6);
+									bcnt_q <= 1'sb0;
+									if (i16_q) begin
+										i16m_q <= eff[1:0];
+										cbp_q <= {chroma_part(eff), luma_part(eff)};
+									end
+								end
+								else
+									bcnt_q <= 3'd1;
+							3'd1:
+								if (!bin) begin
+									cmode_q <= 2'd1;
+									st_q <= (i16_q ? 5'd7 : 5'd6);
+									bcnt_q <= 1'sb0;
+									if (i16_q) begin
+										i16m_q <= eff[1:0];
+										cbp_q <= {chroma_part(eff), luma_part(eff)};
+									end
+								end
+								else
+									bcnt_q <= 3'd2;
+							default: begin
+								cmode_q <= (bin ? 2'd3 : 2'd2);
+								st_q <= (i16_q ? 5'd7 : 5'd6);
+								bcnt_q <= 1'sb0;
+								if (i16_q) begin
+									i16m_q <= eff[1:0];
+									cbp_q <= {chroma_part(eff), luma_part(eff)};
+								end
+							end
+						endcase
+				5'd6:
+					if (step)
+						(* full_case, parallel_case *)
+						case (bcnt_q)
+							3'd0, 3'd1, 3'd2, 3'd3: begin
+								cbp_q[sv2v_cast_2(bcnt_q)] <= bin;
+								bcnt_q <= bcnt_q + 3'd1;
+							end
+							3'd4:
+								if (!bin) begin
+									bcnt_q <= 1'sb0;
+									if (cbp_q[3:0] != 4'd0)
+										st_q <= 5'd7;
+									else begin
+										lastqpd_q <= 1'b0;
+										rph_q <= 2'd1;
+										k_q <= 1'sb0;
+										comp_q <= 1'b0;
+										st_q <= 5'd8;
+									end
+								end
+								else
+									bcnt_q <= 3'd5;
+							default: begin
+								cbp_q[5:4] <= (bin ? 2'd2 : 2'd1);
+								bcnt_q <= 1'sb0;
+								st_q <= 5'd7;
+							end
+						endcase
+				5'd7:
+					if (step)
+						(* full_case, parallel_case *)
+						case (bcnt_q)
+							3'd0:
+								if (!bin) begin
+									lastqpd_q <= 1'b0;
+									st_q <= 5'd8;
+									rph_q <= (i16_q ? 2'd0 : 2'd1);
+									k_q <= 1'sb0;
+									comp_q <= 1'b0;
+								end
+								else begin
+									uval_q <= 7'd1;
+									bcnt_q <= 3'd1;
+								end
+							default:
+								if (bin) begin
+									uval_q <= uval_q + 7'd1;
+									bcnt_q <= 3'd2;
+									if (uval_q > 7'd104)
+										st_q <= 5'd20;
+								end
+								else begin : sv2v_autoblock_10
+									reg signed [7:0] d;
+									d = (uval_q[0] ? sv2v_cast_8(({1'b0, uval_q} + 8'd1) >> 1) : -sv2v_cast_8(({1'b0, uval_q} + 8'd1) >> 1));
+									if ((d < -26) || (d > 25))
+										st_q <= 5'd20;
+									else begin
+										qp_q <= sv2v_cast_6(((sv2v_cast_13_signed($signed({1'b0, qp_q})) + sv2v_cast_13_signed(d)) + 13'd52) % 13'd52);
+										lastqpd_q <= 1'b1;
+										st_q <= 5'd8;
+										rph_q <= (i16_q ? 2'd0 : 2'd1);
+										k_q <= 1'sb0;
+										comp_q <= 1'b0;
+									end
+								end
+						endcase
+				5'd8: begin : sv2v_autoblock_11
+					reg skip_blk;
+					skip_blk = 1'b0;
+					(* full_case, parallel_case *)
+					case (rph_q)
+						2'd0:
+							;
+						2'd1: skip_blk = !cbp_q[{k_q[3], k_q[2]}];
+						2'd2: skip_blk = cbp_q[5:4] == 2'd0;
+						default: skip_blk = cbp_q[5:4] != 2'd2;
+					endcase
+					if (skip_blk)
+						adv_block;
+					else begin
+						rsig_q <= 1'sb0;
+						rcnt_q <= 1'sb0;
+						node_q <= 1'sb0;
+						st_q <= 5'd9;
+					end
+				end
+				5'd9:
+					if (step) begin
+						if (!bin)
+							adv_block;
+						else begin
+							set_cbf;
+							st_q <= (rmax == 5'd1 ? 5'd12 : 5'd10);
+							if (rmax == 5'd1) begin
+								ridx[0] <= 1'sb0;
+								rcnt_q <= 5'd1;
+							end
+						end
+					end
+				5'd10:
+					if (step) begin
+						if (bin) begin
+							ridx[rcnt_q[3:0]] <= sv2v_cast_4(rsig_q);
+							rcnt_q <= rcnt_q + 5'd1;
+							st_q <= 5'd11;
+						end
+						else if (rsig_q == (rmax - 5'd2)) begin
+							ridx[rcnt_q[3:0]] <= sv2v_cast_4(rmax - 5'd1);
+							rcnt_q <= rcnt_q + 5'd1;
+							st_q <= 5'd12;
+						end
+						else
+							rsig_q <= rsig_q + 5'd1;
+					end
+				5'd11:
+					if (step) begin
+						if (bin)
+							st_q <= 5'd12;
+						else if (rsig_q == (rmax - 5'd2)) begin
+							ridx[rcnt_q[3:0]] <= sv2v_cast_4(rmax - 5'd1);
+							rcnt_q <= rcnt_q + 5'd1;
+							st_q <= 5'd12;
+						end
+						else begin
+							rsig_q <= rsig_q + 5'd1;
+							st_q <= 5'd10;
+						end
+					end
+				5'd12:
+					if (step) begin
+						egv_q <= 1'sb0;
+						if (!bin) begin
+							abs_q <= 5'd1;
+							node_q <= tr_eq1(node_q);
+							st_q <= 5'd16;
+						end
+						else begin
+							abs_q <= 5'd2;
+							st_q <= 5'd13;
+						end
+					end
+				5'd13:
+					if (step) begin
+						if (bin) begin
+							if (abs_q == 5'd14) begin
+								abs_q <= 5'd15;
+								egk_q <= 1'sb0;
+								node_q <= tr_gt1(node_q);
+								st_q <= 5'd14;
+							end
+							else
+								abs_q <= abs_q + 5'd1;
+						end
+						else begin
+							node_q <= tr_gt1(node_q);
+							st_q <= 5'd16;
+						end
+					end
+				5'd14:
+					if (step) begin
+						if (bin && (egk_q < 5'd23))
+							egk_q <= egk_q + 5'd1;
+						else begin
+							egv_q <= 16'd1;
+							if (egk_q == 5'd0)
+								st_q <= 5'd16;
+							else
+								st_q <= 5'd15;
+						end
+					end
+				5'd15:
+					if (step) begin
+						egv_q <= {egv_q[14:0], bin};
+						if (egk_q == 5'd1)
+							st_q <= 5'd16;
+						else
+							egk_q <= egk_q - 5'd1;
+					end
+				5'd16:
+					if (step) begin
+						rcnt_q <= rcnt_q - 5'd1;
+						if (rcnt_q == 5'd1)
+							adv_block;
+						else
+							st_q <= 5'd12;
+					end
+				5'd17:
+					if (step) begin
+						if (bin && !((mbx_q == (cfg_mb_w - 8'd1)) && (mby_q == (cfg_mb_h - 8'd1))))
+							st_q <= 5'd20;
+						else if (!bin && ((mbx_q == (cfg_mb_w - 8'd1)) && (mby_q == (cfg_mb_h - 8'd1))))
+							st_q <= 5'd20;
+						else
+							st_q <= 5'd18;
+					end
+				5'd18:
+					if (rec_done) begin
+						l_valid <= 1'b1;
+						l_cat <= i16_q;
+						l_cmode <= cmode_q != 2'd0;
+						l_cbp <= cbp_q;
+						l_ldc <= ldc_q;
+						l_cdc <= cdc_q;
+						begin : sv2v_autoblock_12
+							reg signed [31:0] j;
+							for (j = 0; j < 4; j = j + 1)
+								begin
+									l_cbfl[j] <= cbfl_q[{sv2v_cast_2_signed(j), 2'd3}];
+									l_i4m[j] <= i4m_q[zidx(2'd3, sv2v_cast_2_signed(j))];
+								end
+						end
+						l_cbfc[0] <= {cbfc_q[0][3], cbfc_q[0][1]};
+						l_cbfc[1] <= {cbfc_q[1][3], cbfc_q[1][1]};
+						l_skip <= skip_q;
+						begin : sv2v_autoblock_13
+							reg signed [31:0] j;
+							for (j = 0; j < 4; j = j + 1)
+								begin
+									l_avx[j] <= cur_avx[(j * 4) + 3];
+									l_avy[j] <= cur_avy[(j * 4) + 3];
+								end
+						end
+						nrow[mbx_q] <= {cur_avy[15], cur_avx[15], cur_avy[14], cur_avx[14], cur_avy[13], cur_avx[13], cur_avy[12], cur_avx[12], skip_q, i4m_q[zidx(2'd3, 2'd3)], i4m_q[zidx(2'd2, 2'd3)], i4m_q[zidx(2'd1, 2'd3)], i4m_q[zidx(2'd0, 2'd3)], cbfc_q[1][3:2], cbfc_q[0][3:2], cbfl_q[15:12], cdc_q, ldc_q, cbp_q, cmode_q != 2'd0, i16_q};
+						if ((mbx_q == (cfg_mb_w - 8'd1)) && (mby_q == (cfg_mb_h - 8'd1)))
+							st_q <= 5'd19;
+						else begin
+							if (mbx_q == (cfg_mb_w - 8'd1)) begin
+								mbx_q <= 1'sb0;
+								mby_q <= mby_q + 8'd1;
+								l_valid <= 1'b0;
+							end
+							else
+								mbx_q <= mbx_q + 8'd1;
+							st_q <= 5'd2;
+						end
+					end
+				5'd19: st_q <= 5'd19;
+				5'd20: st_q <= 5'd20;
+				default: st_q <= 5'd20;
+			endcase
+		end
+	initial _sv2v_0 = 0;
+endmodule
+module cabac_core (
+	clk,
+	rst_n,
+	req_valid,
+	req_bits,
+	req_ready,
+	show,
+	avail,
+	init_start,
+	init_qp,
+	init_model,
+	init_busy,
+	op_valid,
+	op,
+	op_ctx,
+	op_ready,
+	bin,
+	dbg_range,
+	dbg_value
+);
+	reg _sv2v_0;
+	input wire clk;
+	input wire rst_n;
+	output reg req_valid;
+	output reg [4:0] req_bits;
+	input wire req_ready;
+	input wire [23:0] show;
+	input wire [6:0] avail;
+	input wire init_start;
+	input wire [5:0] init_qp;
+	input wire [1:0] init_model;
+	output wire init_busy;
+	input wire op_valid;
+	input wire [1:0] op;
+	input wire [8:0] op_ctx;
+	output wire op_ready;
+	output reg bin;
+	output wire [8:0] dbg_range;
+	output wire [8:0] dbg_value;
+	reg [8:0] range_q;
+	reg [8:0] value_q;
+	reg [5:0] pstate [0:435];
+	reg [435:0] mps;
+	reg [1:0] st_q;
+	reg [8:0] ictx_q;
+	reg [1:0] model_q;
+	assign init_busy = st_q != 2'd0;
+	assign dbg_range = range_q;
+	assign dbg_value = value_q;
+	wire [15:0] mn;
+	reg signed [15:0] pre_raw;
+	reg [6:0] pre;
+	function automatic [15:0] cabac_init_mn;
+		input reg [1:0] model;
+		input reg [8:0] ctx;
+		reg [10:0] key;
+		begin
+			key = {model, ctx};
+			(* full_case, parallel_case *)
+			case (key)
+				11'd0: cabac_init_mn = 16'h14f1;
+				11'd1: cabac_init_mn = 16'h0236;
+				11'd2: cabac_init_mn = 16'h034a;
+				11'd3: cabac_init_mn = 16'h14f1;
+				11'd4: cabac_init_mn = 16'h0236;
+				11'd5: cabac_init_mn = 16'h034a;
+				11'd6: cabac_init_mn = 16'he47f;
+				11'd7: cabac_init_mn = 16'he968;
+				11'd8: cabac_init_mn = 16'hfa35;
+				11'd9: cabac_init_mn = 16'hff36;
+				11'd10: cabac_init_mn = 16'h0733;
+				11'd11: cabac_init_mn = 16'h1721;
+				11'd12: cabac_init_mn = 16'h1702;
+				11'd13: cabac_init_mn = 16'h1500;
+				11'd14: cabac_init_mn = 16'h0109;
+				11'd15: cabac_init_mn = 16'h0031;
+				11'd16: cabac_init_mn = 16'hdb76;
+				11'd17: cabac_init_mn = 16'h0539;
+				11'd18: cabac_init_mn = 16'hf34e;
+				11'd19: cabac_init_mn = 16'hf541;
+				11'd20: cabac_init_mn = 16'h013e;
+				11'd21: cabac_init_mn = 16'h0c31;
+				11'd22: cabac_init_mn = 16'hfc49;
+				11'd23: cabac_init_mn = 16'h1132;
+				11'd24: cabac_init_mn = 16'h1240;
+				11'd25: cabac_init_mn = 16'h092b;
+				11'd26: cabac_init_mn = 16'h1d00;
+				11'd27: cabac_init_mn = 16'h1a43;
+				11'd28: cabac_init_mn = 16'h105a;
+				11'd29: cabac_init_mn = 16'h0968;
+				11'd30: cabac_init_mn = 16'hd27f;
+				11'd31: cabac_init_mn = 16'hec68;
+				11'd32: cabac_init_mn = 16'h0143;
+				11'd33: cabac_init_mn = 16'hf34e;
+				11'd34: cabac_init_mn = 16'hf541;
+				11'd35: cabac_init_mn = 16'h013e;
+				11'd36: cabac_init_mn = 16'hfa56;
+				11'd37: cabac_init_mn = 16'hef5f;
+				11'd38: cabac_init_mn = 16'hfa3d;
+				11'd39: cabac_init_mn = 16'h092d;
+				11'd40: cabac_init_mn = 16'hfd45;
+				11'd41: cabac_init_mn = 16'hfa51;
+				11'd42: cabac_init_mn = 16'hf560;
+				11'd43: cabac_init_mn = 16'h0637;
+				11'd44: cabac_init_mn = 16'h0743;
+				11'd45: cabac_init_mn = 16'hfb56;
+				11'd46: cabac_init_mn = 16'h0258;
+				11'd47: cabac_init_mn = 16'h003a;
+				11'd48: cabac_init_mn = 16'hfd4c;
+				11'd49: cabac_init_mn = 16'hf65e;
+				11'd50: cabac_init_mn = 16'h0536;
+				11'd51: cabac_init_mn = 16'h0445;
+				11'd52: cabac_init_mn = 16'hfd51;
+				11'd53: cabac_init_mn = 16'h0058;
+				11'd54: cabac_init_mn = 16'hf943;
+				11'd55: cabac_init_mn = 16'hfb4a;
+				11'd56: cabac_init_mn = 16'hfc4a;
+				11'd57: cabac_init_mn = 16'hfb50;
+				11'd58: cabac_init_mn = 16'hf948;
+				11'd59: cabac_init_mn = 16'h013a;
+				11'd60: cabac_init_mn = 16'h0029;
+				11'd61: cabac_init_mn = 16'h003f;
+				11'd62: cabac_init_mn = 16'h003f;
+				11'd63: cabac_init_mn = 16'h003f;
+				11'd64: cabac_init_mn = 16'hf753;
+				11'd65: cabac_init_mn = 16'h0456;
+				11'd66: cabac_init_mn = 16'h0061;
+				11'd67: cabac_init_mn = 16'hf948;
+				11'd68: cabac_init_mn = 16'h0d29;
+				11'd69: cabac_init_mn = 16'h033e;
+				11'd70: cabac_init_mn = 16'h002d;
+				11'd71: cabac_init_mn = 16'hfc4e;
+				11'd72: cabac_init_mn = 16'hfd60;
+				11'd73: cabac_init_mn = 16'he57e;
+				11'd74: cabac_init_mn = 16'he462;
+				11'd75: cabac_init_mn = 16'he765;
+				11'd76: cabac_init_mn = 16'he943;
+				11'd77: cabac_init_mn = 16'he452;
+				11'd78: cabac_init_mn = 16'hec5e;
+				11'd79: cabac_init_mn = 16'hf053;
+				11'd80: cabac_init_mn = 16'hea6e;
+				11'd81: cabac_init_mn = 16'heb5b;
+				11'd82: cabac_init_mn = 16'hee66;
+				11'd83: cabac_init_mn = 16'hf35d;
+				11'd84: cabac_init_mn = 16'he37f;
+				11'd85: cabac_init_mn = 16'hf95c;
+				11'd86: cabac_init_mn = 16'hfb59;
+				11'd87: cabac_init_mn = 16'hf960;
+				11'd88: cabac_init_mn = 16'hf36c;
+				11'd89: cabac_init_mn = 16'hfd2e;
+				11'd90: cabac_init_mn = 16'hff41;
+				11'd91: cabac_init_mn = 16'hff39;
+				11'd92: cabac_init_mn = 16'hf75d;
+				11'd93: cabac_init_mn = 16'hfd4a;
+				11'd94: cabac_init_mn = 16'hf75c;
+				11'd95: cabac_init_mn = 16'hf857;
+				11'd96: cabac_init_mn = 16'he97e;
+				11'd97: cabac_init_mn = 16'h0536;
+				11'd98: cabac_init_mn = 16'h063c;
+				11'd99: cabac_init_mn = 16'h063b;
+				11'd100: cabac_init_mn = 16'h0645;
+				11'd101: cabac_init_mn = 16'hff30;
+				11'd102: cabac_init_mn = 16'h0044;
+				11'd103: cabac_init_mn = 16'hfc45;
+				11'd104: cabac_init_mn = 16'hf858;
+				11'd105: cabac_init_mn = 16'hfe55;
+				11'd106: cabac_init_mn = 16'hfa4e;
+				11'd107: cabac_init_mn = 16'hff4b;
+				11'd108: cabac_init_mn = 16'hf94d;
+				11'd109: cabac_init_mn = 16'h0236;
+				11'd110: cabac_init_mn = 16'h0532;
+				11'd111: cabac_init_mn = 16'hfd44;
+				11'd112: cabac_init_mn = 16'h0132;
+				11'd113: cabac_init_mn = 16'h062a;
+				11'd114: cabac_init_mn = 16'hfc51;
+				11'd115: cabac_init_mn = 16'h013f;
+				11'd116: cabac_init_mn = 16'hfc46;
+				11'd117: cabac_init_mn = 16'h0043;
+				11'd118: cabac_init_mn = 16'h0239;
+				11'd119: cabac_init_mn = 16'hfe4c;
+				11'd120: cabac_init_mn = 16'h0b23;
+				11'd121: cabac_init_mn = 16'h0440;
+				11'd122: cabac_init_mn = 16'h013d;
+				11'd123: cabac_init_mn = 16'h0b23;
+				11'd124: cabac_init_mn = 16'h1219;
+				11'd125: cabac_init_mn = 16'h0c18;
+				11'd126: cabac_init_mn = 16'h0d1d;
+				11'd127: cabac_init_mn = 16'h0d24;
+				11'd128: cabac_init_mn = 16'hf65d;
+				11'd129: cabac_init_mn = 16'hf949;
+				11'd130: cabac_init_mn = 16'hfe49;
+				11'd131: cabac_init_mn = 16'h0d2e;
+				11'd132: cabac_init_mn = 16'h0931;
+				11'd133: cabac_init_mn = 16'hf964;
+				11'd134: cabac_init_mn = 16'h0935;
+				11'd135: cabac_init_mn = 16'h0235;
+				11'd136: cabac_init_mn = 16'h0535;
+				11'd137: cabac_init_mn = 16'hfe3d;
+				11'd138: cabac_init_mn = 16'h0038;
+				11'd139: cabac_init_mn = 16'h0038;
+				11'd140: cabac_init_mn = 16'hf33f;
+				11'd141: cabac_init_mn = 16'hfb3c;
+				11'd142: cabac_init_mn = 16'hff3e;
+				11'd143: cabac_init_mn = 16'h0439;
+				11'd144: cabac_init_mn = 16'hfa45;
+				11'd145: cabac_init_mn = 16'h0439;
+				11'd146: cabac_init_mn = 16'h0e27;
+				11'd147: cabac_init_mn = 16'h0433;
+				11'd148: cabac_init_mn = 16'h0d44;
+				11'd149: cabac_init_mn = 16'h0340;
+				11'd150: cabac_init_mn = 16'h013d;
+				11'd151: cabac_init_mn = 16'h093f;
+				11'd152: cabac_init_mn = 16'h0732;
+				11'd153: cabac_init_mn = 16'h1027;
+				11'd154: cabac_init_mn = 16'h052c;
+				11'd155: cabac_init_mn = 16'h0434;
+				11'd156: cabac_init_mn = 16'h0b30;
+				11'd157: cabac_init_mn = 16'hfb3c;
+				11'd158: cabac_init_mn = 16'hff3b;
+				11'd159: cabac_init_mn = 16'h003b;
+				11'd160: cabac_init_mn = 16'h1621;
+				11'd161: cabac_init_mn = 16'h052c;
+				11'd162: cabac_init_mn = 16'h0e2b;
+				11'd163: cabac_init_mn = 16'hff4e;
+				11'd164: cabac_init_mn = 16'h003c;
+				11'd165: cabac_init_mn = 16'h0945;
+				11'd166: cabac_init_mn = 16'h0b1c;
+				11'd167: cabac_init_mn = 16'h0228;
+				11'd168: cabac_init_mn = 16'h032c;
+				11'd169: cabac_init_mn = 16'h0031;
+				11'd170: cabac_init_mn = 16'h002e;
+				11'd171: cabac_init_mn = 16'h022c;
+				11'd172: cabac_init_mn = 16'h0233;
+				11'd173: cabac_init_mn = 16'h002f;
+				11'd174: cabac_init_mn = 16'h0427;
+				11'd175: cabac_init_mn = 16'h023e;
+				11'd176: cabac_init_mn = 16'h062e;
+				11'd177: cabac_init_mn = 16'h0036;
+				11'd178: cabac_init_mn = 16'h0336;
+				11'd179: cabac_init_mn = 16'h023a;
+				11'd180: cabac_init_mn = 16'h043f;
+				11'd181: cabac_init_mn = 16'h0633;
+				11'd182: cabac_init_mn = 16'h0639;
+				11'd183: cabac_init_mn = 16'h0735;
+				11'd184: cabac_init_mn = 16'h0634;
+				11'd185: cabac_init_mn = 16'h0637;
+				11'd186: cabac_init_mn = 16'h0b2d;
+				11'd187: cabac_init_mn = 16'h0e24;
+				11'd188: cabac_init_mn = 16'h0835;
+				11'd189: cabac_init_mn = 16'hff52;
+				11'd190: cabac_init_mn = 16'h0737;
+				11'd191: cabac_init_mn = 16'hfd4e;
+				11'd192: cabac_init_mn = 16'h0f2e;
+				11'd193: cabac_init_mn = 16'h161f;
+				11'd194: cabac_init_mn = 16'hff54;
+				11'd195: cabac_init_mn = 16'h1907;
+				11'd196: cabac_init_mn = 16'h1ef9;
+				11'd197: cabac_init_mn = 16'h1c03;
+				11'd198: cabac_init_mn = 16'h1c04;
+				11'd199: cabac_init_mn = 16'h2000;
+				11'd200: cabac_init_mn = 16'h22ff;
+				11'd201: cabac_init_mn = 16'h1e06;
+				11'd202: cabac_init_mn = 16'h1e06;
+				11'd203: cabac_init_mn = 16'h2009;
+				11'd204: cabac_init_mn = 16'h1f13;
+				11'd205: cabac_init_mn = 16'h1a1b;
+				11'd206: cabac_init_mn = 16'h1a1e;
+				11'd207: cabac_init_mn = 16'h2514;
+				11'd208: cabac_init_mn = 16'h1c22;
+				11'd209: cabac_init_mn = 16'h1146;
+				11'd210: cabac_init_mn = 16'h0143;
+				11'd211: cabac_init_mn = 16'h053b;
+				11'd212: cabac_init_mn = 16'h0943;
+				11'd213: cabac_init_mn = 16'h101e;
+				11'd214: cabac_init_mn = 16'h1220;
+				11'd215: cabac_init_mn = 16'h1223;
+				11'd216: cabac_init_mn = 16'h161d;
+				11'd217: cabac_init_mn = 16'h181f;
+				11'd218: cabac_init_mn = 16'h1726;
+				11'd219: cabac_init_mn = 16'h122b;
+				11'd220: cabac_init_mn = 16'h1429;
+				11'd221: cabac_init_mn = 16'h0b3f;
+				11'd222: cabac_init_mn = 16'h093b;
+				11'd223: cabac_init_mn = 16'h0940;
+				11'd224: cabac_init_mn = 16'hff5e;
+				11'd225: cabac_init_mn = 16'hfe59;
+				11'd226: cabac_init_mn = 16'hf76c;
+				11'd227: cabac_init_mn = 16'hfa4c;
+				11'd228: cabac_init_mn = 16'hfe2c;
+				11'd229: cabac_init_mn = 16'h002d;
+				11'd230: cabac_init_mn = 16'h0034;
+				11'd231: cabac_init_mn = 16'hfd40;
+				11'd232: cabac_init_mn = 16'hfe3b;
+				11'd233: cabac_init_mn = 16'hfc46;
+				11'd234: cabac_init_mn = 16'hfc4b;
+				11'd235: cabac_init_mn = 16'hf852;
+				11'd236: cabac_init_mn = 16'hef66;
+				11'd237: cabac_init_mn = 16'hf74d;
+				11'd238: cabac_init_mn = 16'h0318;
+				11'd239: cabac_init_mn = 16'h002a;
+				11'd240: cabac_init_mn = 16'h0030;
+				11'd241: cabac_init_mn = 16'h0037;
+				11'd242: cabac_init_mn = 16'hfa3b;
+				11'd243: cabac_init_mn = 16'hf947;
+				11'd244: cabac_init_mn = 16'hf453;
+				11'd245: cabac_init_mn = 16'hf557;
+				11'd246: cabac_init_mn = 16'he277;
+				11'd247: cabac_init_mn = 16'h013a;
+				11'd248: cabac_init_mn = 16'hfd1d;
+				11'd249: cabac_init_mn = 16'hff24;
+				11'd250: cabac_init_mn = 16'h0126;
+				11'd251: cabac_init_mn = 16'h022b;
+				11'd252: cabac_init_mn = 16'hfa37;
+				11'd253: cabac_init_mn = 16'h003a;
+				11'd254: cabac_init_mn = 16'h0040;
+				11'd255: cabac_init_mn = 16'hfd4a;
+				11'd256: cabac_init_mn = 16'hf65a;
+				11'd257: cabac_init_mn = 16'h0046;
+				11'd258: cabac_init_mn = 16'hfc1d;
+				11'd259: cabac_init_mn = 16'h051f;
+				11'd260: cabac_init_mn = 16'h072a;
+				11'd261: cabac_init_mn = 16'h013b;
+				11'd262: cabac_init_mn = 16'hfe3a;
+				11'd263: cabac_init_mn = 16'hfd48;
+				11'd264: cabac_init_mn = 16'hfd51;
+				11'd265: cabac_init_mn = 16'hf561;
+				11'd266: cabac_init_mn = 16'h003a;
+				11'd267: cabac_init_mn = 16'h0805;
+				11'd268: cabac_init_mn = 16'h0a0e;
+				11'd269: cabac_init_mn = 16'h0e12;
+				11'd270: cabac_init_mn = 16'h0d1b;
+				11'd271: cabac_init_mn = 16'h0228;
+				11'd272: cabac_init_mn = 16'h003a;
+				11'd273: cabac_init_mn = 16'hfd46;
+				11'd274: cabac_init_mn = 16'hfa4f;
+				11'd275: cabac_init_mn = 16'hf855;
+				11'd276: cabac_init_mn = 16'h0000;
+				11'd277: cabac_init_mn = 16'hf36a;
+				11'd278: cabac_init_mn = 16'hf06a;
+				11'd279: cabac_init_mn = 16'hf657;
+				11'd280: cabac_init_mn = 16'heb72;
+				11'd281: cabac_init_mn = 16'hee6e;
+				11'd282: cabac_init_mn = 16'hf262;
+				11'd283: cabac_init_mn = 16'hea6e;
+				11'd284: cabac_init_mn = 16'heb6a;
+				11'd285: cabac_init_mn = 16'hee67;
+				11'd286: cabac_init_mn = 16'heb6b;
+				11'd287: cabac_init_mn = 16'he96c;
+				11'd288: cabac_init_mn = 16'he670;
+				11'd289: cabac_init_mn = 16'hf660;
+				11'd290: cabac_init_mn = 16'hf45f;
+				11'd291: cabac_init_mn = 16'hfb5b;
+				11'd292: cabac_init_mn = 16'hf75d;
+				11'd293: cabac_init_mn = 16'hea5e;
+				11'd294: cabac_init_mn = 16'hfb56;
+				11'd295: cabac_init_mn = 16'h0943;
+				11'd296: cabac_init_mn = 16'hfc50;
+				11'd297: cabac_init_mn = 16'hf655;
+				11'd298: cabac_init_mn = 16'hff46;
+				11'd299: cabac_init_mn = 16'h073c;
+				11'd300: cabac_init_mn = 16'h093a;
+				11'd301: cabac_init_mn = 16'h053d;
+				11'd302: cabac_init_mn = 16'h0c32;
+				11'd303: cabac_init_mn = 16'h0f32;
+				11'd304: cabac_init_mn = 16'h1231;
+				11'd305: cabac_init_mn = 16'h1136;
+				11'd306: cabac_init_mn = 16'h0a29;
+				11'd307: cabac_init_mn = 16'h072e;
+				11'd308: cabac_init_mn = 16'hff33;
+				11'd309: cabac_init_mn = 16'h0731;
+				11'd310: cabac_init_mn = 16'h0834;
+				11'd311: cabac_init_mn = 16'h0929;
+				11'd312: cabac_init_mn = 16'h062f;
+				11'd313: cabac_init_mn = 16'h0237;
+				11'd314: cabac_init_mn = 16'h0d29;
+				11'd315: cabac_init_mn = 16'h0a2c;
+				11'd316: cabac_init_mn = 16'h0632;
+				11'd317: cabac_init_mn = 16'h0535;
+				11'd318: cabac_init_mn = 16'h0d31;
+				11'd319: cabac_init_mn = 16'h043f;
+				11'd320: cabac_init_mn = 16'h0640;
+				11'd321: cabac_init_mn = 16'hfe45;
+				11'd322: cabac_init_mn = 16'hfe3b;
+				11'd323: cabac_init_mn = 16'h0646;
+				11'd324: cabac_init_mn = 16'h0a2c;
+				11'd325: cabac_init_mn = 16'h091f;
+				11'd326: cabac_init_mn = 16'h0c2b;
+				11'd327: cabac_init_mn = 16'h0335;
+				11'd328: cabac_init_mn = 16'h0e22;
+				11'd329: cabac_init_mn = 16'h0a26;
+				11'd330: cabac_init_mn = 16'hfd34;
+				11'd331: cabac_init_mn = 16'h0d28;
+				11'd332: cabac_init_mn = 16'h1120;
+				11'd333: cabac_init_mn = 16'h072c;
+				11'd334: cabac_init_mn = 16'h0726;
+				11'd335: cabac_init_mn = 16'h0d32;
+				11'd336: cabac_init_mn = 16'h0a39;
+				11'd337: cabac_init_mn = 16'h1a2b;
+				11'd338: cabac_init_mn = 16'h0e0b;
+				11'd339: cabac_init_mn = 16'h0b0e;
+				11'd340: cabac_init_mn = 16'h090b;
+				11'd341: cabac_init_mn = 16'h120b;
+				11'd342: cabac_init_mn = 16'h1509;
+				11'd343: cabac_init_mn = 16'h17fe;
+				11'd344: cabac_init_mn = 16'h20f1;
+				11'd345: cabac_init_mn = 16'h20f1;
+				11'd346: cabac_init_mn = 16'h22eb;
+				11'd347: cabac_init_mn = 16'h27e9;
+				11'd348: cabac_init_mn = 16'h2adf;
+				11'd349: cabac_init_mn = 16'h29e1;
+				11'd350: cabac_init_mn = 16'h2ee4;
+				11'd351: cabac_init_mn = 16'h26f4;
+				11'd352: cabac_init_mn = 16'h151d;
+				11'd353: cabac_init_mn = 16'h2de8;
+				11'd354: cabac_init_mn = 16'h35d3;
+				11'd355: cabac_init_mn = 16'h30e6;
+				11'd356: cabac_init_mn = 16'h41d5;
+				11'd357: cabac_init_mn = 16'h2bed;
+				11'd358: cabac_init_mn = 16'h27f6;
+				11'd359: cabac_init_mn = 16'h1e09;
+				11'd360: cabac_init_mn = 16'h121a;
+				11'd361: cabac_init_mn = 16'h141b;
+				11'd362: cabac_init_mn = 16'h0039;
+				11'd363: cabac_init_mn = 16'hf252;
+				11'd364: cabac_init_mn = 16'hfb4b;
+				11'd365: cabac_init_mn = 16'hed61;
+				11'd366: cabac_init_mn = 16'hdd7d;
+				11'd367: cabac_init_mn = 16'h1b00;
+				11'd368: cabac_init_mn = 16'h1c00;
+				11'd369: cabac_init_mn = 16'h1ffc;
+				11'd370: cabac_init_mn = 16'h1b06;
+				11'd371: cabac_init_mn = 16'h2208;
+				11'd372: cabac_init_mn = 16'h1e0a;
+				11'd373: cabac_init_mn = 16'h1816;
+				11'd374: cabac_init_mn = 16'h2113;
+				11'd375: cabac_init_mn = 16'h1620;
+				11'd376: cabac_init_mn = 16'h1a1f;
+				11'd377: cabac_init_mn = 16'h1529;
+				11'd378: cabac_init_mn = 16'h1a2c;
+				11'd379: cabac_init_mn = 16'h172f;
+				11'd380: cabac_init_mn = 16'h1041;
+				11'd381: cabac_init_mn = 16'h0e47;
+				11'd382: cabac_init_mn = 16'h083c;
+				11'd383: cabac_init_mn = 16'h063f;
+				11'd384: cabac_init_mn = 16'h1141;
+				11'd385: cabac_init_mn = 16'h1518;
+				11'd386: cabac_init_mn = 16'h1714;
+				11'd387: cabac_init_mn = 16'h1a17;
+				11'd388: cabac_init_mn = 16'h1b20;
+				11'd389: cabac_init_mn = 16'h1c17;
+				11'd390: cabac_init_mn = 16'h1c18;
+				11'd391: cabac_init_mn = 16'h1728;
+				11'd392: cabac_init_mn = 16'h1820;
+				11'd393: cabac_init_mn = 16'h1c1d;
+				11'd394: cabac_init_mn = 16'h172a;
+				11'd395: cabac_init_mn = 16'h1339;
+				11'd396: cabac_init_mn = 16'h1635;
+				11'd397: cabac_init_mn = 16'h163d;
+				11'd398: cabac_init_mn = 16'h0b56;
+				11'd399: cabac_init_mn = 16'h0c28;
+				11'd400: cabac_init_mn = 16'h0b33;
+				11'd401: cabac_init_mn = 16'h0e3b;
+				11'd402: cabac_init_mn = 16'hfc4f;
+				11'd403: cabac_init_mn = 16'hf947;
+				11'd404: cabac_init_mn = 16'hfb45;
+				11'd405: cabac_init_mn = 16'hf746;
+				11'd406: cabac_init_mn = 16'hf842;
+				11'd407: cabac_init_mn = 16'hf644;
+				11'd408: cabac_init_mn = 16'hed49;
+				11'd409: cabac_init_mn = 16'hf445;
+				11'd410: cabac_init_mn = 16'hf046;
+				11'd411: cabac_init_mn = 16'hf143;
+				11'd412: cabac_init_mn = 16'hec3e;
+				11'd413: cabac_init_mn = 16'hed46;
+				11'd414: cabac_init_mn = 16'hf042;
+				11'd415: cabac_init_mn = 16'hea41;
+				11'd416: cabac_init_mn = 16'hec3f;
+				11'd417: cabac_init_mn = 16'h09fe;
+				11'd418: cabac_init_mn = 16'h1af7;
+				11'd419: cabac_init_mn = 16'h21f7;
+				11'd420: cabac_init_mn = 16'h27f9;
+				11'd421: cabac_init_mn = 16'h29fe;
+				11'd422: cabac_init_mn = 16'h2d03;
+				11'd423: cabac_init_mn = 16'h3109;
+				11'd424: cabac_init_mn = 16'h2d1b;
+				11'd425: cabac_init_mn = 16'h243b;
+				11'd426: cabac_init_mn = 16'hfa42;
+				11'd427: cabac_init_mn = 16'hf923;
+				11'd428: cabac_init_mn = 16'hf92a;
+				11'd429: cabac_init_mn = 16'hf82d;
+				11'd430: cabac_init_mn = 16'hfb30;
+				11'd431: cabac_init_mn = 16'hf438;
+				11'd432: cabac_init_mn = 16'hfa3c;
+				11'd433: cabac_init_mn = 16'hfb3e;
+				11'd434: cabac_init_mn = 16'hf842;
+				11'd435: cabac_init_mn = 16'hf84c;
+				11'd512: cabac_init_mn = 16'h14f1;
+				11'd513: cabac_init_mn = 16'h0236;
+				11'd514: cabac_init_mn = 16'h034a;
+				11'd515: cabac_init_mn = 16'h14f1;
+				11'd516: cabac_init_mn = 16'h0236;
+				11'd517: cabac_init_mn = 16'h034a;
+				11'd518: cabac_init_mn = 16'he47f;
+				11'd519: cabac_init_mn = 16'he968;
+				11'd520: cabac_init_mn = 16'hfa35;
+				11'd521: cabac_init_mn = 16'hff36;
+				11'd522: cabac_init_mn = 16'h0733;
+				11'd523: cabac_init_mn = 16'h1619;
+				11'd524: cabac_init_mn = 16'h2200;
+				11'd525: cabac_init_mn = 16'h1000;
+				11'd526: cabac_init_mn = 16'hfe09;
+				11'd527: cabac_init_mn = 16'h0429;
+				11'd528: cabac_init_mn = 16'he376;
+				11'd529: cabac_init_mn = 16'h0241;
+				11'd530: cabac_init_mn = 16'hfa47;
+				11'd531: cabac_init_mn = 16'hf34f;
+				11'd532: cabac_init_mn = 16'h0534;
+				11'd533: cabac_init_mn = 16'h0932;
+				11'd534: cabac_init_mn = 16'hfd46;
+				11'd535: cabac_init_mn = 16'h0a36;
+				11'd536: cabac_init_mn = 16'h1a22;
+				11'd537: cabac_init_mn = 16'h1316;
+				11'd538: cabac_init_mn = 16'h2800;
+				11'd539: cabac_init_mn = 16'h3902;
+				11'd540: cabac_init_mn = 16'h2924;
+				11'd541: cabac_init_mn = 16'h1a45;
+				11'd542: cabac_init_mn = 16'hd37f;
+				11'd543: cabac_init_mn = 16'hf165;
+				11'd544: cabac_init_mn = 16'hfc4c;
+				11'd545: cabac_init_mn = 16'hfa47;
+				11'd546: cabac_init_mn = 16'hf34f;
+				11'd547: cabac_init_mn = 16'h0534;
+				11'd548: cabac_init_mn = 16'h0645;
+				11'd549: cabac_init_mn = 16'hf35a;
+				11'd550: cabac_init_mn = 16'h0034;
+				11'd551: cabac_init_mn = 16'h082b;
+				11'd552: cabac_init_mn = 16'hfe45;
+				11'd553: cabac_init_mn = 16'hfb52;
+				11'd554: cabac_init_mn = 16'hf660;
+				11'd555: cabac_init_mn = 16'h023b;
+				11'd556: cabac_init_mn = 16'h024b;
+				11'd557: cabac_init_mn = 16'hfd57;
+				11'd558: cabac_init_mn = 16'hfd64;
+				11'd559: cabac_init_mn = 16'h0138;
+				11'd560: cabac_init_mn = 16'hfd4a;
+				11'd561: cabac_init_mn = 16'hfa55;
+				11'd562: cabac_init_mn = 16'h003b;
+				11'd563: cabac_init_mn = 16'hfd51;
+				11'd564: cabac_init_mn = 16'hf956;
+				11'd565: cabac_init_mn = 16'hfb5f;
+				11'd566: cabac_init_mn = 16'hff42;
+				11'd567: cabac_init_mn = 16'hff4d;
+				11'd568: cabac_init_mn = 16'h0146;
+				11'd569: cabac_init_mn = 16'hfe56;
+				11'd570: cabac_init_mn = 16'hfb48;
+				11'd571: cabac_init_mn = 16'h003d;
+				11'd572: cabac_init_mn = 16'h0029;
+				11'd573: cabac_init_mn = 16'h003f;
+				11'd574: cabac_init_mn = 16'h003f;
+				11'd575: cabac_init_mn = 16'h003f;
+				11'd576: cabac_init_mn = 16'hf753;
+				11'd577: cabac_init_mn = 16'h0456;
+				11'd578: cabac_init_mn = 16'h0061;
+				11'd579: cabac_init_mn = 16'hf948;
+				11'd580: cabac_init_mn = 16'h0d29;
+				11'd581: cabac_init_mn = 16'h033e;
+				11'd582: cabac_init_mn = 16'h0d0f;
+				11'd583: cabac_init_mn = 16'h0733;
+				11'd584: cabac_init_mn = 16'h0250;
+				11'd585: cabac_init_mn = 16'hd97f;
+				11'd586: cabac_init_mn = 16'hee5b;
+				11'd587: cabac_init_mn = 16'hef60;
+				11'd588: cabac_init_mn = 16'he651;
+				11'd589: cabac_init_mn = 16'hdd62;
+				11'd590: cabac_init_mn = 16'he866;
+				11'd591: cabac_init_mn = 16'he961;
+				11'd592: cabac_init_mn = 16'he577;
+				11'd593: cabac_init_mn = 16'he863;
+				11'd594: cabac_init_mn = 16'heb6e;
+				11'd595: cabac_init_mn = 16'hee66;
+				11'd596: cabac_init_mn = 16'hdc7f;
+				11'd597: cabac_init_mn = 16'h0050;
+				11'd598: cabac_init_mn = 16'hfb59;
+				11'd599: cabac_init_mn = 16'hf95e;
+				11'd600: cabac_init_mn = 16'hfc5c;
+				11'd601: cabac_init_mn = 16'h0027;
+				11'd602: cabac_init_mn = 16'h0041;
+				11'd603: cabac_init_mn = 16'hf154;
+				11'd604: cabac_init_mn = 16'hdd7f;
+				11'd605: cabac_init_mn = 16'hfe49;
+				11'd606: cabac_init_mn = 16'hf468;
+				11'd607: cabac_init_mn = 16'hf75b;
+				11'd608: cabac_init_mn = 16'he17f;
+				11'd609: cabac_init_mn = 16'h0337;
+				11'd610: cabac_init_mn = 16'h0738;
+				11'd611: cabac_init_mn = 16'h0737;
+				11'd612: cabac_init_mn = 16'h083d;
+				11'd613: cabac_init_mn = 16'hfd35;
+				11'd614: cabac_init_mn = 16'h0044;
+				11'd615: cabac_init_mn = 16'hf94a;
+				11'd616: cabac_init_mn = 16'hf758;
+				11'd617: cabac_init_mn = 16'hf367;
+				11'd618: cabac_init_mn = 16'hf35b;
+				11'd619: cabac_init_mn = 16'hf759;
+				11'd620: cabac_init_mn = 16'hf25c;
+				11'd621: cabac_init_mn = 16'hf84c;
+				11'd622: cabac_init_mn = 16'hf457;
+				11'd623: cabac_init_mn = 16'he96e;
+				11'd624: cabac_init_mn = 16'he869;
+				11'd625: cabac_init_mn = 16'hf64e;
+				11'd626: cabac_init_mn = 16'hec70;
+				11'd627: cabac_init_mn = 16'hef63;
+				11'd628: cabac_init_mn = 16'hb27f;
+				11'd629: cabac_init_mn = 16'hba7f;
+				11'd630: cabac_init_mn = 16'hce7f;
+				11'd631: cabac_init_mn = 16'hd27f;
+				11'd632: cabac_init_mn = 16'hfc42;
+				11'd633: cabac_init_mn = 16'hfb4e;
+				11'd634: cabac_init_mn = 16'hfc47;
+				11'd635: cabac_init_mn = 16'hf848;
+				11'd636: cabac_init_mn = 16'h023b;
+				11'd637: cabac_init_mn = 16'hff37;
+				11'd638: cabac_init_mn = 16'hf946;
+				11'd639: cabac_init_mn = 16'hfa4b;
+				11'd640: cabac_init_mn = 16'hf859;
+				11'd641: cabac_init_mn = 16'hde77;
+				11'd642: cabac_init_mn = 16'hfd4b;
+				11'd643: cabac_init_mn = 16'h2014;
+				11'd644: cabac_init_mn = 16'h1e16;
+				11'd645: cabac_init_mn = 16'hd47f;
+				11'd646: cabac_init_mn = 16'h0036;
+				11'd647: cabac_init_mn = 16'hfb3d;
+				11'd648: cabac_init_mn = 16'h003a;
+				11'd649: cabac_init_mn = 16'hff3c;
+				11'd650: cabac_init_mn = 16'hfd3d;
+				11'd651: cabac_init_mn = 16'hf843;
+				11'd652: cabac_init_mn = 16'he754;
+				11'd653: cabac_init_mn = 16'hf24a;
+				11'd654: cabac_init_mn = 16'hfb41;
+				11'd655: cabac_init_mn = 16'h0534;
+				11'd656: cabac_init_mn = 16'h0239;
+				11'd657: cabac_init_mn = 16'h003d;
+				11'd658: cabac_init_mn = 16'hf745;
+				11'd659: cabac_init_mn = 16'hf546;
+				11'd660: cabac_init_mn = 16'h1237;
+				11'd661: cabac_init_mn = 16'hfc47;
+				11'd662: cabac_init_mn = 16'h003a;
+				11'd663: cabac_init_mn = 16'h073d;
+				11'd664: cabac_init_mn = 16'h0929;
+				11'd665: cabac_init_mn = 16'h1219;
+				11'd666: cabac_init_mn = 16'h0920;
+				11'd667: cabac_init_mn = 16'h052b;
+				11'd668: cabac_init_mn = 16'h092f;
+				11'd669: cabac_init_mn = 16'h002c;
+				11'd670: cabac_init_mn = 16'h0033;
+				11'd671: cabac_init_mn = 16'h022e;
+				11'd672: cabac_init_mn = 16'h1326;
+				11'd673: cabac_init_mn = 16'hfc42;
+				11'd674: cabac_init_mn = 16'h0f26;
+				11'd675: cabac_init_mn = 16'h0c2a;
+				11'd676: cabac_init_mn = 16'h0922;
+				11'd677: cabac_init_mn = 16'h0059;
+				11'd678: cabac_init_mn = 16'h042d;
+				11'd679: cabac_init_mn = 16'h0a1c;
+				11'd680: cabac_init_mn = 16'h0a1f;
+				11'd681: cabac_init_mn = 16'h21f5;
+				11'd682: cabac_init_mn = 16'h34d5;
+				11'd683: cabac_init_mn = 16'h120f;
+				11'd684: cabac_init_mn = 16'h1c00;
+				11'd685: cabac_init_mn = 16'h23ea;
+				11'd686: cabac_init_mn = 16'h26e7;
+				11'd687: cabac_init_mn = 16'h2200;
+				11'd688: cabac_init_mn = 16'h27ee;
+				11'd689: cabac_init_mn = 16'h20f4;
+				11'd690: cabac_init_mn = 16'h66a2;
+				11'd691: cabac_init_mn = 16'h0000;
+				11'd692: cabac_init_mn = 16'h38f1;
+				11'd693: cabac_init_mn = 16'h21fc;
+				11'd694: cabac_init_mn = 16'h1d0a;
+				11'd695: cabac_init_mn = 16'h25fb;
+				11'd696: cabac_init_mn = 16'h33e3;
+				11'd697: cabac_init_mn = 16'h27f7;
+				11'd698: cabac_init_mn = 16'h34de;
+				11'd699: cabac_init_mn = 16'h45c6;
+				11'd700: cabac_init_mn = 16'h43c1;
+				11'd701: cabac_init_mn = 16'h2cfb;
+				11'd702: cabac_init_mn = 16'h2007;
+				11'd703: cabac_init_mn = 16'h37e3;
+				11'd704: cabac_init_mn = 16'h2001;
+				11'd705: cabac_init_mn = 16'h0000;
+				11'd706: cabac_init_mn = 16'h1b24;
+				11'd707: cabac_init_mn = 16'h21e7;
+				11'd708: cabac_init_mn = 16'h22e2;
+				11'd709: cabac_init_mn = 16'h24e4;
+				11'd710: cabac_init_mn = 16'h26e4;
+				11'd711: cabac_init_mn = 16'h26e5;
+				11'd712: cabac_init_mn = 16'h22ee;
+				11'd713: cabac_init_mn = 16'h23f0;
+				11'd714: cabac_init_mn = 16'h22f2;
+				11'd715: cabac_init_mn = 16'h20f8;
+				11'd716: cabac_init_mn = 16'h25fa;
+				11'd717: cabac_init_mn = 16'h2300;
+				11'd718: cabac_init_mn = 16'h1e0a;
+				11'd719: cabac_init_mn = 16'h1c12;
+				11'd720: cabac_init_mn = 16'h1a19;
+				11'd721: cabac_init_mn = 16'h1d29;
+				11'd722: cabac_init_mn = 16'h004b;
+				11'd723: cabac_init_mn = 16'h0248;
+				11'd724: cabac_init_mn = 16'h084d;
+				11'd725: cabac_init_mn = 16'h0e23;
+				11'd726: cabac_init_mn = 16'h121f;
+				11'd727: cabac_init_mn = 16'h1123;
+				11'd728: cabac_init_mn = 16'h151e;
+				11'd729: cabac_init_mn = 16'h112d;
+				11'd730: cabac_init_mn = 16'h142a;
+				11'd731: cabac_init_mn = 16'h122d;
+				11'd732: cabac_init_mn = 16'h1b1a;
+				11'd733: cabac_init_mn = 16'h1036;
+				11'd734: cabac_init_mn = 16'h0742;
+				11'd735: cabac_init_mn = 16'h1038;
+				11'd736: cabac_init_mn = 16'h0b49;
+				11'd737: cabac_init_mn = 16'h0a43;
+				11'd738: cabac_init_mn = 16'hf674;
+				11'd739: cabac_init_mn = 16'he970;
+				11'd740: cabac_init_mn = 16'hf147;
+				11'd741: cabac_init_mn = 16'hf93d;
+				11'd742: cabac_init_mn = 16'h0035;
+				11'd743: cabac_init_mn = 16'hfb42;
+				11'd744: cabac_init_mn = 16'hf54d;
+				11'd745: cabac_init_mn = 16'hf750;
+				11'd746: cabac_init_mn = 16'hf754;
+				11'd747: cabac_init_mn = 16'hf657;
+				11'd748: cabac_init_mn = 16'hde7f;
+				11'd749: cabac_init_mn = 16'heb65;
+				11'd750: cabac_init_mn = 16'hfd27;
+				11'd751: cabac_init_mn = 16'hfb35;
+				11'd752: cabac_init_mn = 16'hf93d;
+				11'd753: cabac_init_mn = 16'hf54b;
+				11'd754: cabac_init_mn = 16'hf14d;
+				11'd755: cabac_init_mn = 16'hef5b;
+				11'd756: cabac_init_mn = 16'he76b;
+				11'd757: cabac_init_mn = 16'he76f;
+				11'd758: cabac_init_mn = 16'he47a;
+				11'd759: cabac_init_mn = 16'hf54c;
+				11'd760: cabac_init_mn = 16'hf62c;
+				11'd761: cabac_init_mn = 16'hf634;
+				11'd762: cabac_init_mn = 16'hf639;
+				11'd763: cabac_init_mn = 16'hf73a;
+				11'd764: cabac_init_mn = 16'hf048;
+				11'd765: cabac_init_mn = 16'hf945;
+				11'd766: cabac_init_mn = 16'hfc45;
+				11'd767: cabac_init_mn = 16'hfb4a;
+				11'd768: cabac_init_mn = 16'hf756;
+				11'd769: cabac_init_mn = 16'h0242;
+				11'd770: cabac_init_mn = 16'hf722;
+				11'd771: cabac_init_mn = 16'h0120;
+				11'd772: cabac_init_mn = 16'h0b1f;
+				11'd773: cabac_init_mn = 16'h0534;
+				11'd774: cabac_init_mn = 16'hfe37;
+				11'd775: cabac_init_mn = 16'hfe43;
+				11'd776: cabac_init_mn = 16'h0049;
+				11'd777: cabac_init_mn = 16'hf859;
+				11'd778: cabac_init_mn = 16'h0334;
+				11'd779: cabac_init_mn = 16'h0704;
+				11'd780: cabac_init_mn = 16'h0a08;
+				11'd781: cabac_init_mn = 16'h1108;
+				11'd782: cabac_init_mn = 16'h1013;
+				11'd783: cabac_init_mn = 16'h0325;
+				11'd784: cabac_init_mn = 16'hff3d;
+				11'd785: cabac_init_mn = 16'hfb49;
+				11'd786: cabac_init_mn = 16'hff46;
+				11'd787: cabac_init_mn = 16'hfc4e;
+				11'd788: cabac_init_mn = 16'h0000;
+				11'd789: cabac_init_mn = 16'heb7e;
+				11'd790: cabac_init_mn = 16'he97c;
+				11'd791: cabac_init_mn = 16'hec6e;
+				11'd792: cabac_init_mn = 16'he67e;
+				11'd793: cabac_init_mn = 16'he77c;
+				11'd794: cabac_init_mn = 16'hef69;
+				11'd795: cabac_init_mn = 16'he579;
+				11'd796: cabac_init_mn = 16'he575;
+				11'd797: cabac_init_mn = 16'hef66;
+				11'd798: cabac_init_mn = 16'he675;
+				11'd799: cabac_init_mn = 16'he574;
+				11'd800: cabac_init_mn = 16'hdf7a;
+				11'd801: cabac_init_mn = 16'hf65f;
+				11'd802: cabac_init_mn = 16'hf264;
+				11'd803: cabac_init_mn = 16'hf85f;
+				11'd804: cabac_init_mn = 16'hef6f;
+				11'd805: cabac_init_mn = 16'he472;
+				11'd806: cabac_init_mn = 16'hfa59;
+				11'd807: cabac_init_mn = 16'hfe50;
+				11'd808: cabac_init_mn = 16'hfc52;
+				11'd809: cabac_init_mn = 16'hf755;
+				11'd810: cabac_init_mn = 16'hf851;
+				11'd811: cabac_init_mn = 16'hff48;
+				11'd812: cabac_init_mn = 16'h0540;
+				11'd813: cabac_init_mn = 16'h0143;
+				11'd814: cabac_init_mn = 16'h0938;
+				11'd815: cabac_init_mn = 16'h0045;
+				11'd816: cabac_init_mn = 16'h0145;
+				11'd817: cabac_init_mn = 16'h0745;
+				11'd818: cabac_init_mn = 16'hf945;
+				11'd819: cabac_init_mn = 16'hfa43;
+				11'd820: cabac_init_mn = 16'hf04d;
+				11'd821: cabac_init_mn = 16'hfe40;
+				11'd822: cabac_init_mn = 16'h023d;
+				11'd823: cabac_init_mn = 16'hfa43;
+				11'd824: cabac_init_mn = 16'hfd40;
+				11'd825: cabac_init_mn = 16'h0239;
+				11'd826: cabac_init_mn = 16'hfd41;
+				11'd827: cabac_init_mn = 16'hfd42;
+				11'd828: cabac_init_mn = 16'h003e;
+				11'd829: cabac_init_mn = 16'h0933;
+				11'd830: cabac_init_mn = 16'hff42;
+				11'd831: cabac_init_mn = 16'hfe47;
+				11'd832: cabac_init_mn = 16'hfe4b;
+				11'd833: cabac_init_mn = 16'hff46;
+				11'd834: cabac_init_mn = 16'hf748;
+				11'd835: cabac_init_mn = 16'h0e3c;
+				11'd836: cabac_init_mn = 16'h1025;
+				11'd837: cabac_init_mn = 16'h002f;
+				11'd838: cabac_init_mn = 16'h1223;
+				11'd839: cabac_init_mn = 16'h0b25;
+				11'd840: cabac_init_mn = 16'h0c29;
+				11'd841: cabac_init_mn = 16'h0a29;
+				11'd842: cabac_init_mn = 16'h0230;
+				11'd843: cabac_init_mn = 16'h0c29;
+				11'd844: cabac_init_mn = 16'h0d29;
+				11'd845: cabac_init_mn = 16'h003b;
+				11'd846: cabac_init_mn = 16'h0332;
+				11'd847: cabac_init_mn = 16'h1328;
+				11'd848: cabac_init_mn = 16'h0342;
+				11'd849: cabac_init_mn = 16'h1232;
+				11'd850: cabac_init_mn = 16'h13fa;
+				11'd851: cabac_init_mn = 16'h12fa;
+				11'd852: cabac_init_mn = 16'h0e00;
+				11'd853: cabac_init_mn = 16'h1af4;
+				11'd854: cabac_init_mn = 16'h1ff0;
+				11'd855: cabac_init_mn = 16'h21e7;
+				11'd856: cabac_init_mn = 16'h21ea;
+				11'd857: cabac_init_mn = 16'h25e4;
+				11'd858: cabac_init_mn = 16'h27e2;
+				11'd859: cabac_init_mn = 16'h2ae2;
+				11'd860: cabac_init_mn = 16'h2fd6;
+				11'd861: cabac_init_mn = 16'h2ddc;
+				11'd862: cabac_init_mn = 16'h31de;
+				11'd863: cabac_init_mn = 16'h29ef;
+				11'd864: cabac_init_mn = 16'h2009;
+				11'd865: cabac_init_mn = 16'h45b9;
+				11'd866: cabac_init_mn = 16'h3fc1;
+				11'd867: cabac_init_mn = 16'h42c0;
+				11'd868: cabac_init_mn = 16'h4db6;
+				11'd869: cabac_init_mn = 16'h36d9;
+				11'd870: cabac_init_mn = 16'h34dd;
+				11'd871: cabac_init_mn = 16'h29f6;
+				11'd872: cabac_init_mn = 16'h2400;
+				11'd873: cabac_init_mn = 16'h28ff;
+				11'd874: cabac_init_mn = 16'h1e0e;
+				11'd875: cabac_init_mn = 16'h1c1a;
+				11'd876: cabac_init_mn = 16'h1725;
+				11'd877: cabac_init_mn = 16'h0c37;
+				11'd878: cabac_init_mn = 16'h0b41;
+				11'd879: cabac_init_mn = 16'h25df;
+				11'd880: cabac_init_mn = 16'h27dc;
+				11'd881: cabac_init_mn = 16'h28db;
+				11'd882: cabac_init_mn = 16'h26e2;
+				11'd883: cabac_init_mn = 16'h2edf;
+				11'd884: cabac_init_mn = 16'h2ae2;
+				11'd885: cabac_init_mn = 16'h28e8;
+				11'd886: cabac_init_mn = 16'h31e3;
+				11'd887: cabac_init_mn = 16'h26f4;
+				11'd888: cabac_init_mn = 16'h28f6;
+				11'd889: cabac_init_mn = 16'h26fd;
+				11'd890: cabac_init_mn = 16'h2efb;
+				11'd891: cabac_init_mn = 16'h1f14;
+				11'd892: cabac_init_mn = 16'h1d1e;
+				11'd893: cabac_init_mn = 16'h192c;
+				11'd894: cabac_init_mn = 16'h0c30;
+				11'd895: cabac_init_mn = 16'h0b31;
+				11'd896: cabac_init_mn = 16'h1a2d;
+				11'd897: cabac_init_mn = 16'h1616;
+				11'd898: cabac_init_mn = 16'h1716;
+				11'd899: cabac_init_mn = 16'h1b15;
+				11'd900: cabac_init_mn = 16'h2114;
+				11'd901: cabac_init_mn = 16'h1a1c;
+				11'd902: cabac_init_mn = 16'h1e18;
+				11'd903: cabac_init_mn = 16'h1b22;
+				11'd904: cabac_init_mn = 16'h122a;
+				11'd905: cabac_init_mn = 16'h1927;
+				11'd906: cabac_init_mn = 16'h1232;
+				11'd907: cabac_init_mn = 16'h0c46;
+				11'd908: cabac_init_mn = 16'h1536;
+				11'd909: cabac_init_mn = 16'h0e47;
+				11'd910: cabac_init_mn = 16'h0b53;
+				11'd911: cabac_init_mn = 16'h1920;
+				11'd912: cabac_init_mn = 16'h1531;
+				11'd913: cabac_init_mn = 16'h1536;
+				11'd914: cabac_init_mn = 16'hfb55;
+				11'd915: cabac_init_mn = 16'hfa51;
+				11'd916: cabac_init_mn = 16'hf64d;
+				11'd917: cabac_init_mn = 16'hf951;
+				11'd918: cabac_init_mn = 16'hef50;
+				11'd919: cabac_init_mn = 16'hee49;
+				11'd920: cabac_init_mn = 16'hfc4a;
+				11'd921: cabac_init_mn = 16'hf653;
+				11'd922: cabac_init_mn = 16'hf747;
+				11'd923: cabac_init_mn = 16'hf743;
+				11'd924: cabac_init_mn = 16'hff3d;
+				11'd925: cabac_init_mn = 16'hf842;
+				11'd926: cabac_init_mn = 16'hf242;
+				11'd927: cabac_init_mn = 16'h003b;
+				11'd928: cabac_init_mn = 16'h023b;
+				11'd929: cabac_init_mn = 16'h11f6;
+				11'd930: cabac_init_mn = 16'h20f3;
+				11'd931: cabac_init_mn = 16'h2af7;
+				11'd932: cabac_init_mn = 16'h31fb;
+				11'd933: cabac_init_mn = 16'h3500;
+				11'd934: cabac_init_mn = 16'h4003;
+				11'd935: cabac_init_mn = 16'h440a;
+				11'd936: cabac_init_mn = 16'h421b;
+				11'd937: cabac_init_mn = 16'h2f39;
+				11'd938: cabac_init_mn = 16'hfb47;
+				11'd939: cabac_init_mn = 16'h0018;
+				11'd940: cabac_init_mn = 16'hff24;
+				11'd941: cabac_init_mn = 16'hfe2a;
+				11'd942: cabac_init_mn = 16'hfe34;
+				11'd943: cabac_init_mn = 16'hf739;
+				11'd944: cabac_init_mn = 16'hfa3f;
+				11'd945: cabac_init_mn = 16'hfc41;
+				11'd946: cabac_init_mn = 16'hfc43;
+				11'd947: cabac_init_mn = 16'hf952;
+				11'd1024: cabac_init_mn = 16'h14f1;
+				11'd1025: cabac_init_mn = 16'h0236;
+				11'd1026: cabac_init_mn = 16'h034a;
+				11'd1027: cabac_init_mn = 16'h14f1;
+				11'd1028: cabac_init_mn = 16'h0236;
+				11'd1029: cabac_init_mn = 16'h034a;
+				11'd1030: cabac_init_mn = 16'he47f;
+				11'd1031: cabac_init_mn = 16'he968;
+				11'd1032: cabac_init_mn = 16'hfa35;
+				11'd1033: cabac_init_mn = 16'hff36;
+				11'd1034: cabac_init_mn = 16'h0733;
+				11'd1035: cabac_init_mn = 16'h1d10;
+				11'd1036: cabac_init_mn = 16'h1900;
+				11'd1037: cabac_init_mn = 16'h0e00;
+				11'd1038: cabac_init_mn = 16'hf633;
+				11'd1039: cabac_init_mn = 16'hfd3e;
+				11'd1040: cabac_init_mn = 16'he563;
+				11'd1041: cabac_init_mn = 16'h1a10;
+				11'd1042: cabac_init_mn = 16'hfc55;
+				11'd1043: cabac_init_mn = 16'he866;
+				11'd1044: cabac_init_mn = 16'h0539;
+				11'd1045: cabac_init_mn = 16'h0639;
+				11'd1046: cabac_init_mn = 16'hef49;
+				11'd1047: cabac_init_mn = 16'h0e39;
+				11'd1048: cabac_init_mn = 16'h1428;
+				11'd1049: cabac_init_mn = 16'h140a;
+				11'd1050: cabac_init_mn = 16'h1d00;
+				11'd1051: cabac_init_mn = 16'h3600;
+				11'd1052: cabac_init_mn = 16'h252a;
+				11'd1053: cabac_init_mn = 16'h0c61;
+				11'd1054: cabac_init_mn = 16'he07f;
+				11'd1055: cabac_init_mn = 16'hea75;
+				11'd1056: cabac_init_mn = 16'hfe4a;
+				11'd1057: cabac_init_mn = 16'hfc55;
+				11'd1058: cabac_init_mn = 16'he866;
+				11'd1059: cabac_init_mn = 16'h0539;
+				11'd1060: cabac_init_mn = 16'hfa5d;
+				11'd1061: cabac_init_mn = 16'hf258;
+				11'd1062: cabac_init_mn = 16'hfa2c;
+				11'd1063: cabac_init_mn = 16'h0437;
+				11'd1064: cabac_init_mn = 16'hf559;
+				11'd1065: cabac_init_mn = 16'hf167;
+				11'd1066: cabac_init_mn = 16'heb74;
+				11'd1067: cabac_init_mn = 16'h1339;
+				11'd1068: cabac_init_mn = 16'h143a;
+				11'd1069: cabac_init_mn = 16'h0454;
+				11'd1070: cabac_init_mn = 16'h0660;
+				11'd1071: cabac_init_mn = 16'h013f;
+				11'd1072: cabac_init_mn = 16'hfb55;
+				11'd1073: cabac_init_mn = 16'hf36a;
+				11'd1074: cabac_init_mn = 16'h053f;
+				11'd1075: cabac_init_mn = 16'h064b;
+				11'd1076: cabac_init_mn = 16'hfd5a;
+				11'd1077: cabac_init_mn = 16'hff65;
+				11'd1078: cabac_init_mn = 16'h0337;
+				11'd1079: cabac_init_mn = 16'hfc4f;
+				11'd1080: cabac_init_mn = 16'hfe4b;
+				11'd1081: cabac_init_mn = 16'hf461;
+				11'd1082: cabac_init_mn = 16'hf932;
+				11'd1083: cabac_init_mn = 16'h013c;
+				11'd1084: cabac_init_mn = 16'h0029;
+				11'd1085: cabac_init_mn = 16'h003f;
+				11'd1086: cabac_init_mn = 16'h003f;
+				11'd1087: cabac_init_mn = 16'h003f;
+				11'd1088: cabac_init_mn = 16'hf753;
+				11'd1089: cabac_init_mn = 16'h0456;
+				11'd1090: cabac_init_mn = 16'h0061;
+				11'd1091: cabac_init_mn = 16'hf948;
+				11'd1092: cabac_init_mn = 16'h0d29;
+				11'd1093: cabac_init_mn = 16'h033e;
+				11'd1094: cabac_init_mn = 16'h0722;
+				11'd1095: cabac_init_mn = 16'hf758;
+				11'd1096: cabac_init_mn = 16'hec7f;
+				11'd1097: cabac_init_mn = 16'hdc7f;
+				11'd1098: cabac_init_mn = 16'hef5b;
+				11'd1099: cabac_init_mn = 16'hf25f;
+				11'd1100: cabac_init_mn = 16'he754;
+				11'd1101: cabac_init_mn = 16'he756;
+				11'd1102: cabac_init_mn = 16'hf459;
+				11'd1103: cabac_init_mn = 16'hef5b;
+				11'd1104: cabac_init_mn = 16'he17f;
+				11'd1105: cabac_init_mn = 16'hf24c;
+				11'd1106: cabac_init_mn = 16'hee67;
+				11'd1107: cabac_init_mn = 16'hf35a;
+				11'd1108: cabac_init_mn = 16'hdb7f;
+				11'd1109: cabac_init_mn = 16'h0b50;
+				11'd1110: cabac_init_mn = 16'h054c;
+				11'd1111: cabac_init_mn = 16'h0254;
+				11'd1112: cabac_init_mn = 16'h054e;
+				11'd1113: cabac_init_mn = 16'hfa37;
+				11'd1114: cabac_init_mn = 16'h043d;
+				11'd1115: cabac_init_mn = 16'hf253;
+				11'd1116: cabac_init_mn = 16'hdb7f;
+				11'd1117: cabac_init_mn = 16'hfb4f;
+				11'd1118: cabac_init_mn = 16'hf568;
+				11'd1119: cabac_init_mn = 16'hf55b;
+				11'd1120: cabac_init_mn = 16'he27f;
+				11'd1121: cabac_init_mn = 16'h0041;
+				11'd1122: cabac_init_mn = 16'hfe4f;
+				11'd1123: cabac_init_mn = 16'h0048;
+				11'd1124: cabac_init_mn = 16'hfc5c;
+				11'd1125: cabac_init_mn = 16'hfa38;
+				11'd1126: cabac_init_mn = 16'h0344;
+				11'd1127: cabac_init_mn = 16'hf847;
+				11'd1128: cabac_init_mn = 16'hf362;
+				11'd1129: cabac_init_mn = 16'hfc56;
+				11'd1130: cabac_init_mn = 16'hf458;
+				11'd1131: cabac_init_mn = 16'hfb52;
+				11'd1132: cabac_init_mn = 16'hfd48;
+				11'd1133: cabac_init_mn = 16'hfc43;
+				11'd1134: cabac_init_mn = 16'hf848;
+				11'd1135: cabac_init_mn = 16'hf059;
+				11'd1136: cabac_init_mn = 16'hf745;
+				11'd1137: cabac_init_mn = 16'hff3b;
+				11'd1138: cabac_init_mn = 16'h0542;
+				11'd1139: cabac_init_mn = 16'h0439;
+				11'd1140: cabac_init_mn = 16'hfc47;
+				11'd1141: cabac_init_mn = 16'hfe47;
+				11'd1142: cabac_init_mn = 16'h023a;
+				11'd1143: cabac_init_mn = 16'hff4a;
+				11'd1144: cabac_init_mn = 16'hfc2c;
+				11'd1145: cabac_init_mn = 16'hff45;
+				11'd1146: cabac_init_mn = 16'h003e;
+				11'd1147: cabac_init_mn = 16'hf933;
+				11'd1148: cabac_init_mn = 16'hfc2f;
+				11'd1149: cabac_init_mn = 16'hfa2a;
+				11'd1150: cabac_init_mn = 16'hfd29;
+				11'd1151: cabac_init_mn = 16'hfa35;
+				11'd1152: cabac_init_mn = 16'h084c;
+				11'd1153: cabac_init_mn = 16'hf74e;
+				11'd1154: cabac_init_mn = 16'hf553;
+				11'd1155: cabac_init_mn = 16'h0934;
+				11'd1156: cabac_init_mn = 16'h0043;
+				11'd1157: cabac_init_mn = 16'hfb5a;
+				11'd1158: cabac_init_mn = 16'h0143;
+				11'd1159: cabac_init_mn = 16'hf148;
+				11'd1160: cabac_init_mn = 16'hfb4b;
+				11'd1161: cabac_init_mn = 16'hf850;
+				11'd1162: cabac_init_mn = 16'heb53;
+				11'd1163: cabac_init_mn = 16'heb40;
+				11'd1164: cabac_init_mn = 16'hf31f;
+				11'd1165: cabac_init_mn = 16'he740;
+				11'd1166: cabac_init_mn = 16'he35e;
+				11'd1167: cabac_init_mn = 16'h094b;
+				11'd1168: cabac_init_mn = 16'h113f;
+				11'd1169: cabac_init_mn = 16'hf84a;
+				11'd1170: cabac_init_mn = 16'hfb23;
+				11'd1171: cabac_init_mn = 16'hfe1b;
+				11'd1172: cabac_init_mn = 16'h0d5b;
+				11'd1173: cabac_init_mn = 16'h0341;
+				11'd1174: cabac_init_mn = 16'hf945;
+				11'd1175: cabac_init_mn = 16'h084d;
+				11'd1176: cabac_init_mn = 16'hf642;
+				11'd1177: cabac_init_mn = 16'h033e;
+				11'd1178: cabac_init_mn = 16'hfd44;
+				11'd1179: cabac_init_mn = 16'hec51;
+				11'd1180: cabac_init_mn = 16'h001e;
+				11'd1181: cabac_init_mn = 16'h0107;
+				11'd1182: cabac_init_mn = 16'hfd17;
+				11'd1183: cabac_init_mn = 16'heb4a;
+				11'd1184: cabac_init_mn = 16'h1042;
+				11'd1185: cabac_init_mn = 16'he97c;
+				11'd1186: cabac_init_mn = 16'h1125;
+				11'd1187: cabac_init_mn = 16'h2cee;
+				11'd1188: cabac_init_mn = 16'h32de;
+				11'd1189: cabac_init_mn = 16'hea7f;
+				11'd1190: cabac_init_mn = 16'h0427;
+				11'd1191: cabac_init_mn = 16'h002a;
+				11'd1192: cabac_init_mn = 16'h0722;
+				11'd1193: cabac_init_mn = 16'h0b1d;
+				11'd1194: cabac_init_mn = 16'h081f;
+				11'd1195: cabac_init_mn = 16'h0625;
+				11'd1196: cabac_init_mn = 16'h072a;
+				11'd1197: cabac_init_mn = 16'h0328;
+				11'd1198: cabac_init_mn = 16'h0821;
+				11'd1199: cabac_init_mn = 16'h0d2b;
+				11'd1200: cabac_init_mn = 16'h0d24;
+				11'd1201: cabac_init_mn = 16'h042f;
+				11'd1202: cabac_init_mn = 16'h0337;
+				11'd1203: cabac_init_mn = 16'h023a;
+				11'd1204: cabac_init_mn = 16'h063c;
+				11'd1205: cabac_init_mn = 16'h082c;
+				11'd1206: cabac_init_mn = 16'h0b2c;
+				11'd1207: cabac_init_mn = 16'h0e2a;
+				11'd1208: cabac_init_mn = 16'h0730;
+				11'd1209: cabac_init_mn = 16'h0438;
+				11'd1210: cabac_init_mn = 16'h0434;
+				11'd1211: cabac_init_mn = 16'h0d25;
+				11'd1212: cabac_init_mn = 16'h0931;
+				11'd1213: cabac_init_mn = 16'h133a;
+				11'd1214: cabac_init_mn = 16'h0a30;
+				11'd1215: cabac_init_mn = 16'h0c2d;
+				11'd1216: cabac_init_mn = 16'h0045;
+				11'd1217: cabac_init_mn = 16'h1421;
+				11'd1218: cabac_init_mn = 16'h083f;
+				11'd1219: cabac_init_mn = 16'h23ee;
+				11'd1220: cabac_init_mn = 16'h21e7;
+				11'd1221: cabac_init_mn = 16'h1cfd;
+				11'd1222: cabac_init_mn = 16'h180a;
+				11'd1223: cabac_init_mn = 16'h1b00;
+				11'd1224: cabac_init_mn = 16'h22f2;
+				11'd1225: cabac_init_mn = 16'h34d4;
+				11'd1226: cabac_init_mn = 16'h27e8;
+				11'd1227: cabac_init_mn = 16'h1311;
+				11'd1228: cabac_init_mn = 16'h1f19;
+				11'd1229: cabac_init_mn = 16'h241d;
+				11'd1230: cabac_init_mn = 16'h1821;
+				11'd1231: cabac_init_mn = 16'h220f;
+				11'd1232: cabac_init_mn = 16'h1e14;
+				11'd1233: cabac_init_mn = 16'h1649;
+				11'd1234: cabac_init_mn = 16'h1422;
+				11'd1235: cabac_init_mn = 16'h131f;
+				11'd1236: cabac_init_mn = 16'h1b2c;
+				11'd1237: cabac_init_mn = 16'h1310;
+				11'd1238: cabac_init_mn = 16'h0f24;
+				11'd1239: cabac_init_mn = 16'h0f24;
+				11'd1240: cabac_init_mn = 16'h151c;
+				11'd1241: cabac_init_mn = 16'h1915;
+				11'd1242: cabac_init_mn = 16'h1e14;
+				11'd1243: cabac_init_mn = 16'h1f0c;
+				11'd1244: cabac_init_mn = 16'h1b10;
+				11'd1245: cabac_init_mn = 16'h182a;
+				11'd1246: cabac_init_mn = 16'h005d;
+				11'd1247: cabac_init_mn = 16'h0e38;
+				11'd1248: cabac_init_mn = 16'h0f39;
+				11'd1249: cabac_init_mn = 16'h1a26;
+				11'd1250: cabac_init_mn = 16'he87f;
+				11'd1251: cabac_init_mn = 16'he873;
+				11'd1252: cabac_init_mn = 16'hea52;
+				11'd1253: cabac_init_mn = 16'hf73e;
+				11'd1254: cabac_init_mn = 16'h0035;
+				11'd1255: cabac_init_mn = 16'h003b;
+				11'd1256: cabac_init_mn = 16'hf255;
+				11'd1257: cabac_init_mn = 16'hf359;
+				11'd1258: cabac_init_mn = 16'hf35e;
+				11'd1259: cabac_init_mn = 16'hf55c;
+				11'd1260: cabac_init_mn = 16'he37f;
+				11'd1261: cabac_init_mn = 16'heb64;
+				11'd1262: cabac_init_mn = 16'hf239;
+				11'd1263: cabac_init_mn = 16'hf443;
+				11'd1264: cabac_init_mn = 16'hf547;
+				11'd1265: cabac_init_mn = 16'hf64d;
+				11'd1266: cabac_init_mn = 16'heb55;
+				11'd1267: cabac_init_mn = 16'hf058;
+				11'd1268: cabac_init_mn = 16'he968;
+				11'd1269: cabac_init_mn = 16'hf162;
+				11'd1270: cabac_init_mn = 16'hdb7f;
+				11'd1271: cabac_init_mn = 16'hf652;
+				11'd1272: cabac_init_mn = 16'hf830;
+				11'd1273: cabac_init_mn = 16'hf83d;
+				11'd1274: cabac_init_mn = 16'hf842;
+				11'd1275: cabac_init_mn = 16'hf946;
+				11'd1276: cabac_init_mn = 16'hf24b;
+				11'd1277: cabac_init_mn = 16'hf64f;
+				11'd1278: cabac_init_mn = 16'hf753;
+				11'd1279: cabac_init_mn = 16'hf45c;
+				11'd1280: cabac_init_mn = 16'hee6c;
+				11'd1281: cabac_init_mn = 16'hfc4f;
+				11'd1282: cabac_init_mn = 16'hea45;
+				11'd1283: cabac_init_mn = 16'hf04b;
+				11'd1284: cabac_init_mn = 16'hfe3a;
+				11'd1285: cabac_init_mn = 16'h013a;
+				11'd1286: cabac_init_mn = 16'hf34e;
+				11'd1287: cabac_init_mn = 16'hf753;
+				11'd1288: cabac_init_mn = 16'hfc51;
+				11'd1289: cabac_init_mn = 16'hf363;
+				11'd1290: cabac_init_mn = 16'hf351;
+				11'd1291: cabac_init_mn = 16'hfa26;
+				11'd1292: cabac_init_mn = 16'hf33e;
+				11'd1293: cabac_init_mn = 16'hfa3a;
+				11'd1294: cabac_init_mn = 16'hfe3b;
+				11'd1295: cabac_init_mn = 16'hf049;
+				11'd1296: cabac_init_mn = 16'hf64c;
+				11'd1297: cabac_init_mn = 16'hf356;
+				11'd1298: cabac_init_mn = 16'hf753;
+				11'd1299: cabac_init_mn = 16'hf657;
+				11'd1300: cabac_init_mn = 16'h0000;
+				11'd1301: cabac_init_mn = 16'hea7f;
+				11'd1302: cabac_init_mn = 16'he77f;
+				11'd1303: cabac_init_mn = 16'he778;
+				11'd1304: cabac_init_mn = 16'he57f;
+				11'd1305: cabac_init_mn = 16'hed72;
+				11'd1306: cabac_init_mn = 16'he975;
+				11'd1307: cabac_init_mn = 16'he776;
+				11'd1308: cabac_init_mn = 16'he675;
+				11'd1309: cabac_init_mn = 16'he871;
+				11'd1310: cabac_init_mn = 16'he476;
+				11'd1311: cabac_init_mn = 16'he178;
+				11'd1312: cabac_init_mn = 16'hdb7c;
+				11'd1313: cabac_init_mn = 16'hf65e;
+				11'd1314: cabac_init_mn = 16'hf166;
+				11'd1315: cabac_init_mn = 16'hf663;
+				11'd1316: cabac_init_mn = 16'hf36a;
+				11'd1317: cabac_init_mn = 16'hce7f;
+				11'd1318: cabac_init_mn = 16'hfb5c;
+				11'd1319: cabac_init_mn = 16'h1139;
+				11'd1320: cabac_init_mn = 16'hfb56;
+				11'd1321: cabac_init_mn = 16'hf35e;
+				11'd1322: cabac_init_mn = 16'hf45b;
+				11'd1323: cabac_init_mn = 16'hfe4d;
+				11'd1324: cabac_init_mn = 16'h0047;
+				11'd1325: cabac_init_mn = 16'hff49;
+				11'd1326: cabac_init_mn = 16'h0440;
+				11'd1327: cabac_init_mn = 16'hf951;
+				11'd1328: cabac_init_mn = 16'h0540;
+				11'd1329: cabac_init_mn = 16'h0f39;
+				11'd1330: cabac_init_mn = 16'h0143;
+				11'd1331: cabac_init_mn = 16'h0044;
+				11'd1332: cabac_init_mn = 16'hf643;
+				11'd1333: cabac_init_mn = 16'h0144;
+				11'd1334: cabac_init_mn = 16'h004d;
+				11'd1335: cabac_init_mn = 16'h0240;
+				11'd1336: cabac_init_mn = 16'h0044;
+				11'd1337: cabac_init_mn = 16'hfb4e;
+				11'd1338: cabac_init_mn = 16'h0737;
+				11'd1339: cabac_init_mn = 16'h053b;
+				11'd1340: cabac_init_mn = 16'h0241;
+				11'd1341: cabac_init_mn = 16'h0e36;
+				11'd1342: cabac_init_mn = 16'h0f2c;
+				11'd1343: cabac_init_mn = 16'h053c;
+				11'd1344: cabac_init_mn = 16'h0246;
+				11'd1345: cabac_init_mn = 16'hfe4c;
+				11'd1346: cabac_init_mn = 16'hee56;
+				11'd1347: cabac_init_mn = 16'h0c46;
+				11'd1348: cabac_init_mn = 16'h0540;
+				11'd1349: cabac_init_mn = 16'hf446;
+				11'd1350: cabac_init_mn = 16'h0b37;
+				11'd1351: cabac_init_mn = 16'h0538;
+				11'd1352: cabac_init_mn = 16'h0045;
+				11'd1353: cabac_init_mn = 16'h0241;
+				11'd1354: cabac_init_mn = 16'hfa4a;
+				11'd1355: cabac_init_mn = 16'h0536;
+				11'd1356: cabac_init_mn = 16'h0736;
+				11'd1357: cabac_init_mn = 16'hfa4c;
+				11'd1358: cabac_init_mn = 16'hf552;
+				11'd1359: cabac_init_mn = 16'hfe4d;
+				11'd1360: cabac_init_mn = 16'hfe4d;
+				11'd1361: cabac_init_mn = 16'h192a;
+				11'd1362: cabac_init_mn = 16'h11f3;
+				11'd1363: cabac_init_mn = 16'h10f7;
+				11'd1364: cabac_init_mn = 16'h11f4;
+				11'd1365: cabac_init_mn = 16'h1beb;
+				11'd1366: cabac_init_mn = 16'h25e2;
+				11'd1367: cabac_init_mn = 16'h29d8;
+				11'd1368: cabac_init_mn = 16'h2ad7;
+				11'd1369: cabac_init_mn = 16'h30d1;
+				11'd1370: cabac_init_mn = 16'h27e0;
+				11'd1371: cabac_init_mn = 16'h2ed8;
+				11'd1372: cabac_init_mn = 16'h34cd;
+				11'd1373: cabac_init_mn = 16'h2ed7;
+				11'd1374: cabac_init_mn = 16'h34d9;
+				11'd1375: cabac_init_mn = 16'h2bed;
+				11'd1376: cabac_init_mn = 16'h200b;
+				11'd1377: cabac_init_mn = 16'h3dc9;
+				11'd1378: cabac_init_mn = 16'h38d2;
+				11'd1379: cabac_init_mn = 16'h3ece;
+				11'd1380: cabac_init_mn = 16'h51bd;
+				11'd1381: cabac_init_mn = 16'h2dec;
+				11'd1382: cabac_init_mn = 16'h23fe;
+				11'd1383: cabac_init_mn = 16'h1c0f;
+				11'd1384: cabac_init_mn = 16'h2201;
+				11'd1385: cabac_init_mn = 16'h2701;
+				11'd1386: cabac_init_mn = 16'h1e11;
+				11'd1387: cabac_init_mn = 16'h1426;
+				11'd1388: cabac_init_mn = 16'h122d;
+				11'd1389: cabac_init_mn = 16'h0f36;
+				11'd1390: cabac_init_mn = 16'h004f;
+				11'd1391: cabac_init_mn = 16'h24f0;
+				11'd1392: cabac_init_mn = 16'h25f2;
+				11'd1393: cabac_init_mn = 16'h25ef;
+				11'd1394: cabac_init_mn = 16'h2001;
+				11'd1395: cabac_init_mn = 16'h220f;
+				11'd1396: cabac_init_mn = 16'h1d0f;
+				11'd1397: cabac_init_mn = 16'h1819;
+				11'd1398: cabac_init_mn = 16'h2216;
+				11'd1399: cabac_init_mn = 16'h1f10;
+				11'd1400: cabac_init_mn = 16'h2312;
+				11'd1401: cabac_init_mn = 16'h1f1c;
+				11'd1402: cabac_init_mn = 16'h2129;
+				11'd1403: cabac_init_mn = 16'h241c;
+				11'd1404: cabac_init_mn = 16'h1b2f;
+				11'd1405: cabac_init_mn = 16'h153e;
+				11'd1406: cabac_init_mn = 16'h121f;
+				11'd1407: cabac_init_mn = 16'h131a;
+				11'd1408: cabac_init_mn = 16'h2418;
+				11'd1409: cabac_init_mn = 16'h1817;
+				11'd1410: cabac_init_mn = 16'h1b10;
+				11'd1411: cabac_init_mn = 16'h181e;
+				11'd1412: cabac_init_mn = 16'h1f1d;
+				11'd1413: cabac_init_mn = 16'h1629;
+				11'd1414: cabac_init_mn = 16'h162a;
+				11'd1415: cabac_init_mn = 16'h103c;
+				11'd1416: cabac_init_mn = 16'h0f34;
+				11'd1417: cabac_init_mn = 16'h0e3c;
+				11'd1418: cabac_init_mn = 16'h034e;
+				11'd1419: cabac_init_mn = 16'hf07b;
+				11'd1420: cabac_init_mn = 16'h1535;
+				11'd1421: cabac_init_mn = 16'h1638;
+				11'd1422: cabac_init_mn = 16'h193d;
+				11'd1423: cabac_init_mn = 16'h1521;
+				11'd1424: cabac_init_mn = 16'h1332;
+				11'd1425: cabac_init_mn = 16'h113d;
+				11'd1426: cabac_init_mn = 16'hfd4e;
+				11'd1427: cabac_init_mn = 16'hf84a;
+				11'd1428: cabac_init_mn = 16'hf748;
+				11'd1429: cabac_init_mn = 16'hf648;
+				11'd1430: cabac_init_mn = 16'hee4b;
+				11'd1431: cabac_init_mn = 16'hf447;
+				11'd1432: cabac_init_mn = 16'hf53f;
+				11'd1433: cabac_init_mn = 16'hfb46;
+				11'd1434: cabac_init_mn = 16'hef4b;
+				11'd1435: cabac_init_mn = 16'hf248;
+				11'd1436: cabac_init_mn = 16'hf043;
+				11'd1437: cabac_init_mn = 16'hf835;
+				11'd1438: cabac_init_mn = 16'hf23b;
+				11'd1439: cabac_init_mn = 16'hf734;
+				11'd1440: cabac_init_mn = 16'hf544;
+				11'd1441: cabac_init_mn = 16'h09fe;
+				11'd1442: cabac_init_mn = 16'h1ef6;
+				11'd1443: cabac_init_mn = 16'h1ffc;
+				11'd1444: cabac_init_mn = 16'h21ff;
+				11'd1445: cabac_init_mn = 16'h2107;
+				11'd1446: cabac_init_mn = 16'h1f0c;
+				11'd1447: cabac_init_mn = 16'h2517;
+				11'd1448: cabac_init_mn = 16'h1f26;
+				11'd1449: cabac_init_mn = 16'h1440;
+				11'd1450: cabac_init_mn = 16'hf747;
+				11'd1451: cabac_init_mn = 16'hf925;
+				11'd1452: cabac_init_mn = 16'hf82c;
+				11'd1453: cabac_init_mn = 16'hf531;
+				11'd1454: cabac_init_mn = 16'hf638;
+				11'd1455: cabac_init_mn = 16'hf43b;
+				11'd1456: cabac_init_mn = 16'hf83f;
+				11'd1457: cabac_init_mn = 16'hf743;
+				11'd1458: cabac_init_mn = 16'hfa44;
+				11'd1459: cabac_init_mn = 16'hf64f;
+				11'd1536: cabac_init_mn = 16'h14f1;
+				11'd1537: cabac_init_mn = 16'h0236;
+				11'd1538: cabac_init_mn = 16'h034a;
+				11'd1539: cabac_init_mn = 16'h14f1;
+				11'd1540: cabac_init_mn = 16'h0236;
+				11'd1541: cabac_init_mn = 16'h034a;
+				11'd1542: cabac_init_mn = 16'he47f;
+				11'd1543: cabac_init_mn = 16'he968;
+				11'd1544: cabac_init_mn = 16'hfa35;
+				11'd1545: cabac_init_mn = 16'hff36;
+				11'd1546: cabac_init_mn = 16'h0733;
+				11'd1547: cabac_init_mn = 16'h0000;
+				11'd1548: cabac_init_mn = 16'h0000;
+				11'd1549: cabac_init_mn = 16'h0000;
+				11'd1550: cabac_init_mn = 16'h0000;
+				11'd1551: cabac_init_mn = 16'h0000;
+				11'd1552: cabac_init_mn = 16'h0000;
+				11'd1553: cabac_init_mn = 16'h0000;
+				11'd1554: cabac_init_mn = 16'h0000;
+				11'd1555: cabac_init_mn = 16'h0000;
+				11'd1556: cabac_init_mn = 16'h0000;
+				11'd1557: cabac_init_mn = 16'h0000;
+				11'd1558: cabac_init_mn = 16'h0000;
+				11'd1559: cabac_init_mn = 16'h0000;
+				11'd1560: cabac_init_mn = 16'h0000;
+				11'd1561: cabac_init_mn = 16'h0000;
+				11'd1562: cabac_init_mn = 16'h0000;
+				11'd1563: cabac_init_mn = 16'h0000;
+				11'd1564: cabac_init_mn = 16'h0000;
+				11'd1565: cabac_init_mn = 16'h0000;
+				11'd1566: cabac_init_mn = 16'h0000;
+				11'd1567: cabac_init_mn = 16'h0000;
+				11'd1568: cabac_init_mn = 16'h0000;
+				11'd1569: cabac_init_mn = 16'h0000;
+				11'd1570: cabac_init_mn = 16'h0000;
+				11'd1571: cabac_init_mn = 16'h0000;
+				11'd1572: cabac_init_mn = 16'h0000;
+				11'd1573: cabac_init_mn = 16'h0000;
+				11'd1574: cabac_init_mn = 16'h0000;
+				11'd1575: cabac_init_mn = 16'h0000;
+				11'd1576: cabac_init_mn = 16'h0000;
+				11'd1577: cabac_init_mn = 16'h0000;
+				11'd1578: cabac_init_mn = 16'h0000;
+				11'd1579: cabac_init_mn = 16'h0000;
+				11'd1580: cabac_init_mn = 16'h0000;
+				11'd1581: cabac_init_mn = 16'h0000;
+				11'd1582: cabac_init_mn = 16'h0000;
+				11'd1583: cabac_init_mn = 16'h0000;
+				11'd1584: cabac_init_mn = 16'h0000;
+				11'd1585: cabac_init_mn = 16'h0000;
+				11'd1586: cabac_init_mn = 16'h0000;
+				11'd1587: cabac_init_mn = 16'h0000;
+				11'd1588: cabac_init_mn = 16'h0000;
+				11'd1589: cabac_init_mn = 16'h0000;
+				11'd1590: cabac_init_mn = 16'h0000;
+				11'd1591: cabac_init_mn = 16'h0000;
+				11'd1592: cabac_init_mn = 16'h0000;
+				11'd1593: cabac_init_mn = 16'h0000;
+				11'd1594: cabac_init_mn = 16'h0000;
+				11'd1595: cabac_init_mn = 16'h0000;
+				11'd1596: cabac_init_mn = 16'h0029;
+				11'd1597: cabac_init_mn = 16'h003f;
+				11'd1598: cabac_init_mn = 16'h003f;
+				11'd1599: cabac_init_mn = 16'h003f;
+				11'd1600: cabac_init_mn = 16'hf753;
+				11'd1601: cabac_init_mn = 16'h0456;
+				11'd1602: cabac_init_mn = 16'h0061;
+				11'd1603: cabac_init_mn = 16'hf948;
+				11'd1604: cabac_init_mn = 16'h0d29;
+				11'd1605: cabac_init_mn = 16'h033e;
+				11'd1606: cabac_init_mn = 16'h000b;
+				11'd1607: cabac_init_mn = 16'h0137;
+				11'd1608: cabac_init_mn = 16'h0045;
+				11'd1609: cabac_init_mn = 16'hef7f;
+				11'd1610: cabac_init_mn = 16'hf366;
+				11'd1611: cabac_init_mn = 16'h0052;
+				11'd1612: cabac_init_mn = 16'hf94a;
+				11'd1613: cabac_init_mn = 16'heb6b;
+				11'd1614: cabac_init_mn = 16'he57f;
+				11'd1615: cabac_init_mn = 16'he17f;
+				11'd1616: cabac_init_mn = 16'he87f;
+				11'd1617: cabac_init_mn = 16'hee5f;
+				11'd1618: cabac_init_mn = 16'he57f;
+				11'd1619: cabac_init_mn = 16'heb72;
+				11'd1620: cabac_init_mn = 16'he27f;
+				11'd1621: cabac_init_mn = 16'hef7b;
+				11'd1622: cabac_init_mn = 16'hf473;
+				11'd1623: cabac_init_mn = 16'hf07a;
+				11'd1624: cabac_init_mn = 16'hf573;
+				11'd1625: cabac_init_mn = 16'hf43f;
+				11'd1626: cabac_init_mn = 16'hfe44;
+				11'd1627: cabac_init_mn = 16'hf154;
+				11'd1628: cabac_init_mn = 16'hf368;
+				11'd1629: cabac_init_mn = 16'hfd46;
+				11'd1630: cabac_init_mn = 16'hf85d;
+				11'd1631: cabac_init_mn = 16'hf65a;
+				11'd1632: cabac_init_mn = 16'he27f;
+				11'd1633: cabac_init_mn = 16'hff4a;
+				11'd1634: cabac_init_mn = 16'hfa61;
+				11'd1635: cabac_init_mn = 16'hf95b;
+				11'd1636: cabac_init_mn = 16'hec7f;
+				11'd1637: cabac_init_mn = 16'hfc38;
+				11'd1638: cabac_init_mn = 16'hfb52;
+				11'd1639: cabac_init_mn = 16'hf94c;
+				11'd1640: cabac_init_mn = 16'hea7d;
+				11'd1641: cabac_init_mn = 16'hf95d;
+				11'd1642: cabac_init_mn = 16'hf557;
+				11'd1643: cabac_init_mn = 16'hfd4d;
+				11'd1644: cabac_init_mn = 16'hfb47;
+				11'd1645: cabac_init_mn = 16'hfc3f;
+				11'd1646: cabac_init_mn = 16'hfc44;
+				11'd1647: cabac_init_mn = 16'hf454;
+				11'd1648: cabac_init_mn = 16'hf93e;
+				11'd1649: cabac_init_mn = 16'hf941;
+				11'd1650: cabac_init_mn = 16'h083d;
+				11'd1651: cabac_init_mn = 16'h0538;
+				11'd1652: cabac_init_mn = 16'hfe42;
+				11'd1653: cabac_init_mn = 16'h0140;
+				11'd1654: cabac_init_mn = 16'h003d;
+				11'd1655: cabac_init_mn = 16'hfe4e;
+				11'd1656: cabac_init_mn = 16'h0132;
+				11'd1657: cabac_init_mn = 16'h0734;
+				11'd1658: cabac_init_mn = 16'h0a23;
+				11'd1659: cabac_init_mn = 16'h002c;
+				11'd1660: cabac_init_mn = 16'h0b26;
+				11'd1661: cabac_init_mn = 16'h012d;
+				11'd1662: cabac_init_mn = 16'h002e;
+				11'd1663: cabac_init_mn = 16'h052c;
+				11'd1664: cabac_init_mn = 16'h1f11;
+				11'd1665: cabac_init_mn = 16'h0133;
+				11'd1666: cabac_init_mn = 16'h0732;
+				11'd1667: cabac_init_mn = 16'h1c13;
+				11'd1668: cabac_init_mn = 16'h1021;
+				11'd1669: cabac_init_mn = 16'h0e3e;
+				11'd1670: cabac_init_mn = 16'hf36c;
+				11'd1671: cabac_init_mn = 16'hf164;
+				11'd1672: cabac_init_mn = 16'hf365;
+				11'd1673: cabac_init_mn = 16'hf35b;
+				11'd1674: cabac_init_mn = 16'hf45e;
+				11'd1675: cabac_init_mn = 16'hf658;
+				11'd1676: cabac_init_mn = 16'hf054;
+				11'd1677: cabac_init_mn = 16'hf656;
+				11'd1678: cabac_init_mn = 16'hf953;
+				11'd1679: cabac_init_mn = 16'hf357;
+				11'd1680: cabac_init_mn = 16'hed5e;
+				11'd1681: cabac_init_mn = 16'h0146;
+				11'd1682: cabac_init_mn = 16'h0048;
+				11'd1683: cabac_init_mn = 16'hfb4a;
+				11'd1684: cabac_init_mn = 16'h123b;
+				11'd1685: cabac_init_mn = 16'hf866;
+				11'd1686: cabac_init_mn = 16'hf164;
+				11'd1687: cabac_init_mn = 16'h005f;
+				11'd1688: cabac_init_mn = 16'hfc4b;
+				11'd1689: cabac_init_mn = 16'h0248;
+				11'd1690: cabac_init_mn = 16'hf54b;
+				11'd1691: cabac_init_mn = 16'hfd47;
+				11'd1692: cabac_init_mn = 16'h0f2e;
+				11'd1693: cabac_init_mn = 16'hf345;
+				11'd1694: cabac_init_mn = 16'h003e;
+				11'd1695: cabac_init_mn = 16'h0041;
+				11'd1696: cabac_init_mn = 16'h1525;
+				11'd1697: cabac_init_mn = 16'hf148;
+				11'd1698: cabac_init_mn = 16'h0939;
+				11'd1699: cabac_init_mn = 16'h1036;
+				11'd1700: cabac_init_mn = 16'h003e;
+				11'd1701: cabac_init_mn = 16'h0c48;
+				11'd1702: cabac_init_mn = 16'h1800;
+				11'd1703: cabac_init_mn = 16'h0f09;
+				11'd1704: cabac_init_mn = 16'h0819;
+				11'd1705: cabac_init_mn = 16'h0d12;
+				11'd1706: cabac_init_mn = 16'h0f09;
+				11'd1707: cabac_init_mn = 16'h0d13;
+				11'd1708: cabac_init_mn = 16'h0a25;
+				11'd1709: cabac_init_mn = 16'h0c12;
+				11'd1710: cabac_init_mn = 16'h061d;
+				11'd1711: cabac_init_mn = 16'h1421;
+				11'd1712: cabac_init_mn = 16'h0f1e;
+				11'd1713: cabac_init_mn = 16'h042d;
+				11'd1714: cabac_init_mn = 16'h013a;
+				11'd1715: cabac_init_mn = 16'h003e;
+				11'd1716: cabac_init_mn = 16'h073d;
+				11'd1717: cabac_init_mn = 16'h0c26;
+				11'd1718: cabac_init_mn = 16'h0b2d;
+				11'd1719: cabac_init_mn = 16'h0f27;
+				11'd1720: cabac_init_mn = 16'h0b2a;
+				11'd1721: cabac_init_mn = 16'h0d2c;
+				11'd1722: cabac_init_mn = 16'h102d;
+				11'd1723: cabac_init_mn = 16'h0c29;
+				11'd1724: cabac_init_mn = 16'h0a31;
+				11'd1725: cabac_init_mn = 16'h1e22;
+				11'd1726: cabac_init_mn = 16'h122a;
+				11'd1727: cabac_init_mn = 16'h0a37;
+				11'd1728: cabac_init_mn = 16'h1133;
+				11'd1729: cabac_init_mn = 16'h112e;
+				11'd1730: cabac_init_mn = 16'h0059;
+				11'd1731: cabac_init_mn = 16'h1aed;
+				11'd1732: cabac_init_mn = 16'h16ef;
+				11'd1733: cabac_init_mn = 16'h1aef;
+				11'd1734: cabac_init_mn = 16'h1ee7;
+				11'd1735: cabac_init_mn = 16'h1cec;
+				11'd1736: cabac_init_mn = 16'h21e9;
+				11'd1737: cabac_init_mn = 16'h25e5;
+				11'd1738: cabac_init_mn = 16'h21e9;
+				11'd1739: cabac_init_mn = 16'h28e4;
+				11'd1740: cabac_init_mn = 16'h26ef;
+				11'd1741: cabac_init_mn = 16'h21f5;
+				11'd1742: cabac_init_mn = 16'h28f1;
+				11'd1743: cabac_init_mn = 16'h29fa;
+				11'd1744: cabac_init_mn = 16'h2601;
+				11'd1745: cabac_init_mn = 16'h2911;
+				11'd1746: cabac_init_mn = 16'h1efa;
+				11'd1747: cabac_init_mn = 16'h1b03;
+				11'd1748: cabac_init_mn = 16'h1a16;
+				11'd1749: cabac_init_mn = 16'h25f0;
+				11'd1750: cabac_init_mn = 16'h23fc;
+				11'd1751: cabac_init_mn = 16'h26f8;
+				11'd1752: cabac_init_mn = 16'h26fd;
+				11'd1753: cabac_init_mn = 16'h2503;
+				11'd1754: cabac_init_mn = 16'h2605;
+				11'd1755: cabac_init_mn = 16'h2a00;
+				11'd1756: cabac_init_mn = 16'h2310;
+				11'd1757: cabac_init_mn = 16'h2716;
+				11'd1758: cabac_init_mn = 16'h0e30;
+				11'd1759: cabac_init_mn = 16'h1b25;
+				11'd1760: cabac_init_mn = 16'h153c;
+				11'd1761: cabac_init_mn = 16'h0c44;
+				11'd1762: cabac_init_mn = 16'h0261;
+				11'd1763: cabac_init_mn = 16'hfd47;
+				11'd1764: cabac_init_mn = 16'hfa2a;
+				11'd1765: cabac_init_mn = 16'hfb32;
+				11'd1766: cabac_init_mn = 16'hfd36;
+				11'd1767: cabac_init_mn = 16'hfe3e;
+				11'd1768: cabac_init_mn = 16'h003a;
+				11'd1769: cabac_init_mn = 16'h013f;
+				11'd1770: cabac_init_mn = 16'hfe48;
+				11'd1771: cabac_init_mn = 16'hff4a;
+				11'd1772: cabac_init_mn = 16'hf75b;
+				11'd1773: cabac_init_mn = 16'hfb43;
+				11'd1774: cabac_init_mn = 16'hfb1b;
+				11'd1775: cabac_init_mn = 16'hfd27;
+				11'd1776: cabac_init_mn = 16'hfe2c;
+				11'd1777: cabac_init_mn = 16'h002e;
+				11'd1778: cabac_init_mn = 16'hf040;
+				11'd1779: cabac_init_mn = 16'hf844;
+				11'd1780: cabac_init_mn = 16'hf64e;
+				11'd1781: cabac_init_mn = 16'hfa4d;
+				11'd1782: cabac_init_mn = 16'hf656;
+				11'd1783: cabac_init_mn = 16'hf45c;
+				11'd1784: cabac_init_mn = 16'hf137;
+				11'd1785: cabac_init_mn = 16'hf63c;
+				11'd1786: cabac_init_mn = 16'hfa3e;
+				11'd1787: cabac_init_mn = 16'hfc41;
+				11'd1788: cabac_init_mn = 16'hf449;
+				11'd1789: cabac_init_mn = 16'hf84c;
+				11'd1790: cabac_init_mn = 16'hf950;
+				11'd1791: cabac_init_mn = 16'hf758;
+				11'd1792: cabac_init_mn = 16'hef6e;
+				11'd1793: cabac_init_mn = 16'hf561;
+				11'd1794: cabac_init_mn = 16'hec54;
+				11'd1795: cabac_init_mn = 16'hf54f;
+				11'd1796: cabac_init_mn = 16'hfa49;
+				11'd1797: cabac_init_mn = 16'hfc4a;
+				11'd1798: cabac_init_mn = 16'hf356;
+				11'd1799: cabac_init_mn = 16'hf360;
+				11'd1800: cabac_init_mn = 16'hf561;
+				11'd1801: cabac_init_mn = 16'hed75;
+				11'd1802: cabac_init_mn = 16'hf84e;
+				11'd1803: cabac_init_mn = 16'hfb21;
+				11'd1804: cabac_init_mn = 16'hfc30;
+				11'd1805: cabac_init_mn = 16'hfe35;
+				11'd1806: cabac_init_mn = 16'hfd3e;
+				11'd1807: cabac_init_mn = 16'hf347;
+				11'd1808: cabac_init_mn = 16'hf64f;
+				11'd1809: cabac_init_mn = 16'hf456;
+				11'd1810: cabac_init_mn = 16'hf35a;
+				11'd1811: cabac_init_mn = 16'hf261;
+				11'd1812: cabac_init_mn = 16'h0000;
+				11'd1813: cabac_init_mn = 16'hfa5d;
+				11'd1814: cabac_init_mn = 16'hfa54;
+				11'd1815: cabac_init_mn = 16'hf84f;
+				11'd1816: cabac_init_mn = 16'h0042;
+				11'd1817: cabac_init_mn = 16'hff47;
+				11'd1818: cabac_init_mn = 16'h003e;
+				11'd1819: cabac_init_mn = 16'hfe3c;
+				11'd1820: cabac_init_mn = 16'hfe3b;
+				11'd1821: cabac_init_mn = 16'hfb4b;
+				11'd1822: cabac_init_mn = 16'hfd3e;
+				11'd1823: cabac_init_mn = 16'hfc3a;
+				11'd1824: cabac_init_mn = 16'hf742;
+				11'd1825: cabac_init_mn = 16'hff4f;
+				11'd1826: cabac_init_mn = 16'h0047;
+				11'd1827: cabac_init_mn = 16'h0344;
+				11'd1828: cabac_init_mn = 16'h0a2c;
+				11'd1829: cabac_init_mn = 16'hf93e;
+				11'd1830: cabac_init_mn = 16'h0f24;
+				11'd1831: cabac_init_mn = 16'h0e28;
+				11'd1832: cabac_init_mn = 16'h101b;
+				11'd1833: cabac_init_mn = 16'h0c1d;
+				11'd1834: cabac_init_mn = 16'h012c;
+				11'd1835: cabac_init_mn = 16'h1424;
+				11'd1836: cabac_init_mn = 16'h1220;
+				11'd1837: cabac_init_mn = 16'h052a;
+				11'd1838: cabac_init_mn = 16'h0130;
+				11'd1839: cabac_init_mn = 16'h0a3e;
+				11'd1840: cabac_init_mn = 16'h112e;
+				11'd1841: cabac_init_mn = 16'h0940;
+				11'd1842: cabac_init_mn = 16'hf468;
+				11'd1843: cabac_init_mn = 16'hf561;
+				11'd1844: cabac_init_mn = 16'hf060;
+				11'd1845: cabac_init_mn = 16'hf958;
+				11'd1846: cabac_init_mn = 16'hf855;
+				11'd1847: cabac_init_mn = 16'hf955;
+				11'd1848: cabac_init_mn = 16'hf755;
+				11'd1849: cabac_init_mn = 16'hf358;
+				11'd1850: cabac_init_mn = 16'h0442;
+				11'd1851: cabac_init_mn = 16'hfd4d;
+				11'd1852: cabac_init_mn = 16'hfd4c;
+				11'd1853: cabac_init_mn = 16'hfa4c;
+				11'd1854: cabac_init_mn = 16'h0a3a;
+				11'd1855: cabac_init_mn = 16'hff4c;
+				11'd1856: cabac_init_mn = 16'hff53;
+				11'd1857: cabac_init_mn = 16'hf963;
+				11'd1858: cabac_init_mn = 16'hf25f;
+				11'd1859: cabac_init_mn = 16'h025f;
+				11'd1860: cabac_init_mn = 16'h004c;
+				11'd1861: cabac_init_mn = 16'hfb4a;
+				11'd1862: cabac_init_mn = 16'h0046;
+				11'd1863: cabac_init_mn = 16'hf54b;
+				11'd1864: cabac_init_mn = 16'h0144;
+				11'd1865: cabac_init_mn = 16'h0041;
+				11'd1866: cabac_init_mn = 16'hf249;
+				11'd1867: cabac_init_mn = 16'h033e;
+				11'd1868: cabac_init_mn = 16'h043e;
+				11'd1869: cabac_init_mn = 16'hff44;
+				11'd1870: cabac_init_mn = 16'hf34b;
+				11'd1871: cabac_init_mn = 16'h0b37;
+				11'd1872: cabac_init_mn = 16'h0540;
+				11'd1873: cabac_init_mn = 16'h0c46;
+				11'd1874: cabac_init_mn = 16'h0f06;
+				11'd1875: cabac_init_mn = 16'h0613;
+				11'd1876: cabac_init_mn = 16'h0710;
+				11'd1877: cabac_init_mn = 16'h0c0e;
+				11'd1878: cabac_init_mn = 16'h120d;
+				11'd1879: cabac_init_mn = 16'h0d0b;
+				11'd1880: cabac_init_mn = 16'h0d0f;
+				11'd1881: cabac_init_mn = 16'h0f10;
+				11'd1882: cabac_init_mn = 16'h0c17;
+				11'd1883: cabac_init_mn = 16'h0d17;
+				11'd1884: cabac_init_mn = 16'h0f14;
+				11'd1885: cabac_init_mn = 16'h0e1a;
+				11'd1886: cabac_init_mn = 16'h0e2c;
+				11'd1887: cabac_init_mn = 16'h1128;
+				11'd1888: cabac_init_mn = 16'h112f;
+				11'd1889: cabac_init_mn = 16'h1811;
+				11'd1890: cabac_init_mn = 16'h1515;
+				11'd1891: cabac_init_mn = 16'h1916;
+				11'd1892: cabac_init_mn = 16'h1f1b;
+				11'd1893: cabac_init_mn = 16'h161d;
+				11'd1894: cabac_init_mn = 16'h1323;
+				11'd1895: cabac_init_mn = 16'h0e32;
+				11'd1896: cabac_init_mn = 16'h0a39;
+				11'd1897: cabac_init_mn = 16'h073f;
+				11'd1898: cabac_init_mn = 16'hfe4d;
+				11'd1899: cabac_init_mn = 16'hfc52;
+				11'd1900: cabac_init_mn = 16'hfd5e;
+				11'd1901: cabac_init_mn = 16'h0945;
+				11'd1902: cabac_init_mn = 16'hf46d;
+				11'd1903: cabac_init_mn = 16'h24dd;
+				11'd1904: cabac_init_mn = 16'h24de;
+				11'd1905: cabac_init_mn = 16'h20e6;
+				11'd1906: cabac_init_mn = 16'h25e2;
+				11'd1907: cabac_init_mn = 16'h2ce0;
+				11'd1908: cabac_init_mn = 16'h22ee;
+				11'd1909: cabac_init_mn = 16'h22f1;
+				11'd1910: cabac_init_mn = 16'h28f1;
+				11'd1911: cabac_init_mn = 16'h21f9;
+				11'd1912: cabac_init_mn = 16'h23fb;
+				11'd1913: cabac_init_mn = 16'h2100;
+				11'd1914: cabac_init_mn = 16'h2602;
+				11'd1915: cabac_init_mn = 16'h210d;
+				11'd1916: cabac_init_mn = 16'h1723;
+				11'd1917: cabac_init_mn = 16'h0d3a;
+				11'd1918: cabac_init_mn = 16'h1dfd;
+				11'd1919: cabac_init_mn = 16'h1a00;
+				11'd1920: cabac_init_mn = 16'h161e;
+				11'd1921: cabac_init_mn = 16'h1ff9;
+				11'd1922: cabac_init_mn = 16'h23f1;
+				11'd1923: cabac_init_mn = 16'h22fd;
+				11'd1924: cabac_init_mn = 16'h2203;
+				11'd1925: cabac_init_mn = 16'h24ff;
+				11'd1926: cabac_init_mn = 16'h2205;
+				11'd1927: cabac_init_mn = 16'h200b;
+				11'd1928: cabac_init_mn = 16'h2305;
+				11'd1929: cabac_init_mn = 16'h220c;
+				11'd1930: cabac_init_mn = 16'h270b;
+				11'd1931: cabac_init_mn = 16'h1e1d;
+				11'd1932: cabac_init_mn = 16'h221a;
+				11'd1933: cabac_init_mn = 16'h1d27;
+				11'd1934: cabac_init_mn = 16'h1342;
+				11'd1935: cabac_init_mn = 16'h1f15;
+				11'd1936: cabac_init_mn = 16'h1f1f;
+				11'd1937: cabac_init_mn = 16'h1932;
+				11'd1938: cabac_init_mn = 16'hef78;
+				11'd1939: cabac_init_mn = 16'hec70;
+				11'd1940: cabac_init_mn = 16'hee72;
+				11'd1941: cabac_init_mn = 16'hf555;
+				11'd1942: cabac_init_mn = 16'hf15c;
+				11'd1943: cabac_init_mn = 16'hf259;
+				11'd1944: cabac_init_mn = 16'he647;
+				11'd1945: cabac_init_mn = 16'hf151;
+				11'd1946: cabac_init_mn = 16'hf250;
+				11'd1947: cabac_init_mn = 16'h0044;
+				11'd1948: cabac_init_mn = 16'hf246;
+				11'd1949: cabac_init_mn = 16'he838;
+				11'd1950: cabac_init_mn = 16'he944;
+				11'd1951: cabac_init_mn = 16'he832;
+				11'd1952: cabac_init_mn = 16'hf54a;
+				11'd1953: cabac_init_mn = 16'h17f3;
+				11'd1954: cabac_init_mn = 16'h1af3;
+				11'd1955: cabac_init_mn = 16'h28f1;
+				11'd1956: cabac_init_mn = 16'h31f2;
+				11'd1957: cabac_init_mn = 16'h2c03;
+				11'd1958: cabac_init_mn = 16'h2d06;
+				11'd1959: cabac_init_mn = 16'h2c22;
+				11'd1960: cabac_init_mn = 16'h2136;
+				11'd1961: cabac_init_mn = 16'h1352;
+				11'd1962: cabac_init_mn = 16'hfd4b;
+				11'd1963: cabac_init_mn = 16'hff17;
+				11'd1964: cabac_init_mn = 16'h0122;
+				11'd1965: cabac_init_mn = 16'h012b;
+				11'd1966: cabac_init_mn = 16'h0036;
+				11'd1967: cabac_init_mn = 16'hfe37;
+				11'd1968: cabac_init_mn = 16'h003d;
+				11'd1969: cabac_init_mn = 16'h0140;
+				11'd1970: cabac_init_mn = 16'h0044;
+				11'd1971: cabac_init_mn = 16'hf75c;
+				default: cabac_init_mn = 16'd0;
+			endcase
+		end
+	endfunction
+	assign mn = cabac_init_mn(model_q, ictx_q);
+	always @(*) begin : sv2v_autoblock_1
+		reg signed [15:0] t;
+		if (_sv2v_0)
+			;
+		t = ($signed(mn[15:8]) * $signed({10'b0000000000, init_qp})) >>> 4;
+		t = t + $signed(mn[7:0]);
+		if (t < 1)
+			t = 1;
+		if (t > 126)
+			t = 126;
+		pre_raw = t;
+		pre = pre_raw[6:0];
+	end
+	wire [7:0] rlps;
+	wire [8:0] r_dec;
+	wire [8:0] r_mps_v;
+	wire is_lps;
+	wire [5:0] ps_cur;
+	wire mps_cur;
+	assign ps_cur = pstate[op_ctx];
+	assign mps_cur = mps[op_ctx];
+	function automatic [7:0] cabac_rlps;
+		input reg [5:0] st;
+		input reg [1:0] qi;
+		(* full_case, parallel_case *)
+		case ({st, qi})
+			8'd0: cabac_rlps = 8'd128;
+			8'd1: cabac_rlps = 8'd176;
+			8'd2: cabac_rlps = 8'd208;
+			8'd3: cabac_rlps = 8'd240;
+			8'd4: cabac_rlps = 8'd128;
+			8'd5: cabac_rlps = 8'd167;
+			8'd6: cabac_rlps = 8'd197;
+			8'd7: cabac_rlps = 8'd227;
+			8'd8: cabac_rlps = 8'd128;
+			8'd9: cabac_rlps = 8'd158;
+			8'd10: cabac_rlps = 8'd187;
+			8'd11: cabac_rlps = 8'd216;
+			8'd12: cabac_rlps = 8'd123;
+			8'd13: cabac_rlps = 8'd150;
+			8'd14: cabac_rlps = 8'd178;
+			8'd15: cabac_rlps = 8'd205;
+			8'd16: cabac_rlps = 8'd116;
+			8'd17: cabac_rlps = 8'd142;
+			8'd18: cabac_rlps = 8'd169;
+			8'd19: cabac_rlps = 8'd195;
+			8'd20: cabac_rlps = 8'd111;
+			8'd21: cabac_rlps = 8'd135;
+			8'd22: cabac_rlps = 8'd160;
+			8'd23: cabac_rlps = 8'd185;
+			8'd24: cabac_rlps = 8'd105;
+			8'd25: cabac_rlps = 8'd128;
+			8'd26: cabac_rlps = 8'd152;
+			8'd27: cabac_rlps = 8'd175;
+			8'd28: cabac_rlps = 8'd100;
+			8'd29: cabac_rlps = 8'd122;
+			8'd30: cabac_rlps = 8'd144;
+			8'd31: cabac_rlps = 8'd166;
+			8'd32: cabac_rlps = 8'd95;
+			8'd33: cabac_rlps = 8'd116;
+			8'd34: cabac_rlps = 8'd137;
+			8'd35: cabac_rlps = 8'd158;
+			8'd36: cabac_rlps = 8'd90;
+			8'd37: cabac_rlps = 8'd110;
+			8'd38: cabac_rlps = 8'd130;
+			8'd39: cabac_rlps = 8'd150;
+			8'd40: cabac_rlps = 8'd85;
+			8'd41: cabac_rlps = 8'd104;
+			8'd42: cabac_rlps = 8'd123;
+			8'd43: cabac_rlps = 8'd142;
+			8'd44: cabac_rlps = 8'd81;
+			8'd45: cabac_rlps = 8'd99;
+			8'd46: cabac_rlps = 8'd117;
+			8'd47: cabac_rlps = 8'd135;
+			8'd48: cabac_rlps = 8'd77;
+			8'd49: cabac_rlps = 8'd94;
+			8'd50: cabac_rlps = 8'd111;
+			8'd51: cabac_rlps = 8'd128;
+			8'd52: cabac_rlps = 8'd73;
+			8'd53: cabac_rlps = 8'd89;
+			8'd54: cabac_rlps = 8'd105;
+			8'd55: cabac_rlps = 8'd122;
+			8'd56: cabac_rlps = 8'd69;
+			8'd57: cabac_rlps = 8'd85;
+			8'd58: cabac_rlps = 8'd100;
+			8'd59: cabac_rlps = 8'd116;
+			8'd60: cabac_rlps = 8'd66;
+			8'd61: cabac_rlps = 8'd80;
+			8'd62: cabac_rlps = 8'd95;
+			8'd63: cabac_rlps = 8'd110;
+			8'd64: cabac_rlps = 8'd62;
+			8'd65: cabac_rlps = 8'd76;
+			8'd66: cabac_rlps = 8'd90;
+			8'd67: cabac_rlps = 8'd104;
+			8'd68: cabac_rlps = 8'd59;
+			8'd69: cabac_rlps = 8'd72;
+			8'd70: cabac_rlps = 8'd86;
+			8'd71: cabac_rlps = 8'd99;
+			8'd72: cabac_rlps = 8'd56;
+			8'd73: cabac_rlps = 8'd69;
+			8'd74: cabac_rlps = 8'd81;
+			8'd75: cabac_rlps = 8'd94;
+			8'd76: cabac_rlps = 8'd53;
+			8'd77: cabac_rlps = 8'd65;
+			8'd78: cabac_rlps = 8'd77;
+			8'd79: cabac_rlps = 8'd89;
+			8'd80: cabac_rlps = 8'd51;
+			8'd81: cabac_rlps = 8'd62;
+			8'd82: cabac_rlps = 8'd73;
+			8'd83: cabac_rlps = 8'd85;
+			8'd84: cabac_rlps = 8'd48;
+			8'd85: cabac_rlps = 8'd59;
+			8'd86: cabac_rlps = 8'd69;
+			8'd87: cabac_rlps = 8'd80;
+			8'd88: cabac_rlps = 8'd46;
+			8'd89: cabac_rlps = 8'd56;
+			8'd90: cabac_rlps = 8'd66;
+			8'd91: cabac_rlps = 8'd76;
+			8'd92: cabac_rlps = 8'd43;
+			8'd93: cabac_rlps = 8'd53;
+			8'd94: cabac_rlps = 8'd63;
+			8'd95: cabac_rlps = 8'd72;
+			8'd96: cabac_rlps = 8'd41;
+			8'd97: cabac_rlps = 8'd50;
+			8'd98: cabac_rlps = 8'd59;
+			8'd99: cabac_rlps = 8'd69;
+			8'd100: cabac_rlps = 8'd39;
+			8'd101: cabac_rlps = 8'd48;
+			8'd102: cabac_rlps = 8'd56;
+			8'd103: cabac_rlps = 8'd65;
+			8'd104: cabac_rlps = 8'd37;
+			8'd105: cabac_rlps = 8'd45;
+			8'd106: cabac_rlps = 8'd54;
+			8'd107: cabac_rlps = 8'd62;
+			8'd108: cabac_rlps = 8'd35;
+			8'd109: cabac_rlps = 8'd43;
+			8'd110: cabac_rlps = 8'd51;
+			8'd111: cabac_rlps = 8'd59;
+			8'd112: cabac_rlps = 8'd33;
+			8'd113: cabac_rlps = 8'd41;
+			8'd114: cabac_rlps = 8'd48;
+			8'd115: cabac_rlps = 8'd56;
+			8'd116: cabac_rlps = 8'd32;
+			8'd117: cabac_rlps = 8'd39;
+			8'd118: cabac_rlps = 8'd46;
+			8'd119: cabac_rlps = 8'd53;
+			8'd120: cabac_rlps = 8'd30;
+			8'd121: cabac_rlps = 8'd37;
+			8'd122: cabac_rlps = 8'd43;
+			8'd123: cabac_rlps = 8'd50;
+			8'd124: cabac_rlps = 8'd29;
+			8'd125: cabac_rlps = 8'd35;
+			8'd126: cabac_rlps = 8'd41;
+			8'd127: cabac_rlps = 8'd48;
+			8'd128: cabac_rlps = 8'd27;
+			8'd129: cabac_rlps = 8'd33;
+			8'd130: cabac_rlps = 8'd39;
+			8'd131: cabac_rlps = 8'd45;
+			8'd132: cabac_rlps = 8'd26;
+			8'd133: cabac_rlps = 8'd31;
+			8'd134: cabac_rlps = 8'd37;
+			8'd135: cabac_rlps = 8'd43;
+			8'd136: cabac_rlps = 8'd24;
+			8'd137: cabac_rlps = 8'd30;
+			8'd138: cabac_rlps = 8'd35;
+			8'd139: cabac_rlps = 8'd41;
+			8'd140: cabac_rlps = 8'd23;
+			8'd141: cabac_rlps = 8'd28;
+			8'd142: cabac_rlps = 8'd33;
+			8'd143: cabac_rlps = 8'd39;
+			8'd144: cabac_rlps = 8'd22;
+			8'd145: cabac_rlps = 8'd27;
+			8'd146: cabac_rlps = 8'd32;
+			8'd147: cabac_rlps = 8'd37;
+			8'd148: cabac_rlps = 8'd21;
+			8'd149: cabac_rlps = 8'd26;
+			8'd150: cabac_rlps = 8'd30;
+			8'd151: cabac_rlps = 8'd35;
+			8'd152: cabac_rlps = 8'd20;
+			8'd153: cabac_rlps = 8'd24;
+			8'd154: cabac_rlps = 8'd29;
+			8'd155: cabac_rlps = 8'd33;
+			8'd156: cabac_rlps = 8'd19;
+			8'd157: cabac_rlps = 8'd23;
+			8'd158: cabac_rlps = 8'd27;
+			8'd159: cabac_rlps = 8'd31;
+			8'd160: cabac_rlps = 8'd18;
+			8'd161: cabac_rlps = 8'd22;
+			8'd162: cabac_rlps = 8'd26;
+			8'd163: cabac_rlps = 8'd30;
+			8'd164: cabac_rlps = 8'd17;
+			8'd165: cabac_rlps = 8'd21;
+			8'd166: cabac_rlps = 8'd25;
+			8'd167: cabac_rlps = 8'd28;
+			8'd168: cabac_rlps = 8'd16;
+			8'd169: cabac_rlps = 8'd20;
+			8'd170: cabac_rlps = 8'd23;
+			8'd171: cabac_rlps = 8'd27;
+			8'd172: cabac_rlps = 8'd15;
+			8'd173: cabac_rlps = 8'd19;
+			8'd174: cabac_rlps = 8'd22;
+			8'd175: cabac_rlps = 8'd25;
+			8'd176: cabac_rlps = 8'd14;
+			8'd177: cabac_rlps = 8'd18;
+			8'd178: cabac_rlps = 8'd21;
+			8'd179: cabac_rlps = 8'd24;
+			8'd180: cabac_rlps = 8'd14;
+			8'd181: cabac_rlps = 8'd17;
+			8'd182: cabac_rlps = 8'd20;
+			8'd183: cabac_rlps = 8'd23;
+			8'd184: cabac_rlps = 8'd13;
+			8'd185: cabac_rlps = 8'd16;
+			8'd186: cabac_rlps = 8'd19;
+			8'd187: cabac_rlps = 8'd22;
+			8'd188: cabac_rlps = 8'd12;
+			8'd189: cabac_rlps = 8'd15;
+			8'd190: cabac_rlps = 8'd18;
+			8'd191: cabac_rlps = 8'd21;
+			8'd192: cabac_rlps = 8'd12;
+			8'd193: cabac_rlps = 8'd14;
+			8'd194: cabac_rlps = 8'd17;
+			8'd195: cabac_rlps = 8'd20;
+			8'd196: cabac_rlps = 8'd11;
+			8'd197: cabac_rlps = 8'd14;
+			8'd198: cabac_rlps = 8'd16;
+			8'd199: cabac_rlps = 8'd19;
+			8'd200: cabac_rlps = 8'd11;
+			8'd201: cabac_rlps = 8'd13;
+			8'd202: cabac_rlps = 8'd15;
+			8'd203: cabac_rlps = 8'd18;
+			8'd204: cabac_rlps = 8'd10;
+			8'd205: cabac_rlps = 8'd12;
+			8'd206: cabac_rlps = 8'd15;
+			8'd207: cabac_rlps = 8'd17;
+			8'd208: cabac_rlps = 8'd10;
+			8'd209: cabac_rlps = 8'd12;
+			8'd210: cabac_rlps = 8'd14;
+			8'd211: cabac_rlps = 8'd16;
+			8'd212: cabac_rlps = 8'd9;
+			8'd213: cabac_rlps = 8'd11;
+			8'd214: cabac_rlps = 8'd13;
+			8'd215: cabac_rlps = 8'd15;
+			8'd216: cabac_rlps = 8'd9;
+			8'd217: cabac_rlps = 8'd11;
+			8'd218: cabac_rlps = 8'd12;
+			8'd219: cabac_rlps = 8'd14;
+			8'd220: cabac_rlps = 8'd8;
+			8'd221: cabac_rlps = 8'd10;
+			8'd222: cabac_rlps = 8'd12;
+			8'd223: cabac_rlps = 8'd14;
+			8'd224: cabac_rlps = 8'd8;
+			8'd225: cabac_rlps = 8'd9;
+			8'd226: cabac_rlps = 8'd11;
+			8'd227: cabac_rlps = 8'd13;
+			8'd228: cabac_rlps = 8'd7;
+			8'd229: cabac_rlps = 8'd9;
+			8'd230: cabac_rlps = 8'd11;
+			8'd231: cabac_rlps = 8'd12;
+			8'd232: cabac_rlps = 8'd7;
+			8'd233: cabac_rlps = 8'd9;
+			8'd234: cabac_rlps = 8'd10;
+			8'd235: cabac_rlps = 8'd12;
+			8'd236: cabac_rlps = 8'd7;
+			8'd237: cabac_rlps = 8'd8;
+			8'd238: cabac_rlps = 8'd10;
+			8'd239: cabac_rlps = 8'd11;
+			8'd240: cabac_rlps = 8'd6;
+			8'd241: cabac_rlps = 8'd8;
+			8'd242: cabac_rlps = 8'd9;
+			8'd243: cabac_rlps = 8'd11;
+			8'd244: cabac_rlps = 8'd6;
+			8'd245: cabac_rlps = 8'd7;
+			8'd246: cabac_rlps = 8'd9;
+			8'd247: cabac_rlps = 8'd10;
+			8'd248: cabac_rlps = 8'd6;
+			8'd249: cabac_rlps = 8'd7;
+			8'd250: cabac_rlps = 8'd8;
+			8'd251: cabac_rlps = 8'd9;
+			8'd252: cabac_rlps = 8'd2;
+			8'd253: cabac_rlps = 8'd2;
+			8'd254: cabac_rlps = 8'd2;
+			8'd255: cabac_rlps = 8'd2;
+			default: cabac_rlps = 8'd2;
+		endcase
+	endfunction
+	function automatic [1:0] sv2v_cast_2;
+		input reg [1:0] inp;
+		sv2v_cast_2 = inp;
+	endfunction
+	assign rlps = cabac_rlps(ps_cur, sv2v_cast_2(range_q[8:6] - 3'd4));
+	function automatic [8:0] sv2v_cast_9;
+		input reg [8:0] inp;
+		sv2v_cast_9 = inp;
+	endfunction
+	assign r_mps_v = range_q - sv2v_cast_9(rlps);
+	assign is_lps = value_q >= r_mps_v;
+	assign r_dec = (is_lps ? sv2v_cast_9(rlps) : r_mps_v);
+	wire [8:0] v_dec;
+	assign v_dec = (is_lps ? value_q - r_mps_v : value_q);
+	function automatic [2:0] rshift;
+		input reg [8:0] r;
+		reg [0:1] _sv2v_jump;
+		begin
+			_sv2v_jump = 2'b00;
+			if (r[8]) begin
+				rshift = 3'd0;
+				_sv2v_jump = 2'b11;
+			end
+			if (_sv2v_jump == 2'b00) begin
+				if (r[7]) begin
+					rshift = 3'd1;
+					_sv2v_jump = 2'b11;
+				end
+				if (_sv2v_jump == 2'b00) begin
+					if (r[6]) begin
+						rshift = 3'd2;
+						_sv2v_jump = 2'b11;
+					end
+					if (_sv2v_jump == 2'b00) begin
+						if (r[5]) begin
+							rshift = 3'd3;
+							_sv2v_jump = 2'b11;
+						end
+						if (_sv2v_jump == 2'b00) begin
+							if (r[4]) begin
+								rshift = 3'd4;
+								_sv2v_jump = 2'b11;
+							end
+							if (_sv2v_jump == 2'b00) begin
+								if (r[3]) begin
+									rshift = 3'd5;
+									_sv2v_jump = 2'b11;
+								end
+								if (_sv2v_jump == 2'b00) begin
+									if (r[2]) begin
+										rshift = 3'd6;
+										_sv2v_jump = 2'b11;
+									end
+									if (_sv2v_jump == 2'b00) begin
+										rshift = 3'd7;
+										_sv2v_jump = 2'b11;
+									end
+								end
+							end
+						end
+					end
+				end
+			end
+		end
+	endfunction
+	wire [8:0] r_term;
+	assign r_term = range_q - 9'd2;
+	wire term_hit;
+	assign term_hit = value_q >= r_term;
+	reg [2:0] shn;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		(* full_case, parallel_case *)
+		case (op)
+			2'd0: shn = rshift(r_dec);
+			2'd1: shn = 3'd1;
+			default: shn = (term_hit ? 3'd0 : rshift(r_term));
+		endcase
+	end
+	reg [8:0] v_shifted;
+	function automatic [15:0] sv2v_cast_16;
+		input reg [15:0] inp;
+		sv2v_cast_16 = inp;
+	endfunction
+	always @(*) begin : sv2v_autoblock_2
+		reg [6:0] hi7;
+		if (_sv2v_0)
+			;
+		hi7 = show[23:17];
+		v_shifted = sv2v_cast_9((sv2v_cast_16(v_dec) << shn) | sv2v_cast_16(hi7 >> (3'd7 - shn)));
+	end
+	wire [9:0] v_byp10;
+	wire [8:0] v_byp;
+	wire byp_one;
+	assign v_byp10 = {value_q, show[23]};
+	assign byp_one = v_byp10 >= {1'b0, range_q};
+	assign v_byp = (byp_one ? sv2v_cast_9(v_byp10 - {1'b0, range_q}) : v_byp10[8:0]);
+	wire can_run;
+	function automatic [6:0] sv2v_cast_7;
+		input reg [6:0] inp;
+		sv2v_cast_7 = inp;
+	endfunction
+	assign can_run = ((st_q == 2'd0) && op_valid) && ((shn == 3'd0) || (sv2v_cast_7(shn) <= avail));
+	assign op_ready = can_run;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		req_valid = 1'b0;
+		req_bits = 1'sb0;
+		if (st_q == 2'd2) begin
+			if (avail >= 7'd9) begin
+				req_valid = 1'b1;
+				req_bits = 5'd9;
+			end
+		end
+		else if (can_run && (shn != 3'd0)) begin
+			req_valid = 1'b1;
+			req_bits = {2'b00, shn};
+		end
+	end
+	reg [8:0] v_term_sh;
+	always @(*) begin : sv2v_autoblock_3
+		reg [6:0] hi7;
+		if (_sv2v_0)
+			;
+		hi7 = show[23:17];
+		v_term_sh = sv2v_cast_9((sv2v_cast_16(value_q) << shn) | sv2v_cast_16(hi7 >> (3'd7 - shn)));
+	end
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		(* full_case, parallel_case *)
+		case (op)
+			2'd0: bin = (is_lps ? !mps_cur : mps_cur);
+			2'd1: bin = byp_one;
+			default: bin = term_hit;
+		endcase
+	end
+	function automatic [5:0] cabac_tlps;
+		input reg [5:0] st;
+		(* full_case, parallel_case *)
+		case (st)
+			6'd0: cabac_tlps = 6'd0;
+			6'd1: cabac_tlps = 6'd0;
+			6'd2: cabac_tlps = 6'd1;
+			6'd3: cabac_tlps = 6'd2;
+			6'd4: cabac_tlps = 6'd2;
+			6'd5: cabac_tlps = 6'd4;
+			6'd6: cabac_tlps = 6'd4;
+			6'd7: cabac_tlps = 6'd5;
+			6'd8: cabac_tlps = 6'd6;
+			6'd9: cabac_tlps = 6'd7;
+			6'd10: cabac_tlps = 6'd8;
+			6'd11: cabac_tlps = 6'd9;
+			6'd12: cabac_tlps = 6'd9;
+			6'd13: cabac_tlps = 6'd11;
+			6'd14: cabac_tlps = 6'd11;
+			6'd15: cabac_tlps = 6'd12;
+			6'd16: cabac_tlps = 6'd13;
+			6'd17: cabac_tlps = 6'd13;
+			6'd18: cabac_tlps = 6'd15;
+			6'd19: cabac_tlps = 6'd15;
+			6'd20: cabac_tlps = 6'd16;
+			6'd21: cabac_tlps = 6'd16;
+			6'd22: cabac_tlps = 6'd18;
+			6'd23: cabac_tlps = 6'd18;
+			6'd24: cabac_tlps = 6'd19;
+			6'd25: cabac_tlps = 6'd19;
+			6'd26: cabac_tlps = 6'd21;
+			6'd27: cabac_tlps = 6'd21;
+			6'd28: cabac_tlps = 6'd22;
+			6'd29: cabac_tlps = 6'd22;
+			6'd30: cabac_tlps = 6'd23;
+			6'd31: cabac_tlps = 6'd24;
+			6'd32: cabac_tlps = 6'd24;
+			6'd33: cabac_tlps = 6'd25;
+			6'd34: cabac_tlps = 6'd26;
+			6'd35: cabac_tlps = 6'd26;
+			6'd36: cabac_tlps = 6'd27;
+			6'd37: cabac_tlps = 6'd27;
+			6'd38: cabac_tlps = 6'd28;
+			6'd39: cabac_tlps = 6'd29;
+			6'd40: cabac_tlps = 6'd29;
+			6'd41: cabac_tlps = 6'd30;
+			6'd42: cabac_tlps = 6'd30;
+			6'd43: cabac_tlps = 6'd30;
+			6'd44: cabac_tlps = 6'd31;
+			6'd45: cabac_tlps = 6'd32;
+			6'd46: cabac_tlps = 6'd32;
+			6'd47: cabac_tlps = 6'd33;
+			6'd48: cabac_tlps = 6'd33;
+			6'd49: cabac_tlps = 6'd33;
+			6'd50: cabac_tlps = 6'd34;
+			6'd51: cabac_tlps = 6'd34;
+			6'd52: cabac_tlps = 6'd35;
+			6'd53: cabac_tlps = 6'd35;
+			6'd54: cabac_tlps = 6'd35;
+			6'd55: cabac_tlps = 6'd36;
+			6'd56: cabac_tlps = 6'd36;
+			6'd57: cabac_tlps = 6'd36;
+			6'd58: cabac_tlps = 6'd37;
+			6'd59: cabac_tlps = 6'd37;
+			6'd60: cabac_tlps = 6'd37;
+			6'd61: cabac_tlps = 6'd38;
+			6'd62: cabac_tlps = 6'd38;
+			6'd63: cabac_tlps = 6'd63;
+		endcase
+	endfunction
+	function automatic [5:0] cabac_tmps;
+		input reg [5:0] st;
+		(* full_case, parallel_case *)
+		case (st)
+			6'd0: cabac_tmps = 6'd1;
+			6'd1: cabac_tmps = 6'd2;
+			6'd2: cabac_tmps = 6'd3;
+			6'd3: cabac_tmps = 6'd4;
+			6'd4: cabac_tmps = 6'd5;
+			6'd5: cabac_tmps = 6'd6;
+			6'd6: cabac_tmps = 6'd7;
+			6'd7: cabac_tmps = 6'd8;
+			6'd8: cabac_tmps = 6'd9;
+			6'd9: cabac_tmps = 6'd10;
+			6'd10: cabac_tmps = 6'd11;
+			6'd11: cabac_tmps = 6'd12;
+			6'd12: cabac_tmps = 6'd13;
+			6'd13: cabac_tmps = 6'd14;
+			6'd14: cabac_tmps = 6'd15;
+			6'd15: cabac_tmps = 6'd16;
+			6'd16: cabac_tmps = 6'd17;
+			6'd17: cabac_tmps = 6'd18;
+			6'd18: cabac_tmps = 6'd19;
+			6'd19: cabac_tmps = 6'd20;
+			6'd20: cabac_tmps = 6'd21;
+			6'd21: cabac_tmps = 6'd22;
+			6'd22: cabac_tmps = 6'd23;
+			6'd23: cabac_tmps = 6'd24;
+			6'd24: cabac_tmps = 6'd25;
+			6'd25: cabac_tmps = 6'd26;
+			6'd26: cabac_tmps = 6'd27;
+			6'd27: cabac_tmps = 6'd28;
+			6'd28: cabac_tmps = 6'd29;
+			6'd29: cabac_tmps = 6'd30;
+			6'd30: cabac_tmps = 6'd31;
+			6'd31: cabac_tmps = 6'd32;
+			6'd32: cabac_tmps = 6'd33;
+			6'd33: cabac_tmps = 6'd34;
+			6'd34: cabac_tmps = 6'd35;
+			6'd35: cabac_tmps = 6'd36;
+			6'd36: cabac_tmps = 6'd37;
+			6'd37: cabac_tmps = 6'd38;
+			6'd38: cabac_tmps = 6'd39;
+			6'd39: cabac_tmps = 6'd40;
+			6'd40: cabac_tmps = 6'd41;
+			6'd41: cabac_tmps = 6'd42;
+			6'd42: cabac_tmps = 6'd43;
+			6'd43: cabac_tmps = 6'd44;
+			6'd44: cabac_tmps = 6'd45;
+			6'd45: cabac_tmps = 6'd46;
+			6'd46: cabac_tmps = 6'd47;
+			6'd47: cabac_tmps = 6'd48;
+			6'd48: cabac_tmps = 6'd49;
+			6'd49: cabac_tmps = 6'd50;
+			6'd50: cabac_tmps = 6'd51;
+			6'd51: cabac_tmps = 6'd52;
+			6'd52: cabac_tmps = 6'd53;
+			6'd53: cabac_tmps = 6'd54;
+			6'd54: cabac_tmps = 6'd55;
+			6'd55: cabac_tmps = 6'd56;
+			6'd56: cabac_tmps = 6'd57;
+			6'd57: cabac_tmps = 6'd58;
+			6'd58: cabac_tmps = 6'd59;
+			6'd59: cabac_tmps = 6'd60;
+			6'd60: cabac_tmps = 6'd61;
+			6'd61: cabac_tmps = 6'd62;
+			6'd62: cabac_tmps = 6'd62;
+			6'd63: cabac_tmps = 6'd63;
+		endcase
+	endfunction
+	function automatic [5:0] sv2v_cast_6;
+		input reg [5:0] inp;
+		sv2v_cast_6 = inp;
+	endfunction
+	always @(posedge clk or negedge rst_n)
+		if (!rst_n) begin
+			st_q <= 2'd0;
+			range_q <= 9'd510;
+			value_q <= 1'sb0;
+			ictx_q <= 1'sb0;
+			model_q <= 1'sb0;
+			mps <= 1'sb0;
+		end
+		else
+			(* full_case, parallel_case *)
+			case (st_q)
+				2'd0:
+					if (init_start) begin
+						ictx_q <= 1'sb0;
+						model_q <= init_model;
+						st_q <= 2'd1;
+					end
+					else if (can_run)
+						(* full_case, parallel_case *)
+						case (op)
+							2'd0: begin
+								range_q <= r_dec << shn;
+								value_q <= v_shifted;
+								if (is_lps) begin
+									if (ps_cur == 6'd0)
+										mps[op_ctx] <= !mps_cur;
+									pstate[op_ctx] <= cabac_tlps(ps_cur);
+								end
+								else
+									pstate[op_ctx] <= cabac_tmps(ps_cur);
+							end
+							2'd1: value_q <= v_byp;
+							default: begin
+								range_q <= (term_hit ? r_term : r_term << shn);
+								if (!term_hit)
+									value_q <= v_term_sh;
+							end
+						endcase
+				2'd1: begin
+					pstate[ictx_q] <= (pre <= 7'd63 ? sv2v_cast_6(7'd63 - pre) : sv2v_cast_6(pre - 7'd64));
+					mps[ictx_q] <= pre > 7'd63;
+					if (ictx_q == 9'd435) begin
+						range_q <= 9'd510;
+						st_q <= 2'd2;
+					end
+					else
+						ictx_q <= ictx_q + 9'd1;
+				end
+				2'd2:
+					if (avail >= 7'd9) begin
+						value_q <= show[23:15];
+						st_q <= 2'd0;
+					end
+				default: st_q <= 2'd0;
+			endcase
 	initial _sv2v_0 = 0;
 endmodule
 module intra4x4_pred (

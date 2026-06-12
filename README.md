@@ -72,13 +72,16 @@ c_model/src/
 路径与 >>4 相消、在 DC 路径不消 —— luma/chroma DC 反量化差 16 倍，修正后
 全矩阵一次通过。
 
-## RTL（R0-R4h + Wave 14 P 帧完成——完整 I/P 硬件解码器）
+## RTL（Wave 13/14/15 完成——双熵 I/P 硬件解码器）
 
-baseline **I/P** 完整解码核：**码流进、滤波后行流出，内部仅行缓冲
-（1080p）；参考帧留系统侧**，核经 clamp 语义行读通道取 MC 窗口，
-解码帧由系统回写为下一帧参考。Verilator 全链 .264→yuv：I 流
-**40/40 bit-exact**（make core-regress），多帧 IPPP 流（含 P
-deblocking 与回写闭环）**15/15 bit-exact**（make corep-regress）。
+**CAVLC + CABAC 双熵** baseline/main **I/P** 完整解码核：**码流进、
+滤波后行流出，内部仅行缓冲（1080p）；参考帧留系统侧**，核经 clamp
+语义行读通道取 MC 窗口，解码帧由系统回写为下一帧参考。熵路径按
+PPS 选择（cfg_cabac）：mb_dec（CAVLC）与 cabac_mb（CABAC，内嵌
+逐 bin 算术引擎）共享重建/滤波后端。Verilator 全链 .264→yuv：
+I 流 **60/60 bit-exact**（40 CAVLC + 20 CABAC，make core-regress），
+多帧 IPPP 流（P deblocking + 回写闭环）**30/30 bit-exact**
+（15 CAVLC + 15 CABAC，make corep-regress）。
 完整 I/P 核 ASAP7 综合 **300 MHz / ≈49.2k µm²（逻辑 29.7k + SRAM
 19.5k）**；I-only 形态 36.5k µm²，64x64 I 帧 3993 拍。优化历程
 R4a-R4h 与 P 核数据见 docs/synthesis_r3c.md。
@@ -96,7 +99,9 @@ R4a-R4h 与 P 核数据见 docs/synthesis_r3c.md。
 | mc_core + mc_fetch（15 qpel 相位 + 1/8 chroma + 取数协议） | 80,000 块随机对拍 |
 | mb_dec P 语法 + mv_pred（中值/P_Skip） | 24 流逐 MB 语法+MV bit-exact |
 | mb_recon MC 集成（p_rec_top） | 24 流逐 MB 像素 bit-exact |
-| **h264_core 多帧 I/P（P bS deblock + 回写闭环）** | **15 条 IPPP 流帧级 bit-exact** |
+| **h264_core 多帧 I/P（P bS deblock + 回写闭环）** | **30 条 IPPP 流帧级 bit-exact（双熵）** |
+| cabac_core（9.3.3.2 算术引擎，单拍/bin） | 833,673 bins 随机对拍 |
+| cabac_mb（CABAC I/P MB 层 + 残差全语法） | 20 向量逐 MB + 15 P 流帧级 bit-exact |
 
 一键回归：`make -C verification/tb rtl-regress`；P 链：
 `make -C verification/tb p-regress prec-regress corep-regress`；
@@ -104,8 +109,8 @@ R4a-R4h 与 P 核数据见 docs/synthesis_r3c.md。
 
 ## 下一步（docs/roadmap.md）
 
-RTL P 帧（Wave 14）已落地。可选扩展：P 性能优化（MC 串行取数
-~600 拍/MB）、CABAC 硬化、recon 并行化。
+RTL P 帧（Wave 14）与 CABAC 硬化（Wave 15）已落地。可选扩展：
+B 帧 RTL、CABAC 8x8 变换（high）、recon 并行化、MC/残差重叠。
 I_PCM 已实现（CAVLC 路径）但 x264 不产 PCM 流，待 JM 编码器补向量；
 CABAC+PCM 的引擎重初始化交接同样待 JM 向量后落地。
 
