@@ -294,4 +294,39 @@ prec-regress: prec
 	echo "=== prec-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
 	test $$fail -eq 0
 
-.PHONY: pparse p-regress prec prec-regress
+# full decoder objects for benches that call h264_decode() directly
+DEC_OBJS := $(CMODEL_BUILD)/bitstream.o $(CMODEL_BUILD)/nal.o \
+            $(CMODEL_BUILD)/params.o $(CMODEL_BUILD)/slice.o \
+            $(CMODEL_BUILD)/cavlc.o $(CMODEL_BUILD)/cabac.o \
+            $(CMODEL_BUILD)/intra.o $(CMODEL_BUILD)/transform.o \
+            $(CMODEL_BUILD)/mc.o $(CMODEL_BUILD)/deblock.o \
+            $(CMODEL_BUILD)/decoder.o
+
+corep:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module h264_core \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_corep \
+	  -I$(REPO)/rtl/include -I$(RTL_DIR) \
+	  $(RTL_DIR)/h264_core.sv $(RTL_DIR)/bitreader.sv $(RTL_DIR)/expgolomb.sv \
+	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/mb_recon.sv \
+	  $(RTL_DIR)/mc_fetch.sv $(RTL_DIR)/mc_core.sv $(RTL_DIR)/mv_pred.sv \
+	  $(RTL_DIR)/intra4x4_pred.sv $(RTL_DIR)/intra_full_pred.sv \
+	  $(RTL_DIR)/deblock_stream.sv $(RTL_DIR)/deblock_edge.sv \
+	  tb_h264_core_p.cpp $(DEC_OBJS)
+	@echo built
+
+# multi-frame I/P streams through the full core with writeback
+corep-regress: corep
+	@pass=0; skip=0; fail=0; \
+	for V in $(REPO)/verification/vectors/phase13/*.264 \
+	         $(REPO)/verification/vectors/phase1[5-9]/*.264; do \
+	  r=$$(./obj_dir_corep/Vh264_core $$V 2>&1 | tail -1); \
+	  case "$$r" in \
+	    \[PASS\]*) pass=$$((pass+1));; \
+	    \[SKIP\]*) skip=$$((skip+1));; \
+	    *) fail=$$((fail+1)); echo "$$(basename $$V): $$r";; \
+	  esac; \
+	done; \
+	echo "=== corep-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
+	test $$fail -eq 0
+
+.PHONY: pparse p-regress prec prec-regress corep corep-regress

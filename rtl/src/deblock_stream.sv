@@ -32,6 +32,10 @@ module deblock_stream #(
     input  logic [7:0]  mb_x,
     input  logic [7:0]  mb_y,
     input  logic [5:0]  mb_qp,
+    input  logic        mb_inter,      // P MB (skip incl.): bS 0..2 rules
+    input  logic [15:0] mb_nz,         // raster 4x4 luma nz bitmap
+    input  logic signed [15:0] mb_mvx [16],   // raster 4x4 MVs
+    input  logic signed [15:0] mb_mvy [16],
     input  logic [7:0]  in_y [256],
     input  logic [7:0]  in_u [64],
     input  logic [7:0]  in_v [64],
@@ -89,6 +93,29 @@ module deblock_stream #(
     logic [MAX_MBW-1:0] row_vld;       // packed: not a memory, so the
                                        // async-reset clear is legal
 
+    // motion/nz sideband (P bS): current MB, left MB, and the bottom
+    // row of the MB above (133b packed words in row_mi)
+    logic        cur_int, lft_int, top_int;
+    logic [15:0] cur_nz, lft_nz;
+    logic [3:0]  top_nz;
+    logic signed [15:0] cur_mvx [16];
+    logic signed [15:0] cur_mvy [16];
+    logic signed [15:0] lft_mvx [16];
+    logic signed [15:0] lft_mvy [16];
+    logic signed [15:0] top_mvx [4];
+    logic signed [15:0] top_mvy [4];
+    logic [132:0] row_mi [MAX_MBW];
+    wire  [132:0] row_mi_rd = row_mi[cur_x];
+    logic [132:0] lft_mi_pack;
+    always_comb begin
+        lft_mi_pack[0] = lft_int;
+        for (int i = 0; i < 4; i++) begin
+            lft_mi_pack[1 + i] = lft_nz[12 + i];
+            lft_mi_pack[5  + i*32 +: 16] = lft_mvx[12 + i];
+            lft_mi_pack[21 + i*32 +: 16] = lft_mvy[12 + i];
+        end
+    end
+
     // top-rows working copy for horizontal edge 0 — byte-array form:
     // dynamic part-selects on array words turn into $shl cells sv2v/yosys
     // choke on, so these are plain byte registers
@@ -132,10 +159,65 @@ module deblock_stream #(
                        9'(cfg_a_off));
     assign ib = clip51($signed({3'b0, chroma_phase ? qpcav : qpav}) +
                        9'(cfg_b_off));
+    // boundary strength (8.7.2.1, single-list subset): intra -> 4/3,
+    // any nz -> 2, |dmv| >= 4 quarter-pel -> 1, else 0 (no filtering).
+    // All-I streams reduce to the old constant 4/3.
     logic [2:0] bs;
-    assign bs = (e_q == 0) ? 3'd4 : 3'd3;
+    always_comb begin
+        logic [1:0] brow, bcol;
+        logic p_intra, q_intra, p_nz, q_nz;
+        logic signed [15:0] pmx, pmy, qmx, qmy;
+        logic signed [16:0] dmx, dmy;
+        logic [3:0] qi;
+        brow = '0; bcol = '0;
+        unique case (st_q)
+        S_VL: begin brow = line_q[3:2]; bcol = e_q; end
+        S_VC: begin brow = line_q[2:1]; bcol = {e_q[0], 1'b0}; end
+        S_HL: begin brow = e_q; bcol = line_q[3:2]; end
+        S_HC: begin brow = {e_q[0], 1'b0}; bcol = line_q[2:1]; end
+        default: ;
+        endcase
+        qi = {brow, bcol};
+        q_intra = !cur_int;
+        q_nz = cur_nz[qi];
+        qmx = cur_mvx[qi]; qmy = cur_mvy[qi];
+        if (!dir_h) begin
+            if (bcol == 2'd0) begin
+                p_intra = !lft_int;
+                p_nz = lft_nz[{brow, 2'd3}];
+                pmx = lft_mvx[{brow, 2'd3}];
+                pmy = lft_mvy[{brow, 2'd3}];
+            end else begin
+                p_intra = !cur_int;
+                p_nz = cur_nz[{brow, bcol - 2'd1}];
+                pmx = cur_mvx[{brow, bcol - 2'd1}];
+                pmy = cur_mvy[{brow, bcol - 2'd1}];
+            end
+        end else begin
+            if (brow == 2'd0) begin
+                p_intra = !top_int;
+                p_nz = top_nz[bcol];
+                pmx = top_mvx[bcol];
+                pmy = top_mvy[bcol];
+            end else begin
+                p_intra = !cur_int;
+                p_nz = cur_nz[{brow - 2'd1, bcol}];
+                pmx = cur_mvx[{brow - 2'd1, bcol}];
+                pmy = cur_mvy[{brow - 2'd1, bcol}];
+            end
+        end
+        dmx = 17'(pmx) - 17'(qmx);
+        if (dmx < 0) dmx = -dmx;
+        dmy = 17'(pmy) - 17'(qmy);
+        if (dmy < 0) dmy = -dmy;
+        if (p_intra || q_intra) bs = (e_q == 2'd0) ? 3'd4 : 3'd3;
+        else if (p_nz || q_nz) bs = 3'd2;
+        else if (dmx >= 17'sd4 || dmy >= 17'sd4) bs = 3'd1;
+        else bs = 3'd0;
+    end
     logic [4:0] tc0;
-    assign tc0 = (bs < 3'd4) ? dbf_tc0(ia, 2'(bs - 3'd1)) : 5'd0;
+    assign tc0 = (bs != 3'd0 && bs < 3'd4) ? dbf_tc0(ia, 2'(bs - 3'd1))
+                                           : 5'd0;
 
     // ---- sample gather (p3..p0 q0..q3 for the current line) ----
     logic [7:0] smp [8];
@@ -235,6 +317,12 @@ module deblock_stream #(
                         cur_v[i] <= in_v[i];
                     end
                     cur_qp <= mb_qp;
+                    cur_int <= mb_inter;
+                    cur_nz <= mb_nz;
+                    for (int i = 0; i < 16; i++) begin
+                        cur_mvx[i] <= mb_mvx[i];
+                        cur_mvy[i] <= mb_mvy[i];
+                    end
                     cur_x <= mb_x;
                     cur_yc <= mb_y;
                     if (mb_x == 8'd0) lft_valid <= 1'b0;
@@ -246,7 +334,7 @@ module deblock_stream #(
             end
 
             S_VL: begin
-                if (cfg_enable && !(e_q == 0 && skip_v0)) begin
+                if (cfg_enable && !(e_q == 0 && skip_v0)) begin if (bs != 3'd0) begin
                     int e4, ln;
                     e4 = int'(e_q) * 4;
                     ln = int'(line_q);
@@ -266,7 +354,7 @@ module deblock_stream #(
                         if (x < 0) lft_y[ln * 16 + 16 + x] <= v;
                         else cur_y[ln * 16 + x] <= v;
                     end
-                end
+                end end
                 if ((e_q == 0 && skip_v0) || line_q == 5'd15) begin
                     line_q <= '0;
                     if (e_q == 2'd3) begin
@@ -278,7 +366,7 @@ module deblock_stream #(
             end
 
             S_VC: begin
-                if (cfg_enable && !(e_q == 0 && skip_v0)) begin
+                if (cfg_enable && !(e_q == 0 && skip_v0)) begin if (bs != 3'd0) begin
                     int e4, ln;
                     e4 = int'(e_q) * 4;
                     ln = int'(line_q);
@@ -300,7 +388,7 @@ module deblock_stream #(
                             else cur_u[ln * 8 + x] <= v;
                         end
                     end
-                end
+                end end
                 if ((e_q == 0 && skip_v0) || line_q == 5'd7) begin
                     line_q <= '0;
                     if (!comp_q) comp_q <= 1'b1;
@@ -330,6 +418,12 @@ module deblock_stream #(
                                                11'(4 + r)][c*8 +: 8];
                     end
                 end
+                top_int <= row_mi_rd[0];
+                for (int i = 0; i < 4; i++) begin
+                    top_nz[i] <= row_mi_rd[1 + i];
+                    top_mvx[i] <= row_mi_rd[5  + i*32 +: 16];
+                    top_mvy[i] <= row_mi_rd[21 + i*32 +: 16];
+                end
                 dir_h <= 1'b1;
                 e_q <= '0;
                 line_q <= '0;
@@ -337,7 +431,7 @@ module deblock_stream #(
             end
 
             S_HL: begin
-                if (cfg_enable && !(e_q == 0 && skip_h0)) begin
+                if (cfg_enable && !(e_q == 0 && skip_h0)) begin if (bs != 3'd0) begin
                     int e4, ln;
                     e4 = int'(e_q) * 4;
                     ln = int'(line_q);
@@ -356,7 +450,7 @@ module deblock_stream #(
                         if (y < 0) top_y_q[4 + y][ln] <= v;
                         else cur_y[y * 16 + ln] <= v;
                     end
-                end
+                end end
                 if ((e_q == 0 && skip_h0) || line_q == 5'd15) begin
                     line_q <= '0;
                     if (e_q == 2'd3) begin
@@ -368,7 +462,7 @@ module deblock_stream #(
             end
 
             S_HC: begin
-                if (cfg_enable && !(e_q == 0 && skip_h0)) begin
+                if (cfg_enable && !(e_q == 0 && skip_h0)) begin if (bs != 3'd0) begin
                     int e4, ln;
                     e4 = int'(e_q) * 4;
                     ln = int'(line_q);
@@ -390,7 +484,7 @@ module deblock_stream #(
                             else cur_u[y * 8 + ln] <= v;
                         end
                     end
-                end
+                end end
                 if ((e_q == 0 && skip_h0) || line_q == 5'd7) begin
                     line_q <= '0;
                     if (!comp_q) comp_q <= 1'b1;
@@ -471,6 +565,7 @@ module deblock_stream #(
                         emit_q <= emit_q + 5'd1;
                     end else begin
                         row_qp[cur_x - 8'd1] <= lft_qp;
+                        row_mi[cur_x - 8'd1] <= lft_mi_pack;
                         row_vld[cur_x - 8'd1] <= 1'b1;
                         emit_q <= '0;
                         st_q <= S_SHIFT;
@@ -488,6 +583,12 @@ module deblock_stream #(
                     lft_v[i] <= cur_v[i];
                 end
                 lft_qp <= cur_qp;
+                lft_int <= cur_int;
+                lft_nz <= cur_nz;
+                for (int i = 0; i < 16; i++) begin
+                    lft_mvx[i] <= cur_mvx[i];
+                    lft_mvy[i] <= cur_mvy[i];
+                end
                 lft_valid <= 1'b1;
                 // row end: the rightmost MB also enters the row buffer
                 if (cur_x + 8'd1 == cfg_mb_w) begin
@@ -517,6 +618,7 @@ module deblock_stream #(
                     emit_q <= emit_q + 5'd1;
                 end else begin
                     row_qp[cur_x] <= lft_qp;
+                    row_mi[cur_x] <= lft_mi_pack;
                     row_vld[cur_x] <= 1'b1;
                     lft_valid <= 1'b0;
                     emit_q <= '0;

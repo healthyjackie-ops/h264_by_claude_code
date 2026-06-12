@@ -106,6 +106,7 @@ module h264_top #(
         .blk_busy(blk_busy), .blk_done(blk_done), .blk_err(blk_err),
         .blk_tc(blk_tc), .blk_coef_we(blk_coef_we),
         .blk_coef_addr(blk_coef_addr), .blk_coef_data(blk_coef_data),
+        .mb_nz(),
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
@@ -125,7 +126,8 @@ module h264_top #(
     always_comb for (int zi = 0; zi < 16; zi++) zero_mv[zi] = '0;
 
     mb_recon #(.MAX_MBW(MAX_MBW)) u_rec (
-        .mb_inter(1'b0), .mb_mvx(zero_mv), .mb_mvy(zero_mv),
+        .mb_inter(1'b0), .mb_nz('0), .mb_mvx(zero_mv), .mb_mvy(zero_mv),
+        .rec_inter(), .rec_nz(), .rec_mvx(), .rec_mvy(),
         .mc_req_valid(), .mc_req_plane(), .mc_req_x(), .mc_req_y(),
         .mc_req_w(),
         .mc_rsp_valid(1'b0), .mc_rsp_data('0),

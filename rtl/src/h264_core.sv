@@ -1,7 +1,9 @@
-// h264_core — synthesis top (rtl_spec.md R3c, deblock integrated R4g):
-// bitreader -> mb_dec -> cavlc_block -> mb_recon -> deblock_stream.
-// The complete baseline-I decoder: bitstream in, filtered macroblock
-// rows out, with only line buffers inside (no frame storage).
+// h264_core — synthesis top (rtl_spec.md R3c, deblock integrated R4g,
+// P slices P-R3e): bitreader -> mb_dec -> cavlc_block -> (mv_pred) ->
+// mb_recon (MC) -> deblock_stream. The complete baseline I/P decoder:
+// bitstream in, filtered macroblock rows out, only line buffers inside.
+// The reference frame stays system-side behind the row-read channel
+// (DDR in silicon); the system feeds back decoded frames as references.
 module h264_core #(
     parameter int MAX_MBW = 120        // 1080p line buffers
 )(
@@ -20,6 +22,7 @@ module h264_core #(
     input  logic signed [5:0] cfg_a_off,
     input  logic signed [5:0] cfg_b_off,
     input  logic        cfg_deblock,
+    input  logic        cfg_is_p,
 
     input  logic        start,
     input  logic        align_valid,
@@ -32,6 +35,15 @@ module h264_core #(
     output logic [1:0]  out_plane,
     output logic [3:0]  out_row,
     output logic [127:0] out_data,
+
+    // reference-frame row-read channel (P slices)
+    output logic        mc_req_valid,
+    output logic [1:0]  mc_req_plane,
+    output logic signed [12:0] mc_req_x,
+    output logic signed [11:0] mc_req_y,
+    output logic [3:0]  mc_req_w,
+    input  logic        mc_rsp_valid,
+    input  logic [71:0] mc_rsp_data,
 
     output logic        frame_done,
     output logic        err
@@ -92,9 +104,19 @@ module h264_core #(
     logic [7:0] rec_x, rec_yc;
     logic [5:0] rec_qp;
 
+
+    logic        mb_skip, mb_inter, skip_go_w, mvd_valid;
+    logic [15:0] mb_nz_w;
+    logic [2:0]  mb_ptype;
+    logic [7:0]  mb_sub;
+    logic signed [15:0] mvd_x, mvd_y;
+    logic signed [15:0] mv_x_w [16];
+    logic signed [15:0] mv_y_w [16];
+
     mb_dec #(.MAX_MBW(MAX_MBW)) u_mb (
         .clk(clk), .rst_n(rst_n),
-        .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_qp(cfg_qp), .cfg_is_p(1'b0),
+        .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_qp(cfg_qp),
+        .cfg_is_p(cfg_is_p),
         .start(start),
         .req_valid(m_req_valid), .req_bits(m_req_bits),
         .req_ready(br_req_ready), .show(show), .avail(avail),
@@ -103,6 +125,9 @@ module h264_core #(
         .blk_busy(blk_busy), .blk_done(blk_done), .blk_err(blk_err),
         .blk_tc(blk_tc), .blk_coef_we(blk_coef_we),
         .blk_coef_addr(blk_coef_addr), .blk_coef_data(blk_coef_data),
+        .mb_skip(mb_skip), .mb_inter(mb_inter), .mb_ptype(mb_ptype),
+        .mb_sub(mb_sub), .mvd_valid(mvd_valid), .mvd_x(mvd_x),
+        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(mb_nz_w),
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
@@ -112,21 +137,29 @@ module h264_core #(
         .rec_done(rec_accept)
     );
 
+
+    mv_pred #(.MAX_MBW(MAX_MBW)) u_mv (
+        .clk(clk), .rst_n(rst_n),
+        .cfg_mb_w(cfg_mb_w), .start(start),
+        .mb_ptype(mb_ptype), .mb_sub(mb_sub),
+        .mvd_valid(mvd_valid), .mvd_x(mvd_x), .mvd_y(mvd_y),
+        .skip_go(skip_go_w), .commit(rec_accept),
+        .mb_inter(mb_inter), .mb_skip(mb_skip),
+        .mv_out_x(mv_x_w), .mv_out_y(mv_y_w)
+    );
+
     logic [7:0] rec_py [256];
     logic [7:0] rec_pu [64];
     logic [7:0] rec_pv [64];
     logic dbf_ready, rec_busy;
     logic slice_done;
 
-    // I-only cores: inter path tied off
-    logic signed [15:0] zero_mv [16];
-    always_comb for (int zi = 0; zi < 16; zi++) zero_mv[zi] = '0;
-
     mb_recon #(.MAX_MBW(MAX_MBW)) u_rec (
-        .mb_inter(1'b0), .mb_mvx(zero_mv), .mb_mvy(zero_mv),
-        .mc_req_valid(), .mc_req_plane(), .mc_req_x(), .mc_req_y(),
-        .mc_req_w(),
-        .mc_rsp_valid(1'b0), .mc_rsp_data('0),
+        .mb_inter(mb_inter), .mb_nz(mb_nz_w),
+        .mb_mvx(mv_x_w), .mb_mvy(mv_y_w),
+        .mc_req_valid(mc_req_valid), .mc_req_plane(mc_req_plane),
+        .mc_req_x(mc_req_x), .mc_req_y(mc_req_y), .mc_req_w(mc_req_w),
+        .mc_rsp_valid(mc_rsp_valid), .mc_rsp_data(mc_rsp_data),
         .clk(clk), .rst_n(rst_n),
         .cfg_mb_w(cfg_mb_w), .cfg_cqp_off(cfg_cqp_off),
         .coef_we(coef_we), .coef_blk(coef_blk), .coef_addr(coef_addr),
@@ -138,8 +171,15 @@ module h264_core #(
         .rec_x(rec_x), .rec_yc(rec_yc), .rec_qp(rec_qp),
         .rec_valid(rec_valid),
         .rec_y(rec_py), .rec_u(rec_pu), .rec_v(rec_pv),
+        .rec_inter(rec_inter), .rec_nz(rec_nz),
+        .rec_mvx(rec_mvx), .rec_mvy(rec_mvy),
         .err(rec_err)
     );
+
+    logic        rec_inter;
+    logic [15:0] rec_nz;
+    logic signed [15:0] rec_mvx [16];
+    logic signed [15:0] rec_mvy [16];
 
     // flush once parsing is done and the last MB has reconstructed
     logic slice_done_q, flush_q, dbf_done;
@@ -163,6 +203,8 @@ module h264_core #(
         .cfg_a_off(cfg_a_off), .cfg_b_off(cfg_b_off),
         .cfg_enable(cfg_deblock),
         .mb_push(rec_valid), .mb_x(rec_x), .mb_y(rec_yc), .mb_qp(rec_qp),
+        .mb_inter(rec_inter), .mb_nz(rec_nz),
+        .mb_mvx(rec_mvx), .mb_mvy(rec_mvy),
         .in_y(rec_py), .in_u(rec_pu), .in_v(rec_pv),
         .mb_ready(dbf_ready),
         .flush(flush_q && !dbf_done), .flush_done(dbf_done),

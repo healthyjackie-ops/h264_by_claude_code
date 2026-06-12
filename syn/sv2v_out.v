@@ -12,6 +12,7 @@ module h264_core (
 	cfg_a_off,
 	cfg_b_off,
 	cfg_deblock,
+	cfg_is_p,
 	start,
 	align_valid,
 	align_bits,
@@ -21,6 +22,13 @@ module h264_core (
 	out_plane,
 	out_row,
 	out_data,
+	mc_req_valid,
+	mc_req_plane,
+	mc_req_x,
+	mc_req_y,
+	mc_req_w,
+	mc_rsp_valid,
+	mc_rsp_data,
 	frame_done,
 	err
 );
@@ -38,6 +46,7 @@ module h264_core (
 	input wire signed [5:0] cfg_a_off;
 	input wire signed [5:0] cfg_b_off;
 	input wire cfg_deblock;
+	input wire cfg_is_p;
 	input wire start;
 	input wire align_valid;
 	input wire [4:0] align_bits;
@@ -47,6 +56,13 @@ module h264_core (
 	output wire [1:0] out_plane;
 	output wire [3:0] out_row;
 	output wire [127:0] out_data;
+	output wire mc_req_valid;
+	output wire [1:0] mc_req_plane;
+	output wire signed [12:0] mc_req_x;
+	output wire signed [11:0] mc_req_y;
+	output wire [3:0] mc_req_w;
+	input wire mc_rsp_valid;
+	input wire [71:0] mc_rsp_data;
 	output wire frame_done;
 	output wire err;
 	wire br_req_valid;
@@ -124,6 +140,17 @@ module h264_core (
 	wire [7:0] rec_x;
 	wire [7:0] rec_yc;
 	wire [5:0] rec_qp;
+	wire mb_skip;
+	wire mb_inter;
+	wire skip_go_w;
+	wire mvd_valid;
+	wire [15:0] mb_nz_w;
+	wire [2:0] mb_ptype;
+	wire [7:0] mb_sub;
+	wire signed [15:0] mvd_x;
+	wire signed [15:0] mvd_y;
+	wire signed [255:0] mv_x_w;
+	wire signed [255:0] mv_y_w;
 	wire slice_done;
 	mb_dec #(.MAX_MBW(MAX_MBW)) u_mb(
 		.clk(clk),
@@ -131,6 +158,7 @@ module h264_core (
 		.cfg_mb_w(cfg_mb_w),
 		.cfg_mb_h(cfg_mb_h),
 		.cfg_qp(cfg_qp),
+		.cfg_is_p(cfg_is_p),
 		.start(start),
 		.req_valid(m_req_valid),
 		.req_bits(m_req_bits),
@@ -148,6 +176,15 @@ module h264_core (
 		.blk_coef_we(blk_coef_we),
 		.blk_coef_addr(blk_coef_addr),
 		.blk_coef_data(blk_coef_data),
+		.mb_skip(mb_skip),
+		.mb_inter(mb_inter),
+		.mb_ptype(mb_ptype),
+		.mb_sub(mb_sub),
+		.mvd_valid(mvd_valid),
+		.mvd_x(mvd_x),
+		.mvd_y(mvd_y),
+		.skip_go(skip_go_w),
+		.mb_nz(mb_nz_w),
 		.mb_valid(mb_valid),
 		.mb_x(mb_x),
 		.mb_y(mb_y),
@@ -165,12 +202,44 @@ module h264_core (
 		.err(mb_err),
 		.rec_done(rec_accept)
 	);
+	mv_pred #(.MAX_MBW(MAX_MBW)) u_mv(
+		.clk(clk),
+		.rst_n(rst_n),
+		.cfg_mb_w(cfg_mb_w),
+		.start(start),
+		.mb_ptype(mb_ptype),
+		.mb_sub(mb_sub),
+		.mvd_valid(mvd_valid),
+		.mvd_x(mvd_x),
+		.mvd_y(mvd_y),
+		.skip_go(skip_go_w),
+		.commit(rec_accept),
+		.mb_inter(mb_inter),
+		.mb_skip(mb_skip),
+		.mv_out_x(mv_x_w),
+		.mv_out_y(mv_y_w)
+	);
 	wire [2047:0] rec_py;
 	wire [511:0] rec_pu;
 	wire [511:0] rec_pv;
 	wire dbf_ready;
 	wire rec_busy;
+	wire rec_inter;
+	wire signed [255:0] rec_mvx;
+	wire signed [255:0] rec_mvy;
+	wire [15:0] rec_nz;
 	mb_recon #(.MAX_MBW(MAX_MBW)) u_rec(
+		.mb_inter(mb_inter),
+		.mb_nz(mb_nz_w),
+		.mb_mvx(mv_x_w),
+		.mb_mvy(mv_y_w),
+		.mc_req_valid(mc_req_valid),
+		.mc_req_plane(mc_req_plane),
+		.mc_req_x(mc_req_x),
+		.mc_req_y(mc_req_y),
+		.mc_req_w(mc_req_w),
+		.mc_rsp_valid(mc_rsp_valid),
+		.mc_rsp_data(mc_rsp_data),
 		.clk(clk),
 		.rst_n(rst_n),
 		.cfg_mb_w(cfg_mb_w),
@@ -198,6 +267,10 @@ module h264_core (
 		.rec_y(rec_py),
 		.rec_u(rec_pu),
 		.rec_v(rec_pv),
+		.rec_inter(rec_inter),
+		.rec_nz(rec_nz),
+		.rec_mvx(rec_mvx),
+		.rec_mvy(rec_mvy),
 		.err(rec_err)
 	);
 	reg slice_done_q;
@@ -227,6 +300,10 @@ module h264_core (
 		.mb_x(rec_x),
 		.mb_y(rec_yc),
 		.mb_qp(rec_qp),
+		.mb_inter(rec_inter),
+		.mb_nz(rec_nz),
+		.mb_mvx(rec_mvx),
+		.mb_mvy(rec_mvy),
 		.in_y(rec_py),
 		.in_u(rec_pu),
 		.in_v(rec_pv),
@@ -1330,6 +1407,7 @@ module mb_dec (
 	cfg_mb_w,
 	cfg_mb_h,
 	cfg_qp,
+	cfg_is_p,
 	start,
 	req_valid,
 	req_bits,
@@ -1347,6 +1425,15 @@ module mb_dec (
 	blk_coef_we,
 	blk_coef_addr,
 	blk_coef_data,
+	mb_skip,
+	mb_inter,
+	mb_ptype,
+	mb_sub,
+	mvd_valid,
+	mvd_x,
+	mvd_y,
+	skip_go,
+	mb_nz,
 	mb_valid,
 	mb_x,
 	mb_y,
@@ -1371,6 +1458,7 @@ module mb_dec (
 	input wire [7:0] cfg_mb_w;
 	input wire [7:0] cfg_mb_h;
 	input wire [5:0] cfg_qp;
+	input wire cfg_is_p;
 	input wire start;
 	output reg req_valid;
 	output reg [4:0] req_bits;
@@ -1388,6 +1476,15 @@ module mb_dec (
 	input wire blk_coef_we;
 	input wire [3:0] blk_coef_addr;
 	input wire signed [15:0] blk_coef_data;
+	output wire mb_skip;
+	output wire mb_inter;
+	output wire [2:0] mb_ptype;
+	output wire [7:0] mb_sub;
+	output wire mvd_valid;
+	output wire signed [15:0] mvd_x;
+	output wire signed [15:0] mvd_y;
+	output wire skip_go;
+	output reg [15:0] mb_nz;
 	output wire mb_valid;
 	output wire [7:0] mb_x;
 	output wire [7:0] mb_y;
@@ -1417,10 +1514,20 @@ module mb_dec (
 		input reg [1:0] by;
 		zidx = {by[1], bx[1], by[0], bx[0]};
 	endfunction
-	reg [3:0] st_q;
-	reg [3:0] ret_q;
+	reg [4:0] st_q;
+	reg [4:0] ret_q;
 	reg [7:0] mbx_q;
 	reg [7:0] mby_q;
+	reg [15:0] skip_q;
+	reg coded_next_q;
+	wire skip_rd_q;
+	reg inter_q;
+	reg [2:0] ptype_q;
+	reg [7:0] sub_q;
+	reg [2:0] part_q;
+	reg [4:0] nmvd_q;
+	reg signed [15:0] mvdx_q;
+	reg skip_flag_q;
 	reg i16_q;
 	reg [1:0] i16m_q;
 	reg [1:0] cmode_q;
@@ -1453,26 +1560,26 @@ module mb_dec (
 		if (win_ok)
 			(* full_case, parallel_case *)
 			case (st_q)
-				4'd2:
+				5'd2, 5'd16, 5'd17, 5'd18, 5'd19:
 					if (eg_ok) begin
 						req_valid = 1'b1;
 						req_bits = eg_len;
 					end
-				4'd3: begin
+				5'd3: begin
 					req_valid = 1'b1;
 					req_bits = (show[23] ? 5'd1 : 5'd4);
 				end
-				4'd4:
+				5'd4:
 					if (eg_ok && (eg_ue <= 12'd3)) begin
 						req_valid = 1'b1;
 						req_bits = eg_len;
 					end
-				4'd5:
+				5'd5:
 					if (eg_ok && (eg_ue <= 12'd47)) begin
 						req_valid = 1'b1;
 						req_bits = eg_len;
 					end
-				4'd6:
+				5'd6:
 					if (eg_ok) begin
 						req_valid = 1'b1;
 						req_bits = eg_len;
@@ -1579,7 +1686,7 @@ module mb_dec (
 			nc_class_of = 2'd3;
 	endfunction
 	reg ac15_q;
-	assign coef_we = blk_coef_we && (st_q == 4'd9);
+	assign coef_we = blk_coef_we && (st_q == 5'd9);
 	reg [4:0] cur_blk_q;
 	assign coef_blk = cur_blk_q;
 	function automatic [3:0] zz4;
@@ -1626,12 +1733,94 @@ module mb_dec (
 				mb_i4m[i * 4+:4] = i4m_q[i];
 		end
 	end
-	assign mb_valid = (st_q == 4'd12) || (st_q == 4'd13);
-	assign slice_done = st_q == 4'd14;
-	assign err = st_q == 4'd15;
+	assign mb_valid = (st_q == 5'd12) || (st_q == 5'd13);
+	assign mb_skip = skip_flag_q;
+	assign skip_go = st_q == 5'd20;
+	function automatic signed [1:0] sv2v_cast_2_signed;
+		input reg signed [1:0] inp;
+		sv2v_cast_2_signed = inp;
+	endfunction
+	always @(*) begin : sv2v_autoblock_5
+		reg signed [31:0] r;
+		if (_sv2v_0)
+			;
+		for (r = 0; r < 16; r = r + 1)
+			mb_nz[r] = nz_q[zidx(sv2v_cast_2_signed(r & 3), sv2v_cast_2_signed(r >> 2))] != 5'd0;
+	end
+	assign mvd_valid = ((st_q == 5'd19) && win_ok) && eg_ok;
+	assign mvd_x = mvdx_q;
+	function automatic signed [15:0] sv2v_cast_16_signed;
+		input reg signed [15:0] inp;
+		sv2v_cast_16_signed = inp;
+	endfunction
+	assign mvd_y = sv2v_cast_16_signed(eg_se);
+	assign mb_inter = inter_q;
+	assign mb_ptype = ptype_q;
+	assign mb_sub = sub_q;
+	assign slice_done = st_q == 5'd14;
+	assign err = st_q == 5'd15;
 	function automatic cbp_l_bit;
 		input reg [3:0] k;
 		cbp_l_bit = cbp_q[{k[3], k[2]}];
+	endfunction
+	function automatic [5:0] cavlc_inter_cbp;
+		input reg [5:0] code;
+		reg [5:0] r;
+		begin
+			(* full_case, parallel_case *)
+			case (code)
+				6'd0: r = 6'd0;
+				6'd1: r = 6'd16;
+				6'd2: r = 6'd1;
+				6'd3: r = 6'd2;
+				6'd4: r = 6'd4;
+				6'd5: r = 6'd8;
+				6'd6: r = 6'd32;
+				6'd7: r = 6'd3;
+				6'd8: r = 6'd5;
+				6'd9: r = 6'd10;
+				6'd10: r = 6'd12;
+				6'd11: r = 6'd15;
+				6'd12: r = 6'd47;
+				6'd13: r = 6'd7;
+				6'd14: r = 6'd11;
+				6'd15: r = 6'd13;
+				6'd16: r = 6'd14;
+				6'd17: r = 6'd6;
+				6'd18: r = 6'd9;
+				6'd19: r = 6'd31;
+				6'd20: r = 6'd35;
+				6'd21: r = 6'd37;
+				6'd22: r = 6'd42;
+				6'd23: r = 6'd44;
+				6'd24: r = 6'd33;
+				6'd25: r = 6'd34;
+				6'd26: r = 6'd36;
+				6'd27: r = 6'd40;
+				6'd28: r = 6'd39;
+				6'd29: r = 6'd43;
+				6'd30: r = 6'd45;
+				6'd31: r = 6'd46;
+				6'd32: r = 6'd17;
+				6'd33: r = 6'd18;
+				6'd34: r = 6'd20;
+				6'd35: r = 6'd24;
+				6'd36: r = 6'd19;
+				6'd37: r = 6'd21;
+				6'd38: r = 6'd26;
+				6'd39: r = 6'd28;
+				6'd40: r = 6'd23;
+				6'd41: r = 6'd27;
+				6'd42: r = 6'd29;
+				6'd43: r = 6'd30;
+				6'd44: r = 6'd22;
+				6'd45: r = 6'd25;
+				6'd46: r = 6'd38;
+				6'd47: r = 6'd41;
+				default: r = 6'd63;
+			endcase
+			cavlc_inter_cbp = r;
+		end
 	endfunction
 	function automatic [5:0] cavlc_intra_cbp;
 		input reg [5:0] code;
@@ -1692,6 +1881,10 @@ module mb_dec (
 			cavlc_intra_cbp = r;
 		end
 	endfunction
+	function automatic [2:0] sv2v_cast_3;
+		input reg [2:0] inp;
+		sv2v_cast_3 = inp;
+	endfunction
 	function automatic [1:0] sv2v_cast_2;
 		input reg [1:0] inp;
 		sv2v_cast_2 = inp;
@@ -1704,14 +1897,10 @@ module mb_dec (
 		input reg signed [12:0] inp;
 		sv2v_cast_13_signed = inp;
 	endfunction
-	function automatic signed [1:0] sv2v_cast_2_signed;
-		input reg signed [1:0] inp;
-		sv2v_cast_2_signed = inp;
-	endfunction
 	always @(posedge clk or negedge rst_n)
 		if (!rst_n) begin
-			st_q <= 4'd0;
-			ret_q <= 4'd0;
+			st_q <= 5'd0;
+			ret_q <= 5'd0;
 			blk_start <= 1'b0;
 			blk_chroma_dc <= 1'b0;
 			blk_nc_class <= 1'sb0;
@@ -1733,105 +1922,230 @@ module mb_dec (
 			blk_start <= 1'b0;
 			(* full_case, parallel_case *)
 			case (st_q)
-				4'd0:
+				5'd0:
 					if (start) begin
 						mbx_q <= 1'sb0;
 						mby_q <= 1'sb0;
 						qp_q <= cfg_qp;
 						have_left <= 1'b0;
-						st_q <= 4'd1;
+						skip_q <= 1'sb0;
+						coded_next_q <= 1'b0;
+						st_q <= 5'd1;
 					end
-				4'd1: begin
+				5'd1: begin
 					i4t_q <= nbr_w[15:0];
 					nzlt_q <= nbr_w[35:16];
 					nzct_q[0] <= nbr_w[45:36];
 					nzct_q[1] <= nbr_w[55:46];
-					st_q <= 4'd2;
+					skip_flag_q <= 1'b0;
+					inter_q <= 1'b0;
+					ptype_q <= 1'sb0;
+					sub_q <= 1'sb0;
+					if (cfg_is_p && (skip_q != 16'd0)) begin
+						skip_q <= skip_q - 16'd1;
+						if (skip_q == 16'd1)
+							coded_next_q <= 1'b1;
+						skip_flag_q <= 1'b1;
+						inter_q <= 1'b1;
+						st_q <= 5'd20;
+					end
+					else begin
+						st_q <= (cfg_is_p && !coded_next_q ? 5'd16 : 5'd2);
+						coded_next_q <= 1'b0;
+					end
 				end
-				4'd2:
-					if (win_ok) begin
-						if (!eg_ok)
-							st_q <= 4'd15;
-						else if (eg_ue == 12'd0) begin
-							i16_q <= 1'b0;
-							i16m_q <= 1'sb0;
-							k_q <= 1'sb0;
-							st_q <= 4'd3;
+				5'd16:
+					if (win_ok && eg_ok) begin
+						if (eg_ue != 12'd0) begin
+							skip_q <= eg_ue - 12'd1;
+							if (eg_ue == 12'd1)
+								coded_next_q <= 1'b1;
+							skip_flag_q <= 1'b1;
+							inter_q <= 1'b1;
+							st_q <= 5'd20;
 						end
-						else if (eg_ue <= 12'd24) begin : sv2v_autoblock_5
-							reg [11:0] m;
-							reg [1:0] cc;
-							m = eg_ue - 12'd1;
-							cc = sv2v_cast_2((m >> 2) % 12'd3);
-							i16_q <= 1'b1;
-							i16m_q <= sv2v_cast_2(m & 12'd3);
-							cbp_q <= {cc, (m >= 12'd12 ? 4'hf : 4'h0)};
-							begin : sv2v_autoblock_6
+						else
+							st_q <= 5'd2;
+					end
+				5'd20: begin
+					begin : sv2v_autoblock_6
+						reg signed [31:0] k;
+						for (k = 0; k < 16; k = k + 1)
+							begin
+								i4m_q[k] <= 4'd2;
+								nz_q[k] <= 1'sb0;
+							end
+					end
+					nzc_q[0][0] <= 1'sb0;
+					nzc_q[0][1] <= 1'sb0;
+					nzc_q[0][2] <= 1'sb0;
+					nzc_q[0][3] <= 1'sb0;
+					nzc_q[1][0] <= 1'sb0;
+					nzc_q[1][1] <= 1'sb0;
+					nzc_q[1][2] <= 1'sb0;
+					nzc_q[1][3] <= 1'sb0;
+					cbp_q <= 1'sb0;
+					i16_q <= 1'b0;
+					cmode_q <= 1'sb0;
+					st_q <= 5'd12;
+				end
+				5'd2:
+					if (win_ok) begin : sv2v_autoblock_7
+						reg [11:0] eff;
+						eff = (cfg_is_p && (eg_ue >= 12'd5) ? eg_ue - 12'd5 : eg_ue);
+						if (!eg_ok)
+							st_q <= 5'd15;
+						else if (cfg_is_p && (eg_ue < 12'd5)) begin
+							inter_q <= 1'b1;
+							ptype_q <= sv2v_cast_3(eg_ue);
+							i16_q <= 1'b0;
+							begin : sv2v_autoblock_8
 								reg signed [31:0] i;
 								for (i = 0; i < 16; i = i + 1)
 									i4m_q[i] <= 4'd2;
 							end
-							st_q <= 4'd4;
+							part_q <= 1'sb0;
+							if (eg_ue >= 12'd3) begin
+								nmvd_q <= 1'sb0;
+								st_q <= 5'd17;
+							end
+							else begin
+								nmvd_q <= (eg_ue == 12'd0 ? 5'd1 : 5'd2);
+								st_q <= 5'd18;
+							end
+						end
+						else if (eff == 12'd0) begin
+							i16_q <= 1'b0;
+							i16m_q <= 1'sb0;
+							k_q <= 1'sb0;
+							st_q <= 5'd3;
+						end
+						else if (eff <= 12'd24) begin : sv2v_autoblock_9
+							reg [11:0] m;
+							reg [1:0] cc;
+							m = eff - 12'd1;
+							cc = sv2v_cast_2((m >> 2) % 12'd3);
+							i16_q <= 1'b1;
+							i16m_q <= sv2v_cast_2(m & 12'd3);
+							cbp_q <= {cc, (m >= 12'd12 ? 4'hf : 4'h0)};
+							begin : sv2v_autoblock_10
+								reg signed [31:0] i;
+								for (i = 0; i < 16; i = i + 1)
+									i4m_q[i] <= 4'd2;
+							end
+							st_q <= 5'd4;
 						end
 						else
-							st_q <= 4'd15;
+							st_q <= 5'd15;
 					end
-				4'd3:
-					if (win_ok) begin : sv2v_autoblock_7
+				5'd17:
+					if (win_ok) begin
+						if (!eg_ok || (eg_ue > 12'd3))
+							st_q <= 5'd15;
+						else begin : sv2v_autoblock_11
+							reg [4:0] add;
+							sub_q[part_q[1:0] * 2+:2] <= sv2v_cast_2(eg_ue);
+							add = (eg_ue == 12'd0 ? 5'd1 : (eg_ue == 12'd3 ? 5'd4 : 5'd2));
+							nmvd_q <= nmvd_q + add;
+							if (part_q == 3'd3) begin
+								part_q <= 1'sb0;
+								st_q <= 5'd18;
+							end
+							else
+								part_q <= part_q + 3'd1;
+						end
+					end
+				5'd18:
+					if (win_ok) begin
+						if (!eg_ok)
+							st_q <= 5'd15;
+						else begin
+							mvdx_q <= sv2v_cast_16_signed(eg_se);
+							st_q <= 5'd19;
+						end
+					end
+				5'd19:
+					if (win_ok) begin
+						if (!eg_ok)
+							st_q <= 5'd15;
+						else begin
+							nmvd_q <= nmvd_q - 5'd1;
+							st_q <= (nmvd_q == 5'd1 ? 5'd5 : 5'd18);
+						end
+					end
+				5'd3:
+					if (win_ok) begin : sv2v_autoblock_12
 						reg [3:0] mode;
 						if (show[23])
 							mode = i4_pred;
-						else begin : sv2v_autoblock_8
+						else begin : sv2v_autoblock_13
 							reg [3:0] rem;
 							rem = {1'b0, show[22:20]};
 							mode = (rem < i4_pred ? rem : rem + 4'd1);
 						end
 						i4m_q[k_q] <= mode;
 						if (k_q == 4'd15)
-							st_q <= 4'd4;
+							st_q <= 5'd4;
 						k_q <= k_q + 4'd1;
 					end
-				4'd4:
+				5'd4:
 					if (win_ok) begin
 						if (!eg_ok || (eg_ue > 12'd3))
-							st_q <= 4'd15;
+							st_q <= 5'd15;
 						else begin
 							cmode_q <= sv2v_cast_2(eg_ue);
-							st_q <= (i16_q ? 4'd6 : 4'd5);
+							st_q <= (i16_q ? 5'd6 : 5'd5);
 						end
 					end
-				4'd5:
-					if (win_ok) begin : sv2v_autoblock_9
+				5'd5:
+					if (win_ok) begin : sv2v_autoblock_14
 						reg [5:0] cbp;
-						cbp = cavlc_intra_cbp(sv2v_cast_6(eg_ue));
+						cbp = (inter_q ? cavlc_inter_cbp(sv2v_cast_6(eg_ue)) : cavlc_intra_cbp(sv2v_cast_6(eg_ue)));
 						if ((!eg_ok || (eg_ue > 12'd47)) || (cbp == 6'd63))
-							st_q <= 4'd15;
+							st_q <= 5'd15;
 						else begin
 							cbp_q <= cbp;
-							st_q <= (cbp == 6'd0 ? 4'd12 : 4'd6);
+							if (cbp == 6'd0) begin
+								begin : sv2v_autoblock_15
+									reg signed [31:0] k;
+									for (k = 0; k < 16; k = k + 1)
+										nz_q[k] <= 1'sb0;
+								end
+								begin : sv2v_autoblock_16
+									reg signed [31:0] k;
+									for (k = 0; k < 4; k = k + 1)
+										begin
+											nzc_q[0][k[1:0]] <= 1'sb0;
+											nzc_q[1][k[1:0]] <= 1'sb0;
+										end
+								end
+								st_q <= 5'd12;
+							end
+							else
+								st_q <= 5'd6;
 						end
 					end
-				4'd6:
+				5'd6:
 					if (win_ok) begin
 						if (!eg_ok)
-							st_q <= 4'd15;
+							st_q <= 5'd15;
 						else begin
 							qp_q <= sv2v_cast_6(((sv2v_cast_13_signed($signed({1'b0, qp_q})) + sv2v_cast_13_signed(eg_se)) + 13'd52) % 13'd52);
 							k_q <= 1'sb0;
-							st_q <= (i16_q ? 4'd7 : 4'd8);
+							st_q <= (i16_q ? 5'd7 : 5'd8);
 						end
 					end
-				4'd7: begin
+				5'd7: begin
 					blk_start <= 1'b1;
 					blk_chroma_dc <= 1'b0;
 					blk_nc_class <= nc_class_of(nc_l);
 					blk_maxc <= 5'd16;
 					ac15_q <= 1'b0;
 					cur_blk_q <= 5'd16;
-					ret_q <= 4'd8;
-					st_q <= 4'd9;
+					ret_q <= 5'd8;
+					st_q <= 5'd9;
 				end
-				4'd8:
+				5'd8:
 					if (cbp_l_bit(k_q)) begin
 						blk_start <= 1'b1;
 						blk_chroma_dc <= 1'b0;
@@ -1839,30 +2153,30 @@ module mb_dec (
 						blk_maxc <= (i16_q ? 5'd15 : 5'd16);
 						ac15_q <= i16_q;
 						cur_blk_q <= {1'b0, k_q};
-						ret_q <= 4'd8;
-						st_q <= 4'd9;
+						ret_q <= 5'd8;
+						st_q <= 5'd9;
 					end
 					else begin
 						nz_q[k_q] <= 1'sb0;
 						if (k_q == 4'd15) begin
 							k_q <= 1'sb0;
 							comp_q <= 1'sb0;
-							st_q <= (cbp_q[5:4] != 2'd0 ? 4'd10 : 4'd12);
+							st_q <= (cbp_q[5:4] != 2'd0 ? 5'd10 : 5'd12);
 						end
 						else
 							k_q <= k_q + 4'd1;
 					end
-				4'd10: begin
+				5'd10: begin
 					blk_start <= 1'b1;
 					blk_chroma_dc <= 1'b1;
 					blk_nc_class <= 1'sb0;
 					blk_maxc <= 5'd4;
 					ac15_q <= 1'b0;
 					cur_blk_q <= 5'd17 + {4'b0000, comp_q[0]};
-					ret_q <= 4'd10;
-					st_q <= 4'd9;
+					ret_q <= 5'd10;
+					st_q <= 5'd9;
 				end
-				4'd11:
+				5'd11:
 					if (cbp_q[5:4] == 2'd2) begin
 						blk_start <= 1'b1;
 						blk_chroma_dc <= 1'b0;
@@ -1870,74 +2184,74 @@ module mb_dec (
 						blk_maxc <= 5'd15;
 						ac15_q <= 1'b1;
 						cur_blk_q <= (5'd19 + {2'b00, comp_q[0], 2'b00}) + {3'b000, k_q[1:0]};
-						ret_q <= 4'd11;
-						st_q <= 4'd9;
+						ret_q <= 5'd11;
+						st_q <= 5'd9;
 					end
 					else begin
 						nzc_q[comp_q][k_q[1:0]] <= 1'sb0;
 						if (k_q[1:0] == 2'd3) begin
 							k_q <= 1'sb0;
 							if (comp_q[0])
-								st_q <= 4'd12;
+								st_q <= 5'd12;
 							comp_q <= comp_q + 2'd1;
 						end
 						else
 							k_q <= k_q + 4'd1;
 					end
-				4'd9:
+				5'd9:
 					if (blk_err)
-						st_q <= 4'd15;
+						st_q <= 5'd15;
 					else if (blk_done)
 						(* full_case, parallel_case *)
 						case (ret_q)
-							4'd8:
+							5'd8:
 								if (cur_blk_q == 5'd16) begin
 									k_q <= 1'sb0;
-									st_q <= 4'd8;
+									st_q <= 5'd8;
 								end
 								else begin
 									nz_q[k_q] <= blk_tc;
 									if (k_q == 4'd15) begin
 										k_q <= 1'sb0;
 										comp_q <= 1'sb0;
-										st_q <= (cbp_q[5:4] != 2'd0 ? 4'd10 : 4'd12);
+										st_q <= (cbp_q[5:4] != 2'd0 ? 5'd10 : 5'd12);
 									end
 									else begin
 										k_q <= k_q + 4'd1;
-										st_q <= 4'd8;
+										st_q <= 5'd8;
 									end
 								end
-							4'd10:
+							5'd10:
 								if (comp_q[0]) begin
 									comp_q <= 1'sb0;
 									k_q <= 1'sb0;
-									st_q <= (cbp_q[5:4] == 2'd2 ? 4'd11 : 4'd12);
+									st_q <= (cbp_q[5:4] == 2'd2 ? 5'd11 : 5'd12);
 								end
 								else begin
 									comp_q <= 2'd1;
-									st_q <= 4'd10;
+									st_q <= 5'd10;
 								end
-							4'd11: begin
+							5'd11: begin
 								nzc_q[comp_q][k_q[1:0]] <= blk_tc;
 								if (k_q[1:0] == 2'd3) begin
 									k_q <= 1'sb0;
 									if (comp_q[0])
-										st_q <= 4'd12;
+										st_q <= 5'd12;
 									else
-										st_q <= 4'd11;
+										st_q <= 5'd11;
 									comp_q <= comp_q + 2'd1;
 								end
 								else begin
 									k_q <= k_q + 4'd1;
-									st_q <= 4'd11;
+									st_q <= 5'd11;
 								end
 							end
-							default: st_q <= 4'd15;
+							default: st_q <= 5'd15;
 						endcase
-				4'd12: begin
-					begin : sv2v_autoblock_10
+				5'd12: begin
+					begin : sv2v_autoblock_17
 						reg [55:0] w;
-						begin : sv2v_autoblock_11
+						begin : sv2v_autoblock_18
 							reg signed [31:0] b;
 							for (b = 0; b < 4; b = b + 1)
 								begin
@@ -1947,7 +2261,7 @@ module mb_dec (
 									nzl_left[b] <= nz_q[zidx(2'd3, sv2v_cast_2_signed(b))];
 								end
 						end
-						begin : sv2v_autoblock_12
+						begin : sv2v_autoblock_19
 							reg signed [31:0] b;
 							for (b = 0; b < 2; b = b + 1)
 								begin
@@ -1964,42 +2278,42 @@ module mb_dec (
 							have_left <= 1'b0;
 							mbx_q <= 1'sb0;
 							if ((mby_q + 8'd1) == cfg_mb_h)
-								st_q <= 4'd14;
+								st_q <= 5'd14;
 							else begin
 								mby_q <= mby_q + 8'd1;
-								st_q <= 4'd1;
+								st_q <= 5'd1;
 							end
 						end
 						else begin
 							have_left <= 1'b1;
 							mbx_q <= mbx_q + 8'd1;
-							st_q <= 4'd1;
+							st_q <= 5'd1;
 						end
 					end
 					else
-						st_q <= 4'd13;
+						st_q <= 5'd13;
 				end
-				4'd13:
+				5'd13:
 					if (rec_done) begin
 						if ((mbx_q + 8'd1) == cfg_mb_w) begin
 							have_left <= 1'b0;
 							mbx_q <= 1'sb0;
 							if ((mby_q + 8'd1) == cfg_mb_h)
-								st_q <= 4'd14;
+								st_q <= 5'd14;
 							else begin
 								mby_q <= mby_q + 8'd1;
-								st_q <= 4'd1;
+								st_q <= 5'd1;
 							end
 						end
 						else begin
 							have_left <= 1'b1;
 							mbx_q <= mbx_q + 8'd1;
-							st_q <= 4'd1;
+							st_q <= 5'd1;
 						end
 					end
-				4'd14: st_q <= 4'd0;
-				4'd15: st_q <= 4'd15;
-				default: st_q <= 4'd15;
+				5'd14: st_q <= 5'd0;
+				5'd15: st_q <= 5'd15;
+				default: st_q <= 5'd15;
 			endcase
 		end
 	initial _sv2v_0 = 0;
@@ -2369,6 +2683,10 @@ module mb_recon (
 	mb_valid,
 	mb_x,
 	mb_y,
+	mb_inter,
+	mb_nz,
+	mb_mvx,
+	mb_mvy,
 	mb_i16,
 	mb_cbp,
 	mb_qp,
@@ -2385,7 +2703,18 @@ module mb_recon (
 	rec_y,
 	rec_u,
 	rec_v,
-	err
+	rec_inter,
+	rec_nz,
+	rec_mvx,
+	rec_mvy,
+	err,
+	mc_req_valid,
+	mc_req_plane,
+	mc_req_x,
+	mc_req_y,
+	mc_req_w,
+	mc_rsp_valid,
+	mc_rsp_data
 );
 	reg _sv2v_0;
 	parameter signed [31:0] MAX_MBW = 120;
@@ -2400,6 +2729,10 @@ module mb_recon (
 	input wire mb_valid;
 	input wire [7:0] mb_x;
 	input wire [7:0] mb_y;
+	input wire mb_inter;
+	input wire [15:0] mb_nz;
+	input wire signed [255:0] mb_mvx;
+	input wire signed [255:0] mb_mvy;
 	input wire mb_i16;
 	input wire [5:0] mb_cbp;
 	input wire [5:0] mb_qp;
@@ -2416,7 +2749,18 @@ module mb_recon (
 	output reg [2047:0] rec_y;
 	output reg [511:0] rec_u;
 	output reg [511:0] rec_v;
+	output wire rec_inter;
+	output wire [15:0] rec_nz;
+	output reg signed [255:0] rec_mvx;
+	output reg signed [255:0] rec_mvy;
 	output wire err;
+	output wire mc_req_valid;
+	output wire [1:0] mc_req_plane;
+	output wire signed [12:0] mc_req_x;
+	output wire signed [11:0] mc_req_y;
+	output wire [3:0] mc_req_w;
+	input wire mc_rsp_valid;
+	input wire [71:0] mc_rsp_data;
 	function automatic [5:0] chroma_qp;
 		input reg [5:0] q;
 		reg [5:0] r;
@@ -2513,6 +2857,75 @@ module mb_recon (
 	reg have_top;
 	reg [3:0] st_q;
 	reg [4:0] k_q;
+	reg inter_q;
+	reg signed [15:0] mvq_x [0:15];
+	reg signed [15:0] mvq_y [0:15];
+	reg [5:0] mk_q;
+	reg [15:0] nz_q;
+	localparam signed [511:0] Z2R = 512'h100000004000000050000000200000003000000060000000700000008000000090000000c0000000d0000000a0000000b0000000e0000000f;
+	assign rec_inter = inter_q;
+	assign rec_nz = nz_q;
+	always @(*) begin : sv2v_autoblock_1
+		reg signed [31:0] r;
+		if (_sv2v_0)
+			;
+		for (r = 0; r < 16; r = r + 1)
+			begin
+				rec_mvx[(15 - r) * 16+:16] = mvq_x[Z2R[(15 - r) * 32+:32]];
+				rec_mvy[(15 - r) * 16+:16] = mvq_y[Z2R[(15 - r) * 32+:32]];
+			end
+	end
+	wire mc_start_w;
+	wire mc_busy_w;
+	wire mc_done_w;
+	wire [127:0] mc_pred_w;
+	wire [3:0] mck;
+	wire mc_is_c;
+	reg [11:0] mc_px;
+	reg [10:0] mc_py;
+	assign mck = mk_q[3:0];
+	assign mc_is_c = mk_q[5:4] != 2'd0;
+	function automatic [11:0] sv2v_cast_12;
+		input reg [11:0] inp;
+		sv2v_cast_12 = inp;
+	endfunction
+	function automatic [10:0] sv2v_cast_11;
+		input reg [10:0] inp;
+		sv2v_cast_11 = inp;
+	endfunction
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		if (mc_is_c) begin
+			mc_px = {1'b0, mbx_q, 3'b000} + sv2v_cast_12({zsx(mck), 1'b0});
+			mc_py = {mby_q, 3'b000} + sv2v_cast_11({zsy(mck), 1'b0});
+		end
+		else begin
+			mc_px = {mbx_q, 4'b0000} + sv2v_cast_12({zsx(mck), 2'b00});
+			mc_py = sv2v_cast_11({mby_q, 4'b0000}) + sv2v_cast_11({zsy(mck), 2'b00});
+		end
+	end
+	assign mc_start_w = ((st_q == 4'd13) && !mc_busy_w) && !mc_done_w;
+	assign mc_req_plane = mk_q[5:4];
+	mc_fetch u_mc(
+		.clk(clk),
+		.rst_n(rst_n),
+		.start(mc_start_w),
+		.is_chroma(mc_is_c),
+		.px(mc_px),
+		.py(mc_py),
+		.mvx(mvq_x[mck]),
+		.mvy(mvq_y[mck]),
+		.busy(mc_busy_w),
+		.done(mc_done_w),
+		.req_valid(mc_req_valid),
+		.req_x(mc_req_x),
+		.req_y(mc_req_y),
+		.req_w(mc_req_w),
+		.rsp_valid(mc_rsp_valid),
+		.rsp_data(mc_rsp_data),
+		.pred(mc_pred_w)
+	);
 	assign busy = st_q != 4'd0;
 	assign accepted = (st_q == 4'd0) && mb_valid;
 	assign rec_x = mbx_q;
@@ -2522,7 +2935,7 @@ module mb_recon (
 	assign err = st_q == 4'd12;
 	reg signed [255:0] ldc_in;
 	wire signed [511:0] ldc_out;
-	always @(*) begin : sv2v_autoblock_1
+	always @(*) begin : sv2v_autoblock_2
 		reg signed [31:0] i;
 		if (_sv2v_0)
 			;
@@ -2546,7 +2959,7 @@ module mb_recon (
 		input reg signed [5:0] inp;
 		sv2v_cast_6_signed = inp;
 	endfunction
-	always @(*) begin : sv2v_autoblock_2
+	always @(*) begin : sv2v_autoblock_3
 		reg signed [7:0] qsum;
 		if (_sv2v_0)
 			;
@@ -2556,7 +2969,7 @@ module mb_recon (
 		if (qsum > 51)
 			qsum = 51;
 		qpc = chroma_qp(sv2v_cast_6_signed(qsum));
-		begin : sv2v_autoblock_3
+		begin : sv2v_autoblock_4
 			reg signed [31:0] i;
 			for (i = 0; i < 4; i = i + 1)
 				cdc_in[(3 - i) * 16+:16] = cram_cdc_w[i * 16+:16];
@@ -2614,7 +3027,7 @@ module mb_recon (
 		input reg signed [31:0] inp;
 		sv2v_cast_32_signed = inp;
 	endfunction
-	always @(*) begin : sv2v_autoblock_4
+	always @(*) begin : sv2v_autoblock_5
 		reg signed [31:0] px;
 		reg signed [31:0] py;
 		if (_sv2v_0)
@@ -2628,20 +3041,20 @@ module mb_recon (
 			a_tr = have_top && (bx4 != 2'd3 ? 1'b1 : ({mbx_q, 2'b00} + 8'd4) < {cfg_mb_w, 2'b00});
 		else
 			a_tr = (bx4 != 2'd3) && (zidx(bx4 + 2'd1, by4 - 2'd1) < sv2v_cast_4(k_q));
-		begin : sv2v_autoblock_5
+		begin : sv2v_autoblock_6
 			reg signed [31:0] i;
 			for (i = 0; i < 4; i = i + 1)
 				n_l[(3 - i) * 8+:8] = (bx4 == 0 ? left_y[py + i] : rec_y[(256 - (((py + i) * 16) + px)) * 8+:8]);
 		end
-		begin : sv2v_autoblock_6
+		begin : sv2v_autoblock_7
 			reg signed [31:0] i;
 			for (i = 0; i < 4; i = i + 1)
 				n_t[(7 - i) * 8+:8] = (by4 == 0 ? tyc_q[(px + i) * 8+:8] : rec_y[(255 - ((((py - 1) * 16) + px) + i)) * 8+:8]);
 		end
-		begin : sv2v_autoblock_7
+		begin : sv2v_autoblock_8
 			reg signed [31:0] i;
 			for (i = 0; i < 4; i = i + 1)
-				begin : sv2v_autoblock_8
+				begin : sv2v_autoblock_9
 					reg [7:0] e;
 					if (!a_tr)
 						e = n_t[32+:8];
@@ -2681,7 +3094,7 @@ module mb_recon (
 	always @(*) begin
 		if (_sv2v_0)
 			;
-		begin : sv2v_autoblock_9
+		begin : sv2v_autoblock_10
 			reg signed [31:0] i;
 			for (i = 0; i < 16; i = i + 1)
 				begin
@@ -2708,7 +3121,7 @@ module mb_recon (
 	always @(*) begin
 		if (_sv2v_0)
 			;
-		begin : sv2v_autoblock_10
+		begin : sv2v_autoblock_11
 			reg signed [31:0] i;
 			for (i = 0; i < 8; i = i + 1)
 				begin
@@ -2731,7 +3144,7 @@ module mb_recon (
 	always @(*) begin
 		if (_sv2v_0)
 			;
-		begin : sv2v_autoblock_11
+		begin : sv2v_autoblock_12
 			reg signed [31:0] i;
 			for (i = 0; i < 16; i = i + 1)
 				begin
@@ -2739,40 +3152,40 @@ module mb_recon (
 					id_pred[i] = 1'sb0;
 				end
 		end
-		if ((st_q == 4'd3) || (st_q == 4'd4)) begin : sv2v_autoblock_12
+		if ((st_q == 4'd3) || (st_q == 4'd4)) begin : sv2v_autoblock_13
 			reg signed [31:0] px;
 			reg signed [31:0] py;
 			px = sv2v_cast_32_signed(bx4) * 4;
 			py = sv2v_cast_32_signed(by4) * 4;
-			begin : sv2v_autoblock_13
+			begin : sv2v_autoblock_14
 				reg signed [31:0] i;
 				for (i = 0; i < 16; i = i + 1)
 					dq_in[(15 - i) * 16+:16] = cram_dq_w[i * 16+:16];
 			end
-			begin : sv2v_autoblock_14
+			begin : sv2v_autoblock_15
 				reg signed [31:0] y;
 				for (y = 0; y < 4; y = y + 1)
-					begin : sv2v_autoblock_15
+					begin : sv2v_autoblock_16
 						reg signed [31:0] x;
 						for (x = 0; x < 4; x = x + 1)
-							id_pred[(y * 4) + x] = (i16_q ? rec_y[(255 - ((((py + y) * 16) + px) + x)) * 8+:8] : p4[(15 - ((y * 4) + x)) * 8+:8]);
+							id_pred[(y * 4) + x] = (i16_q || inter_q ? rec_y[(255 - ((((py + y) * 16) + px) + x)) * 8+:8] : p4[(15 - ((y * 4) + x)) * 8+:8]);
 					end
 			end
 		end
-		else if ((st_q == 4'd7) || (st_q == 4'd8)) begin : sv2v_autoblock_16
+		else if ((st_q == 4'd7) || (st_q == 4'd8)) begin : sv2v_autoblock_17
 			reg signed [31:0] px;
 			reg signed [31:0] py;
 			px = (sv2v_cast_32_signed(k_q) & 1) * 4;
 			py = ((sv2v_cast_32_signed(k_q) >> 1) & 1) * 4;
-			begin : sv2v_autoblock_17
+			begin : sv2v_autoblock_18
 				reg signed [31:0] i;
 				for (i = 0; i < 16; i = i + 1)
 					dq_in[(15 - i) * 16+:16] = cram_dq_w[i * 16+:16];
 			end
-			begin : sv2v_autoblock_18
+			begin : sv2v_autoblock_19
 				reg signed [31:0] y;
 				for (y = 0; y < 4; y = y + 1)
-					begin : sv2v_autoblock_19
+					begin : sv2v_autoblock_20
 						reg signed [31:0] x;
 						for (x = 0; x < 4; x = x + 1)
 							id_pred[(y * 4) + x] = (comp_q ? rec_v[(63 - ((((py + y) * 8) + px) + x)) * 8+:8] : rec_u[(63 - ((((py + y) * 8) + px) + x)) * 8+:8]);
@@ -2783,7 +3196,7 @@ module mb_recon (
 	always @(*) begin
 		if (_sv2v_0)
 			;
-		begin : sv2v_autoblock_20
+		begin : sv2v_autoblock_21
 			reg signed [31:0] i;
 			for (i = 0; i < 16; i = i + 1)
 				id_in[i] = dq_out[(15 - i) * 32+:32];
@@ -2815,6 +3228,8 @@ module mb_recon (
 			tlq_v <= 1'sb0;
 			clr_q <= 1'sb0;
 			wb_q <= 1'b0;
+			inter_q <= 1'b0;
+			mk_q <= 1'sb0;
 		end
 		else begin
 			if (wb_q) begin
@@ -2841,11 +3256,22 @@ module mb_recon (
 						qp_q <= mb_qp;
 						i16m_q <= mb_i16_mode;
 						cmode_q <= mb_cmode;
-						begin : sv2v_autoblock_21
+						begin : sv2v_autoblock_22
 							reg signed [31:0] i;
 							for (i = 0; i < 16; i = i + 1)
 								i4m_q[i] <= mb_i4m[i * 4+:4];
 						end
+						inter_q <= mb_inter;
+						nz_q <= mb_nz;
+						begin : sv2v_autoblock_23
+							reg signed [31:0] i;
+							for (i = 0; i < 16; i = i + 1)
+								begin
+									mvq_x[i] <= mb_mvx[(15 - i) * 16+:16];
+									mvq_y[i] <= mb_mvy[(15 - i) * 16+:16];
+								end
+						end
+						mk_q <= 1'sb0;
 						have_left <= mb_x != 8'd0;
 						have_top <= mb_y != 8'd0;
 						tlq_y <= tl_y;
@@ -2858,11 +3284,48 @@ module mb_recon (
 						tyn_q <= ((mb_x + 8'd1) < cfg_mb_w ? ty_nxt_w : {128 {1'sb0}});
 						tuc_q <= tu_cur_w;
 						tvc_q <= tv_cur_w;
-						st_q <= (mb_i16 ? 4'd1 : 4'd3);
+						st_q <= (mb_i16 ? 4'd1 : (mb_inter ? 4'd13 : 4'd3));
 						k_q <= 1'sb0;
 					end
+				4'd13:
+					if (mc_done_w) begin
+						if (!mc_is_c) begin : sv2v_autoblock_24
+							reg signed [31:0] y;
+							for (y = 0; y < 4; y = y + 1)
+								begin : sv2v_autoblock_25
+									reg signed [31:0] x;
+									for (x = 0; x < 4; x = x + 1)
+										rec_y[(255 - (((((sv2v_cast_32_signed(zsy(mck)) * 4) + y) * 16) + (sv2v_cast_32_signed(zsx(mck)) * 4)) + x)) * 8+:8] <= mc_pred_w[(15 - ((y * 4) + x)) * 8+:8];
+								end
+						end
+						else if (!mk_q[5]) begin : sv2v_autoblock_26
+							reg signed [31:0] y;
+							for (y = 0; y < 2; y = y + 1)
+								begin : sv2v_autoblock_27
+									reg signed [31:0] x;
+									for (x = 0; x < 2; x = x + 1)
+										rec_u[(63 - (((((sv2v_cast_32_signed(zsy(mck)) * 2) + y) * 8) + (sv2v_cast_32_signed(zsx(mck)) * 2)) + x)) * 8+:8] <= mc_pred_w[(15 - ((y * 4) + x)) * 8+:8];
+								end
+						end
+						else begin : sv2v_autoblock_28
+							reg signed [31:0] y;
+							for (y = 0; y < 2; y = y + 1)
+								begin : sv2v_autoblock_29
+									reg signed [31:0] x;
+									for (x = 0; x < 2; x = x + 1)
+										rec_v[(63 - (((((sv2v_cast_32_signed(zsy(mck)) * 2) + y) * 8) + (sv2v_cast_32_signed(zsx(mck)) * 2)) + x)) * 8+:8] <= mc_pred_w[(15 - ((y * 4) + x)) * 8+:8];
+								end
+						end
+						if (mk_q == 6'd47) begin
+							mk_q <= 1'sb0;
+							k_q <= 1'sb0;
+							st_q <= 4'd3;
+						end
+						else
+							mk_q <= mk_q + 6'd1;
+					end
 				4'd1: begin
-					begin : sv2v_autoblock_22
+					begin : sv2v_autoblock_30
 						reg signed [31:0] i;
 						for (i = 0; i < 16; i = i + 1)
 							ldc_q[i] <= ldc_out[(15 - i) * 32+:32];
@@ -2873,7 +3336,7 @@ module mb_recon (
 					if (!p16_ok)
 						st_q <= 4'd12;
 					else begin
-						begin : sv2v_autoblock_23
+						begin : sv2v_autoblock_31
 							reg signed [31:0] i;
 							for (i = 0; i < 256; i = i + 1)
 								rec_y[(255 - i) * 8+:8] <= p16[(255 - i) * 8+:8];
@@ -2881,10 +3344,10 @@ module mb_recon (
 						st_q <= 4'd3;
 					end
 				4'd3:
-					if (!i16_q && !p4_ok)
+					if ((!i16_q && !inter_q) && !p4_ok)
 						st_q <= 4'd12;
 					else begin
-						begin : sv2v_autoblock_24
+						begin : sv2v_autoblock_32
 							reg signed [31:0] i;
 							for (i = 0; i < 16; i = i + 1)
 								begin
@@ -2894,15 +3357,15 @@ module mb_recon (
 						end
 						st_q <= 4'd4;
 					end
-				4'd4: begin : sv2v_autoblock_25
+				4'd4: begin : sv2v_autoblock_33
 					reg signed [31:0] px;
 					reg signed [31:0] py;
 					px = sv2v_cast_32_signed(bx4) * 4;
 					py = sv2v_cast_32_signed(by4) * 4;
-					begin : sv2v_autoblock_26
+					begin : sv2v_autoblock_34
 						reg signed [31:0] y;
 						for (y = 0; y < 4; y = y + 1)
-							begin : sv2v_autoblock_27
+							begin : sv2v_autoblock_35
 								reg signed [31:0] x;
 								for (x = 0; x < 4; x = x + 1)
 									rec_y[(255 - ((((py + y) * 16) + px) + x)) * 8+:8] <= id_out[(15 - ((y * 4) + x)) * 8+:8];
@@ -2911,7 +3374,7 @@ module mb_recon (
 					if (k_q == 5'd15) begin
 						k_q <= 1'sb0;
 						comp_q <= 1'b0;
-						st_q <= 4'd5;
+						st_q <= (inter_q ? (cbp_q[5:4] != 2'd0 ? 4'd6 : 4'd9) : 4'd5);
 					end
 					else begin
 						k_q <= k_q + 5'd1;
@@ -2922,7 +3385,7 @@ module mb_recon (
 					if (!pch_ok)
 						st_q <= 4'd12;
 					else if (!comp_q) begin
-						begin : sv2v_autoblock_28
+						begin : sv2v_autoblock_36
 							reg signed [31:0] i;
 							for (i = 0; i < 64; i = i + 1)
 								rec_u[(63 - i) * 8+:8] <= pch[(63 - i) * 8+:8];
@@ -2930,7 +3393,7 @@ module mb_recon (
 						comp_q <= 1'b1;
 					end
 					else begin
-						begin : sv2v_autoblock_29
+						begin : sv2v_autoblock_37
 							reg signed [31:0] i;
 							for (i = 0; i < 64; i = i + 1)
 								rec_v[(63 - i) * 8+:8] <= pch[(63 - i) * 8+:8];
@@ -2940,7 +3403,7 @@ module mb_recon (
 						st_q <= (cbp_q[5:4] != 2'd0 ? 4'd6 : 4'd9);
 					end
 				4'd6: begin
-					begin : sv2v_autoblock_30
+					begin : sv2v_autoblock_38
 						reg signed [31:0] i;
 						for (i = 0; i < 4; i = i + 1)
 							cdc_q[i] <= cdc_out[(3 - i) * 32+:32];
@@ -2949,7 +3412,7 @@ module mb_recon (
 					st_q <= 4'd7;
 				end
 				4'd7: begin
-					begin : sv2v_autoblock_31
+					begin : sv2v_autoblock_39
 						reg signed [31:0] i;
 						for (i = 0; i < 16; i = i + 1)
 							begin
@@ -2959,24 +3422,24 @@ module mb_recon (
 					end
 					st_q <= 4'd8;
 				end
-				4'd8: begin : sv2v_autoblock_32
+				4'd8: begin : sv2v_autoblock_40
 					reg signed [31:0] px;
 					reg signed [31:0] py;
 					px = (sv2v_cast_32_signed(k_q) & 1) * 4;
 					py = ((sv2v_cast_32_signed(k_q) >> 1) & 1) * 4;
-					if (comp_q) begin : sv2v_autoblock_33
+					if (comp_q) begin : sv2v_autoblock_41
 						reg signed [31:0] y;
 						for (y = 0; y < 4; y = y + 1)
-							begin : sv2v_autoblock_34
+							begin : sv2v_autoblock_42
 								reg signed [31:0] x;
 								for (x = 0; x < 4; x = x + 1)
 									rec_v[(63 - ((((py + y) * 8) + px) + x)) * 8+:8] <= id_out[(15 - ((y * 4) + x)) * 8+:8];
 							end
 					end
-					else begin : sv2v_autoblock_35
+					else begin : sv2v_autoblock_43
 						reg signed [31:0] y;
 						for (y = 0; y < 4; y = y + 1)
-							begin : sv2v_autoblock_36
+							begin : sv2v_autoblock_44
 								reg signed [31:0] x;
 								for (x = 0; x < 4; x = x + 1)
 									rec_u[(63 - ((((py + y) * 8) + px) + x)) * 8+:8] <= id_out[(15 - ((y * 4) + x)) * 8+:8];
@@ -2995,11 +3458,11 @@ module mb_recon (
 						st_q <= 4'd7;
 					end
 				end
-				4'd9: begin : sv2v_autoblock_37
+				4'd9: begin : sv2v_autoblock_45
 					reg [127:0] wy;
 					reg [63:0] wu;
 					reg [63:0] wv;
-					begin : sv2v_autoblock_38
+					begin : sv2v_autoblock_46
 						reg signed [31:0] i;
 						for (i = 0; i < 16; i = i + 1)
 							begin
@@ -3007,7 +3470,7 @@ module mb_recon (
 								left_y[i] <= rec_y[(255 - ((i * 16) + 15)) * 8+:8];
 							end
 					end
-					begin : sv2v_autoblock_39
+					begin : sv2v_autoblock_47
 						reg signed [31:0] i;
 						for (i = 0; i < 8; i = i + 1)
 							begin
@@ -3035,6 +3498,777 @@ module mb_recon (
 				default: st_q <= 4'd12;
 			endcase
 		end
+	initial _sv2v_0 = 0;
+endmodule
+module mc_fetch (
+	clk,
+	rst_n,
+	start,
+	is_chroma,
+	px,
+	py,
+	mvx,
+	mvy,
+	busy,
+	done,
+	req_valid,
+	req_x,
+	req_y,
+	req_w,
+	rsp_valid,
+	rsp_data,
+	pred
+);
+	reg _sv2v_0;
+	input wire clk;
+	input wire rst_n;
+	input wire start;
+	input wire is_chroma;
+	input wire [11:0] px;
+	input wire [10:0] py;
+	input wire signed [15:0] mvx;
+	input wire signed [15:0] mvy;
+	output wire busy;
+	output wire done;
+	output wire req_valid;
+	output wire signed [12:0] req_x;
+	output wire signed [11:0] req_y;
+	output wire [3:0] req_w;
+	input wire rsp_valid;
+	input wire [71:0] rsp_data;
+	output reg [127:0] pred;
+	reg [647:0] lwin;
+	reg [199:0] cwin;
+	reg chroma_q;
+	reg signed [12:0] x0_q;
+	reg signed [11:0] y0_q;
+	reg [1:0] lfx_q;
+	reg [1:0] lfy_q;
+	reg [2:0] cfx_q;
+	reg [2:0] cfy_q;
+	reg [3:0] row_q;
+	reg [3:0] got_q;
+	reg [1:0] st_q;
+	assign busy = st_q != 2'd0;
+	assign done = st_q == 2'd2;
+	wire [3:0] nrows;
+	assign nrows = (chroma_q ? 4'd5 : 4'd9);
+	assign req_valid = (st_q == 2'd1) && (row_q < nrows);
+	assign req_x = x0_q;
+	function automatic [11:0] sv2v_cast_12;
+		input reg [11:0] inp;
+		sv2v_cast_12 = inp;
+	endfunction
+	assign req_y = y0_q + sv2v_cast_12(row_q);
+	assign req_w = (chroma_q ? 4'd5 : 4'd9);
+	wire [127:0] lpred;
+	wire [127:0] cpred;
+	mc4x4_luma u_l(
+		.win(lwin),
+		.fx(lfx_q),
+		.fy(lfy_q),
+		.pred(lpred)
+	);
+	mc4x4_chroma u_c(
+		.win(cwin),
+		.fx(cfx_q),
+		.fy(cfy_q),
+		.pred(cpred)
+	);
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		begin : sv2v_autoblock_1
+			reg signed [31:0] i;
+			for (i = 0; i < 16; i = i + 1)
+				pred[(15 - i) * 8+:8] = (chroma_q ? cpred[(15 - i) * 8+:8] : lpred[(15 - i) * 8+:8]);
+		end
+	end
+	function automatic signed [12:0] sv2v_cast_13_signed;
+		input reg signed [12:0] inp;
+		sv2v_cast_13_signed = inp;
+	endfunction
+	function automatic signed [11:0] sv2v_cast_12_signed;
+		input reg signed [11:0] inp;
+		sv2v_cast_12_signed = inp;
+	endfunction
+	function automatic signed [2:0] sv2v_cast_3_signed;
+		input reg signed [2:0] inp;
+		sv2v_cast_3_signed = inp;
+	endfunction
+	function automatic signed [1:0] sv2v_cast_2_signed;
+		input reg signed [1:0] inp;
+		sv2v_cast_2_signed = inp;
+	endfunction
+	always @(posedge clk or negedge rst_n)
+		if (!rst_n) begin
+			st_q <= 2'd0;
+			row_q <= 1'sb0;
+			got_q <= 1'sb0;
+			chroma_q <= 1'b0;
+			x0_q <= 1'sb0;
+			y0_q <= 1'sb0;
+			lfx_q <= 1'sb0;
+			lfy_q <= 1'sb0;
+			cfx_q <= 1'sb0;
+			cfy_q <= 1'sb0;
+		end
+		else
+			(* full_case, parallel_case *)
+			case (st_q)
+				2'd0:
+					if (start) begin
+						chroma_q <= is_chroma;
+						if (is_chroma) begin
+							x0_q <= sv2v_cast_13_signed($signed({1'b0, px}) + (mvx >>> 3));
+							y0_q <= sv2v_cast_12_signed($signed({1'b0, py}) + (mvy >>> 3));
+							cfx_q <= sv2v_cast_3_signed(mvx & 16'sd7);
+							cfy_q <= sv2v_cast_3_signed(mvy & 16'sd7);
+						end
+						else begin
+							x0_q <= sv2v_cast_13_signed(($signed({1'b0, px}) + (mvx >>> 2)) - 13'sd2);
+							y0_q <= sv2v_cast_12_signed(($signed({1'b0, py}) + (mvy >>> 2)) - 12'sd2);
+							lfx_q <= sv2v_cast_2_signed(mvx & 16'sd3);
+							lfy_q <= sv2v_cast_2_signed(mvy & 16'sd3);
+						end
+						row_q <= 1'sb0;
+						got_q <= 1'sb0;
+						st_q <= 2'd1;
+					end
+				2'd1: begin
+					if (req_valid)
+						row_q <= row_q + 4'd1;
+					if (rsp_valid) begin
+						if (chroma_q) begin : sv2v_autoblock_2
+							reg signed [31:0] i;
+							for (i = 0; i < 5; i = i + 1)
+								cwin[(((4 - got_q[2:0]) * 5) + (4 - i)) * 8+:8] <= rsp_data[71 - (i * 8)-:8];
+						end
+						else begin : sv2v_autoblock_3
+							reg signed [31:0] i;
+							for (i = 0; i < 9; i = i + 1)
+								lwin[(((8 - got_q[3:0]) * 9) + (8 - i)) * 8+:8] <= rsp_data[71 - (i * 8)-:8];
+						end
+						got_q <= got_q + 4'd1;
+						if ((got_q + 4'd1) == nrows)
+							st_q <= 2'd2;
+					end
+				end
+				2'd2: st_q <= 2'd0;
+				default: st_q <= 2'd0;
+			endcase
+	initial _sv2v_0 = 0;
+endmodule
+module mc4x4_luma (
+	win,
+	fx,
+	fy,
+	pred
+);
+	reg _sv2v_0;
+	input wire [647:0] win;
+	input wire [1:0] fx;
+	input wire [1:0] fy;
+	output reg [127:0] pred;
+	function automatic signed [15:0] sv2v_cast_16_signed;
+		input reg signed [15:0] inp;
+		sv2v_cast_16_signed = inp;
+	endfunction
+	function automatic signed [15:0] tap6;
+		input reg [7:0] a;
+		input reg [7:0] b;
+		input reg [7:0] c;
+		input reg [7:0] d;
+		input reg [7:0] e;
+		input reg [7:0] f;
+		tap6 = sv2v_cast_16_signed((((($signed({8'b00000000, a}) - (16'sd5 * $signed({8'b00000000, b}))) + (16'sd20 * $signed({8'b00000000, c}))) + (16'sd20 * $signed({8'b00000000, d}))) - (16'sd5 * $signed({8'b00000000, e}))) + $signed({8'b00000000, f}));
+	endfunction
+	function automatic [7:0] clip8;
+		input reg signed [31:0] v;
+		reg [0:1] _sv2v_jump;
+		begin
+			_sv2v_jump = 2'b00;
+			if (v < 0) begin
+				clip8 = 8'd0;
+				_sv2v_jump = 2'b11;
+			end
+			if (_sv2v_jump == 2'b00) begin
+				if (v > 255) begin
+					clip8 = 8'd255;
+					_sv2v_jump = 2'b11;
+				end
+				if (_sv2v_jump == 2'b00) begin
+					clip8 = v[7:0];
+					_sv2v_jump = 2'b11;
+				end
+			end
+		end
+	endfunction
+	function automatic [7:0] sv2v_cast_8;
+		input reg [7:0] inp;
+		sv2v_cast_8 = inp;
+	endfunction
+	function automatic [7:0] avg2;
+		input reg [7:0] a;
+		input reg [7:0] b;
+		avg2 = sv2v_cast_8((({1'b0, a} + {1'b0, b}) + 9'd1) >> 1);
+	endfunction
+	reg signed [15:0] hrow [0:8][0:3];
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		begin : sv2v_autoblock_1
+			reg signed [31:0] j;
+			for (j = 0; j < 9; j = j + 1)
+				begin : sv2v_autoblock_2
+					reg signed [31:0] i;
+					for (i = 0; i < 4; i = i + 1)
+						hrow[j][i] = tap6(win[(((8 - j) * 9) + (8 - i)) * 8+:8], win[(((8 - j) * 9) + (8 - (i + 1))) * 8+:8], win[(((8 - j) * 9) + (8 - (i + 2))) * 8+:8], win[(((8 - j) * 9) + (8 - (i + 3))) * 8+:8], win[(((8 - j) * 9) + (8 - (i + 4))) * 8+:8], win[(((8 - j) * 9) + (8 - (i + 5))) * 8+:8]);
+				end
+		end
+	end
+	function automatic [31:0] sv2v_cast_32;
+		input reg [31:0] inp;
+		sv2v_cast_32 = inp;
+	endfunction
+	function automatic signed [31:0] sv2v_cast_32_signed;
+		input reg signed [31:0] inp;
+		sv2v_cast_32_signed = inp;
+	endfunction
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		begin : sv2v_autoblock_3
+			reg signed [31:0] idx;
+			for (idx = 0; idx < 16; idx = idx + 1)
+				pred[(15 - idx) * 8+:8] = 1'sb0;
+		end
+		if ((fx == 0) && (fy == 0)) begin : sv2v_autoblock_4
+			reg signed [31:0] j;
+			for (j = 0; j < 4; j = j + 1)
+				begin : sv2v_autoblock_5
+					reg signed [31:0] i;
+					for (i = 0; i < 4; i = i + 1)
+						pred[(15 - ((j * 4) + i)) * 8+:8] = win[(((8 - (j + 2)) * 9) + (8 - (i + 2))) * 8+:8];
+				end
+		end
+		else if (fy == 0) begin : sv2v_autoblock_6
+			reg signed [31:0] j;
+			for (j = 0; j < 4; j = j + 1)
+				begin : sv2v_autoblock_7
+					reg signed [31:0] i;
+					for (i = 0; i < 4; i = i + 1)
+						begin : sv2v_autoblock_8
+							reg [7:0] b;
+							reg [7:0] g;
+							b = clip8((sv2v_cast_32(hrow[j + 2][i]) + 32'sd16) >>> 5);
+							if (fx == 2)
+								pred[(15 - ((j * 4) + i)) * 8+:8] = b;
+							else begin
+								g = (fx == 1 ? win[(((8 - (j + 2)) * 9) + (8 - (i + 2))) * 8+:8] : win[(((8 - (j + 2)) * 9) + (8 - (i + 3))) * 8+:8]);
+								pred[(15 - ((j * 4) + i)) * 8+:8] = avg2(g, b);
+							end
+						end
+				end
+		end
+		else if (fx == 0) begin : sv2v_autoblock_9
+			reg signed [31:0] j;
+			for (j = 0; j < 4; j = j + 1)
+				begin : sv2v_autoblock_10
+					reg signed [31:0] i;
+					for (i = 0; i < 4; i = i + 1)
+						begin : sv2v_autoblock_11
+							reg [7:0] h;
+							reg [7:0] g;
+							h = clip8((sv2v_cast_32_signed(tap6(win[(((8 - j) * 9) + (8 - (i + 2))) * 8+:8], win[(((8 - (j + 1)) * 9) + (8 - (i + 2))) * 8+:8], win[(((8 - (j + 2)) * 9) + (8 - (i + 2))) * 8+:8], win[(((8 - (j + 3)) * 9) + (8 - (i + 2))) * 8+:8], win[(((8 - (j + 4)) * 9) + (8 - (i + 2))) * 8+:8], win[(((8 - (j + 5)) * 9) + (8 - (i + 2))) * 8+:8])) + 32'sd16) >>> 5);
+							if (fy == 2)
+								pred[(15 - ((j * 4) + i)) * 8+:8] = h;
+							else begin
+								g = (fy == 1 ? win[(((8 - (j + 2)) * 9) + (8 - (i + 2))) * 8+:8] : win[(((8 - (j + 3)) * 9) + (8 - (i + 2))) * 8+:8]);
+								pred[(15 - ((j * 4) + i)) * 8+:8] = avg2(g, h);
+							end
+						end
+				end
+		end
+		else begin : sv2v_autoblock_12
+			reg signed [31:0] j;
+			for (j = 0; j < 4; j = j + 1)
+				begin : sv2v_autoblock_13
+					reg signed [31:0] i;
+					for (i = 0; i < 4; i = i + 1)
+						begin : sv2v_autoblock_14
+							reg signed [31:0] j1;
+							reg [7:0] jj;
+							reg [7:0] b;
+							reg [7:0] h;
+							reg signed [31:0] col;
+							reg signed [31:0] row;
+							j1 = ((((sv2v_cast_32(hrow[j][i]) - (32'sd5 * sv2v_cast_32(hrow[j + 1][i]))) + (32'sd20 * sv2v_cast_32(hrow[j + 2][i]))) + (32'sd20 * sv2v_cast_32(hrow[j + 3][i]))) - (32'sd5 * sv2v_cast_32(hrow[j + 4][i]))) + sv2v_cast_32(hrow[j + 5][i]);
+							jj = clip8((j1 + 32'sd512) >>> 10);
+							if ((fx == 2) && (fy == 2))
+								pred[(15 - ((j * 4) + i)) * 8+:8] = jj;
+							else if (fy == 2) begin
+								col = (fx == 1 ? i + 2 : i + 3);
+								h = clip8((sv2v_cast_32_signed(tap6(win[(((8 - j) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 1)) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 2)) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 3)) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 4)) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 5)) * 9) + (8 - col)) * 8+:8])) + 32'sd16) >>> 5);
+								pred[(15 - ((j * 4) + i)) * 8+:8] = avg2(h, jj);
+							end
+							else if (fx == 2) begin
+								row = (fy == 1 ? j + 2 : j + 3);
+								b = clip8((sv2v_cast_32(hrow[row][i]) + 32'sd16) >>> 5);
+								pred[(15 - ((j * 4) + i)) * 8+:8] = avg2(b, jj);
+							end
+							else begin
+								row = (fy == 1 ? j + 2 : j + 3);
+								col = (fx == 1 ? i + 2 : i + 3);
+								b = clip8((sv2v_cast_32(hrow[row][i]) + 32'sd16) >>> 5);
+								h = clip8((sv2v_cast_32_signed(tap6(win[(((8 - j) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 1)) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 2)) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 3)) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 4)) * 9) + (8 - col)) * 8+:8], win[(((8 - (j + 5)) * 9) + (8 - col)) * 8+:8])) + 32'sd16) >>> 5);
+								pred[(15 - ((j * 4) + i)) * 8+:8] = avg2(b, h);
+							end
+						end
+				end
+		end
+	end
+	initial _sv2v_0 = 0;
+endmodule
+module mc4x4_chroma (
+	win,
+	fx,
+	fy,
+	pred
+);
+	reg _sv2v_0;
+	input wire [199:0] win;
+	input wire [2:0] fx;
+	input wire [2:0] fy;
+	output reg [127:0] pred;
+	function automatic [17:0] sv2v_cast_18;
+		input reg [17:0] inp;
+		sv2v_cast_18 = inp;
+	endfunction
+	function automatic [7:0] sv2v_cast_8;
+		input reg [7:0] inp;
+		sv2v_cast_8 = inp;
+	endfunction
+	always @(*) begin : sv2v_autoblock_1
+		reg [3:0] xf;
+		reg [3:0] yf;
+		reg [3:0] xi;
+		reg [3:0] yi;
+		if (_sv2v_0)
+			;
+		xf = {1'b0, fx};
+		yf = {1'b0, fy};
+		xi = 4'd8 - xf;
+		yi = 4'd8 - yf;
+		begin : sv2v_autoblock_2
+			reg signed [31:0] j;
+			for (j = 0; j < 4; j = j + 1)
+				begin : sv2v_autoblock_3
+					reg signed [31:0] i;
+					for (i = 0; i < 4; i = i + 1)
+						begin : sv2v_autoblock_4
+							reg [17:0] s;
+							s = (((sv2v_cast_18(xi * yi) * sv2v_cast_18(win[(((4 - j) * 5) + (4 - i)) * 8+:8])) + (sv2v_cast_18(xf * yi) * sv2v_cast_18(win[(((4 - j) * 5) + (4 - (i + 1))) * 8+:8]))) + (sv2v_cast_18(xi * yf) * sv2v_cast_18(win[(((4 - (j + 1)) * 5) + (4 - i)) * 8+:8]))) + (sv2v_cast_18(xf * yf) * sv2v_cast_18(win[(((4 - (j + 1)) * 5) + (4 - (i + 1))) * 8+:8]));
+							pred[(15 - ((j * 4) + i)) * 8+:8] = sv2v_cast_8((s + 18'd32) >> 6);
+						end
+				end
+		end
+	end
+	initial _sv2v_0 = 0;
+endmodule
+module mv_pred (
+	clk,
+	rst_n,
+	cfg_mb_w,
+	start,
+	mb_ptype,
+	mb_sub,
+	mvd_valid,
+	mvd_x,
+	mvd_y,
+	skip_go,
+	commit,
+	mb_inter,
+	mb_skip,
+	mv_out_x,
+	mv_out_y
+);
+	reg _sv2v_0;
+	parameter signed [31:0] MAX_MBW = 120;
+	input wire clk;
+	input wire rst_n;
+	input wire [7:0] cfg_mb_w;
+	input wire start;
+	input wire [2:0] mb_ptype;
+	input wire [7:0] mb_sub;
+	input wire mvd_valid;
+	input wire signed [15:0] mvd_x;
+	input wire signed [15:0] mvd_y;
+	input wire skip_go;
+	input wire commit;
+	input wire mb_inter;
+	input wire mb_skip;
+	output reg signed [255:0] mv_out_x;
+	output reg signed [255:0] mv_out_y;
+	reg signed [15:0] top_mvx [0:(MAX_MBW * 4) - 1];
+	reg signed [15:0] top_mvy [0:(MAX_MBW * 4) - 1];
+	reg [(MAX_MBW * 4) - 1:0] top_int;
+	reg signed [15:0] left_mvx [0:3];
+	reg signed [15:0] left_mvy [0:3];
+	reg [3:0] left_int;
+	reg signed [15:0] tl_mvx;
+	reg signed [15:0] tl_mvy;
+	reg tl_int;
+	reg [7:0] mbx_q;
+	reg [7:0] mby_q;
+	reg have_left_q;
+	reg signed [15:0] cur_mvx [0:15];
+	reg signed [15:0] cur_mvy [0:15];
+	reg [15:0] cur_w;
+	reg [1:0] b_q;
+	reg [1:0] s_q;
+	reg [2:0] g_bx0;
+	reg [2:0] g_by0;
+	reg [2:0] g_w4;
+	reg [2:0] g_h4;
+	reg [2:0] g_dir;
+	reg [1:0] sub2;
+	reg [2:0] nsub;
+	function automatic [2:0] sv2v_cast_3;
+		input reg [2:0] inp;
+		sv2v_cast_3 = inp;
+	endfunction
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		sub2 = mb_sub[{b_q, 1'b0}+:2];
+		nsub = (sub2 == 2'd0 ? 3'd1 : (sub2 == 2'd3 ? 3'd4 : 3'd2));
+		g_bx0 = 1'sb0;
+		g_by0 = 1'sb0;
+		g_w4 = 3'd4;
+		g_h4 = 3'd4;
+		g_dir = 1'sb0;
+		(* full_case, parallel_case *)
+		case (mb_ptype)
+			3'd0:
+				;
+			3'd1: begin
+				g_by0 = {1'b0, b_q[0], 1'b0};
+				g_h4 = 3'd2;
+				g_dir = 3'd1 + sv2v_cast_3(b_q[0]);
+			end
+			3'd2: begin
+				g_bx0 = {1'b0, b_q[0], 1'b0};
+				g_w4 = 3'd2;
+				g_dir = 3'd3 + sv2v_cast_3(b_q[0]);
+			end
+			default: begin
+				g_bx0 = {2'b00, b_q[0]} << 1;
+				g_by0 = {2'b00, b_q[1]} << 1;
+				(* full_case, parallel_case *)
+				case (sub2)
+					2'd0: begin
+						g_w4 = 3'd2;
+						g_h4 = 3'd2;
+					end
+					2'd1: begin
+						g_w4 = 3'd2;
+						g_h4 = 3'd1;
+						g_by0 = g_by0 + sv2v_cast_3(s_q[0]);
+					end
+					2'd2: begin
+						g_w4 = 3'd1;
+						g_h4 = 3'd2;
+						g_bx0 = g_bx0 + sv2v_cast_3(s_q[0]);
+					end
+					default: begin
+						g_w4 = 3'd1;
+						g_h4 = 3'd1;
+						g_bx0 = g_bx0 + sv2v_cast_3(s_q[0]);
+						g_by0 = g_by0 + sv2v_cast_3(s_q[1]);
+					end
+				endcase
+			end
+		endcase
+	end
+	reg [2:0] p_bx0;
+	reg [2:0] p_by0;
+	reg [2:0] p_w4;
+	reg [2:0] p_dir;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		p_bx0 = (skip_go ? 3'd0 : g_bx0);
+		p_by0 = (skip_go ? 3'd0 : g_by0);
+		p_w4 = (skip_go ? 3'd4 : g_w4);
+		p_dir = (skip_go ? 3'd0 : g_dir);
+	end
+	wire prewrite;
+	assign prewrite = mvd_valid && (((mb_ptype == 3'd1) || (mb_ptype == 3'd2)) || (mb_ptype == 3'd3));
+	function automatic [31:0] sv2v_cast_32;
+		input reg [31:0] inp;
+		sv2v_cast_32 = inp;
+	endfunction
+	function automatic [33:0] nbr;
+		input reg signed [31:0] bx;
+		input reg signed [31:0] by;
+		reg [33:0] n;
+		reg signed [31:0] r;
+		begin
+			n[33] = 1'b0;
+			n[32] = 1'b0;
+			n[31-:16] = 1'sb0;
+			n[15-:16] = 1'sb0;
+			if ((bx < 0) && (by < 0)) begin
+				if (have_left_q && (mby_q != 8'd0)) begin
+					n[33] = 1'b1;
+					n[32] = tl_int;
+					if (tl_int) begin
+						n[31-:16] = tl_mvx;
+						n[15-:16] = tl_mvy;
+					end
+				end
+			end
+			else if (bx < 0) begin
+				if (have_left_q) begin
+					n[33] = 1'b1;
+					n[32] = left_int[by[1:0]];
+					if (left_int[by[1:0]]) begin
+						n[31-:16] = left_mvx[by[1:0]];
+						n[15-:16] = left_mvy[by[1:0]];
+					end
+				end
+			end
+			else if (by < 0) begin
+				if ((mby_q != 8'd0) && ((bx < 4) || (mbx_q != (cfg_mb_w - 8'd1)))) begin
+					n[33] = 1'b1;
+					n[32] = top_int[(sv2v_cast_32(mbx_q) * 4) + bx];
+					if (n[32]) begin
+						n[31-:16] = top_mvx[(sv2v_cast_32(mbx_q) * 4) + bx];
+						n[15-:16] = top_mvy[(sv2v_cast_32(mbx_q) * 4) + bx];
+					end
+				end
+			end
+			else if (bx > 3)
+				;
+			else begin
+				r = (by * 4) + bx;
+				if (cur_w[r]) begin
+					n[33] = 1'b1;
+					n[32] = 1'b1;
+					n[31-:16] = cur_mvx[r];
+					n[15-:16] = cur_mvy[r];
+				end
+				else if (prewrite) begin
+					n[33] = 1'b1;
+					n[32] = 1'b1;
+				end
+			end
+			nbr = n;
+		end
+	endfunction
+	function automatic signed [15:0] med3;
+		input reg signed [15:0] a;
+		input reg signed [15:0] b;
+		input reg signed [15:0] c;
+		reg signed [15:0] x;
+		reg signed [15:0] y;
+		begin
+			x = a;
+			y = b;
+			if (x > y) begin
+				x = b;
+				y = a;
+			end
+			if (y > c)
+				y = c;
+			med3 = (x > y ? x : y);
+		end
+	endfunction
+	reg [33:0] na;
+	reg [33:0] nb;
+	reg [33:0] nc;
+	reg signed [15:0] pmx;
+	reg signed [15:0] pmy;
+	function automatic [1:0] sv2v_cast_2;
+		input reg [1:0] inp;
+		sv2v_cast_2 = inp;
+	endfunction
+	function automatic signed [31:0] sv2v_cast_32_signed;
+		input reg signed [31:0] inp;
+		sv2v_cast_32_signed = inp;
+	endfunction
+	always @($signed(nc[15-:16]) or $signed(nb[15-:16]) or $signed(na[15-:16]) or $signed(nc[31-:16]) or $signed(nb[31-:16]) or $signed(na[31-:16]) or $signed(nc[15-:16]) or $signed(nc[31-:16]) or $signed(nb[15-:16]) or $signed(nb[31-:16]) or nb[32] or $signed(na[15-:16]) or $signed(na[31-:16]) or na[32] or nc[32] or nb[32] or na[32] or $signed(na[15-:16]) or $signed(na[31-:16]) or na[33] or nc[33] or nb[33] or $signed(nc[15-:16]) or $signed(nc[31-:16]) or nc[32] or p_dir or $signed(na[15-:16]) or $signed(na[31-:16]) or na[32] or p_dir or p_dir or $signed(nb[15-:16]) or $signed(nb[31-:16]) or nb[32] or p_dir or p_by0 or p_bx0 or prewrite or cur_mvy or cur_mvx or cur_w or mbx_q or top_mvy or mbx_q or top_mvx or mbx_q or top_int or cfg_mb_w or mbx_q or mby_q or left_mvy or left_mvx or left_int or left_int or have_left_q or tl_mvy or tl_mvx or tl_int or tl_int or mby_q or have_left_q or p_by0 or p_w4 or p_bx0 or prewrite or cur_mvy or cur_mvx or cur_w or mbx_q or top_mvy or mbx_q or top_mvx or mbx_q or top_int or cfg_mb_w or mbx_q or mby_q or left_mvy or left_mvx or left_int or left_int or have_left_q or tl_mvy or tl_mvx or tl_int or tl_int or mby_q or have_left_q or p_by0 or p_bx0 or prewrite or cur_mvy or cur_mvx or cur_w or mbx_q or top_mvy or mbx_q or top_mvx or mbx_q or top_int or cfg_mb_w or mbx_q or mby_q or left_mvy or left_mvx or left_int or left_int or have_left_q or tl_mvy or tl_mvx or tl_int or tl_int or mby_q or have_left_q or p_by0 or p_bx0 or prewrite or cur_mvy or cur_mvx or cur_w or mbx_q or top_mvy or mbx_q or top_mvx or mbx_q or top_int or cfg_mb_w or mbx_q or mby_q or left_mvy or left_mvx or left_int or left_int or have_left_q or tl_mvy or tl_mvx or tl_int or tl_int or mby_q or have_left_q or _sv2v_0) begin : sv2v_autoblock_1
+		reg [33:0] nc0;
+		reg [1:0] match;
+		if (_sv2v_0)
+			;
+		na = nbr(sv2v_cast_32_signed(p_bx0) - 1, sv2v_cast_32_signed(p_by0));
+		nb = nbr(sv2v_cast_32_signed(p_bx0), sv2v_cast_32_signed(p_by0) - 1);
+		nc0 = nbr(sv2v_cast_32_signed(p_bx0) + sv2v_cast_32_signed(p_w4), sv2v_cast_32_signed(p_by0) - 1);
+		nc = (nc0[33] ? nc0 : nbr(sv2v_cast_32_signed(p_bx0) - 1, sv2v_cast_32_signed(p_by0) - 1));
+		if ((p_dir == 3'd1) && nb[32]) begin
+			pmx = $signed(nb[31-:16]);
+			pmy = $signed(nb[15-:16]);
+		end
+		else if (((p_dir == 3'd2) || (p_dir == 3'd3)) && na[32]) begin
+			pmx = $signed(na[31-:16]);
+			pmy = $signed(na[15-:16]);
+		end
+		else if ((p_dir == 3'd4) && nc[32]) begin
+			pmx = $signed(nc[31-:16]);
+			pmy = $signed(nc[15-:16]);
+		end
+		else if ((!nb[33] && !nc[33]) && na[33]) begin
+			pmx = $signed(na[31-:16]);
+			pmy = $signed(na[15-:16]);
+		end
+		else begin
+			match = (sv2v_cast_2(na[32]) + sv2v_cast_2(nb[32])) + sv2v_cast_2(nc[32]);
+			if (match == 2'd1) begin
+				if (na[32]) begin
+					pmx = $signed(na[31-:16]);
+					pmy = $signed(na[15-:16]);
+				end
+				else if (nb[32]) begin
+					pmx = $signed(nb[31-:16]);
+					pmy = $signed(nb[15-:16]);
+				end
+				else begin
+					pmx = $signed(nc[31-:16]);
+					pmy = $signed(nc[15-:16]);
+				end
+			end
+			else begin
+				pmx = med3($signed(na[31-:16]), $signed(nb[31-:16]), $signed(nc[31-:16]));
+				pmy = med3($signed(na[15-:16]), $signed(nb[15-:16]), $signed(nc[15-:16]));
+			end
+		end
+	end
+	wire skip_zero;
+	assign skip_zero = ((!na[33] || !nb[33]) || ((na[32] && ($signed(na[31-:16]) == 16'sd0)) && ($signed(na[15-:16]) == 16'sd0))) || ((nb[32] && ($signed(nb[31-:16]) == 16'sd0)) && ($signed(nb[15-:16]) == 16'sd0));
+	reg signed [15:0] fin_x;
+	reg signed [15:0] fin_y;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		if (skip_go) begin
+			fin_x = (skip_zero ? 16'sd0 : pmx);
+			fin_y = (skip_zero ? 16'sd0 : pmy);
+		end
+		else begin
+			fin_x = pmx + mvd_x;
+			fin_y = pmy + mvd_y;
+		end
+	end
+	always @(posedge clk or negedge rst_n)
+		if (!rst_n) begin
+			mbx_q <= 1'sb0;
+			mby_q <= 1'sb0;
+			have_left_q <= 1'b0;
+			cur_w <= 1'sb0;
+			b_q <= 1'sb0;
+			s_q <= 1'sb0;
+			left_int <= 1'sb0;
+			tl_int <= 1'b0;
+			tl_mvx <= 1'sb0;
+			tl_mvy <= 1'sb0;
+		end
+		else begin
+			if (start) begin
+				mbx_q <= 1'sb0;
+				mby_q <= 1'sb0;
+				have_left_q <= 1'b0;
+				cur_w <= 1'sb0;
+				b_q <= 1'sb0;
+				s_q <= 1'sb0;
+			end
+			if (mvd_valid || skip_go) begin
+				begin : sv2v_autoblock_2
+					reg signed [31:0] j;
+					for (j = 0; j < 4; j = j + 1)
+						begin : sv2v_autoblock_3
+							reg signed [31:0] i;
+							for (i = 0; i < 4; i = i + 1)
+								if ((((i >= sv2v_cast_32_signed(p_bx0)) && (i < (sv2v_cast_32_signed(p_bx0) + sv2v_cast_32_signed(p_w4)))) && (j >= sv2v_cast_32_signed(p_by0))) && (j < (sv2v_cast_32_signed(p_by0) + sv2v_cast_32_signed((skip_go ? 3'd4 : g_h4))))) begin
+									cur_mvx[(j * 4) + i] <= fin_x;
+									cur_mvy[(j * 4) + i] <= fin_y;
+									cur_w[(j * 4) + i] <= 1'b1;
+								end
+						end
+				end
+				if (mvd_valid) begin
+					if ((mb_ptype == 3'd1) || (mb_ptype == 3'd2))
+						b_q <= b_q + 2'd1;
+					else if (mb_ptype >= 3'd3) begin
+						if ((sv2v_cast_3(s_q) + 3'd1) == nsub) begin
+							s_q <= 1'sb0;
+							b_q <= b_q + 2'd1;
+						end
+						else
+							s_q <= s_q + 2'd1;
+					end
+				end
+			end
+			if (commit) begin
+				tl_mvx <= top_mvx[(sv2v_cast_32(mbx_q) * 4) + 3];
+				tl_mvy <= top_mvy[(sv2v_cast_32(mbx_q) * 4) + 3];
+				tl_int <= top_int[(sv2v_cast_32(mbx_q) * 4) + 3];
+				if (mb_inter || mb_skip) begin
+					begin : sv2v_autoblock_4
+						reg signed [31:0] j;
+						for (j = 0; j < 4; j = j + 1)
+							begin
+								left_mvx[j] <= cur_mvx[(j * 4) + 3];
+								left_mvy[j] <= cur_mvy[(j * 4) + 3];
+								left_int[j] <= 1'b1;
+							end
+					end
+					begin : sv2v_autoblock_5
+						reg signed [31:0] i;
+						for (i = 0; i < 4; i = i + 1)
+							begin
+								top_mvx[(sv2v_cast_32(mbx_q) * 4) + i] <= cur_mvx[12 + i];
+								top_mvy[(sv2v_cast_32(mbx_q) * 4) + i] <= cur_mvy[12 + i];
+								top_int[(sv2v_cast_32(mbx_q) * 4) + i] <= 1'b1;
+							end
+					end
+				end
+				else begin
+					left_int <= 1'sb0;
+					begin : sv2v_autoblock_6
+						reg signed [31:0] i;
+						for (i = 0; i < 4; i = i + 1)
+							top_int[(sv2v_cast_32(mbx_q) * 4) + i] <= 1'b0;
+					end
+				end
+				cur_w <= 1'sb0;
+				b_q <= 1'sb0;
+				s_q <= 1'sb0;
+				if (mbx_q == (cfg_mb_w - 8'd1)) begin
+					mbx_q <= 1'sb0;
+					mby_q <= mby_q + 8'd1;
+					have_left_q <= 1'b0;
+				end
+				else begin
+					mbx_q <= mbx_q + 8'd1;
+					have_left_q <= 1'b1;
+				end
+			end
+		end
+	localparam signed [511:0] Z2R = 512'h100000004000000050000000200000003000000060000000700000008000000090000000c0000000d0000000a0000000b0000000e0000000f;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		begin : sv2v_autoblock_7
+			reg signed [31:0] k;
+			for (k = 0; k < 16; k = k + 1)
+				begin
+					mv_out_x[(15 - k) * 16+:16] = (cur_w[Z2R[(15 - k) * 32+:32]] ? cur_mvx[Z2R[(15 - k) * 32+:32]] : 16'sd0);
+					mv_out_y[(15 - k) * 16+:16] = (cur_w[Z2R[(15 - k) * 32+:32]] ? cur_mvy[Z2R[(15 - k) * 32+:32]] : 16'sd0);
+				end
+		end
+	end
 	initial _sv2v_0 = 0;
 endmodule
 module intra4x4_pred (
@@ -3757,6 +4991,10 @@ module deblock_stream (
 	mb_x,
 	mb_y,
 	mb_qp,
+	mb_inter,
+	mb_nz,
+	mb_mvx,
+	mb_mvy,
 	in_y,
 	in_u,
 	in_v,
@@ -3784,6 +5022,10 @@ module deblock_stream (
 	input wire [7:0] mb_x;
 	input wire [7:0] mb_y;
 	input wire [5:0] mb_qp;
+	input wire mb_inter;
+	input wire [15:0] mb_nz;
+	input wire signed [255:0] mb_mvx;
+	input wire signed [255:0] mb_mvy;
 	input wire [2047:0] in_y;
 	input wire [511:0] in_u;
 	input wire [511:0] in_v;
@@ -3866,6 +5108,35 @@ module deblock_stream (
 	reg [63:0] row_v [0:(MAX_MBW * 8) - 1];
 	reg [5:0] row_qp [0:MAX_MBW - 1];
 	reg [MAX_MBW - 1:0] row_vld;
+	reg cur_int;
+	reg lft_int;
+	reg top_int;
+	reg [15:0] cur_nz;
+	reg [15:0] lft_nz;
+	reg [3:0] top_nz;
+	reg signed [15:0] cur_mvx [0:15];
+	reg signed [15:0] cur_mvy [0:15];
+	reg signed [15:0] lft_mvx [0:15];
+	reg signed [15:0] lft_mvy [0:15];
+	reg signed [15:0] top_mvx [0:3];
+	reg signed [15:0] top_mvy [0:3];
+	reg [132:0] row_mi [0:MAX_MBW - 1];
+	wire [132:0] row_mi_rd = row_mi[cur_x];
+	reg [132:0] lft_mi_pack;
+	always @(*) begin
+		if (_sv2v_0)
+			;
+		lft_mi_pack[0] = lft_int;
+		begin : sv2v_autoblock_1
+			reg signed [31:0] i;
+			for (i = 0; i < 4; i = i + 1)
+				begin
+					lft_mi_pack[1 + i] = lft_nz[12 + i];
+					lft_mi_pack[5 + (i * 32)+:16] = lft_mvx[12 + i];
+					lft_mi_pack[21 + (i * 32)+:16] = lft_mvy[12 + i];
+				end
+		end
+	end
 	reg [7:0] top_y_q [0:3][0:15];
 	reg [7:0] top_u_q [0:3][0:7];
 	reg [7:0] top_v_q [0:3][0:7];
@@ -3888,7 +5159,7 @@ module deblock_stream (
 		input reg signed [8:0] inp;
 		sv2v_cast_9_signed = inp;
 	endfunction
-	always @(*) begin : sv2v_autoblock_1
+	always @(*) begin : sv2v_autoblock_2
 		reg [8:0] s;
 		reg [5:0] qn;
 		reg [5:0] qc;
@@ -3909,8 +5180,96 @@ module deblock_stream (
 	wire [5:0] ib;
 	assign ia = clip51($signed({3'b000, (chroma_phase ? qpcav : qpav)}) + sv2v_cast_9_signed(cfg_a_off));
 	assign ib = clip51($signed({3'b000, (chroma_phase ? qpcav : qpav)}) + sv2v_cast_9_signed(cfg_b_off));
-	wire [2:0] bs;
-	assign bs = (e_q == 0 ? 3'd4 : 3'd3);
+	reg [2:0] bs;
+	function automatic signed [16:0] sv2v_cast_17_signed;
+		input reg signed [16:0] inp;
+		sv2v_cast_17_signed = inp;
+	endfunction
+	always @(*) begin : sv2v_autoblock_3
+		reg [1:0] brow;
+		reg [1:0] bcol;
+		reg p_intra;
+		reg q_intra;
+		reg p_nz;
+		reg q_nz;
+		reg signed [15:0] pmx;
+		reg signed [15:0] pmy;
+		reg signed [15:0] qmx;
+		reg signed [15:0] qmy;
+		reg signed [16:0] dmx;
+		reg signed [16:0] dmy;
+		reg [3:0] qi;
+		if (_sv2v_0)
+			;
+		brow = 1'sb0;
+		bcol = 1'sb0;
+		(* full_case, parallel_case *)
+		case (st_q)
+			4'd1: begin
+				brow = line_q[3:2];
+				bcol = e_q;
+			end
+			4'd2: begin
+				brow = line_q[2:1];
+				bcol = {e_q[0], 1'b0};
+			end
+			4'd4: begin
+				brow = e_q;
+				bcol = line_q[3:2];
+			end
+			4'd5: begin
+				brow = {e_q[0], 1'b0};
+				bcol = line_q[2:1];
+			end
+			default:
+				;
+		endcase
+		qi = {brow, bcol};
+		q_intra = !cur_int;
+		q_nz = cur_nz[qi];
+		qmx = cur_mvx[qi];
+		qmy = cur_mvy[qi];
+		if (!dir_h) begin
+			if (bcol == 2'd0) begin
+				p_intra = !lft_int;
+				p_nz = lft_nz[{brow, 2'd3}];
+				pmx = lft_mvx[{brow, 2'd3}];
+				pmy = lft_mvy[{brow, 2'd3}];
+			end
+			else begin
+				p_intra = !cur_int;
+				p_nz = cur_nz[{brow, bcol - 2'd1}];
+				pmx = cur_mvx[{brow, bcol - 2'd1}];
+				pmy = cur_mvy[{brow, bcol - 2'd1}];
+			end
+		end
+		else if (brow == 2'd0) begin
+			p_intra = !top_int;
+			p_nz = top_nz[bcol];
+			pmx = top_mvx[bcol];
+			pmy = top_mvy[bcol];
+		end
+		else begin
+			p_intra = !cur_int;
+			p_nz = cur_nz[{brow - 2'd1, bcol}];
+			pmx = cur_mvx[{brow - 2'd1, bcol}];
+			pmy = cur_mvy[{brow - 2'd1, bcol}];
+		end
+		dmx = sv2v_cast_17_signed(pmx) - sv2v_cast_17_signed(qmx);
+		if (dmx < 0)
+			dmx = -dmx;
+		dmy = sv2v_cast_17_signed(pmy) - sv2v_cast_17_signed(qmy);
+		if (dmy < 0)
+			dmy = -dmy;
+		if (p_intra || q_intra)
+			bs = (e_q == 2'd0 ? 3'd4 : 3'd3);
+		else if (p_nz || q_nz)
+			bs = 3'd2;
+		else if ((dmx >= 17'sd4) || (dmy >= 17'sd4))
+			bs = 3'd1;
+		else
+			bs = 3'd0;
+	end
 	wire [4:0] tc0;
 	function automatic [4:0] dbf_tc0;
 		input reg [5:0] idx;
@@ -4084,39 +5443,39 @@ module deblock_stream (
 		input reg [1:0] inp;
 		sv2v_cast_2 = inp;
 	endfunction
-	assign tc0 = (bs < 3'd4 ? dbf_tc0(ia, sv2v_cast_2(bs - 3'd1)) : 5'd0);
+	assign tc0 = ((bs != 3'd0) && (bs < 3'd4) ? dbf_tc0(ia, sv2v_cast_2(bs - 3'd1)) : 5'd0);
 	reg [7:0] smp [0:7];
 	function automatic signed [31:0] sv2v_cast_32_signed;
 		input reg signed [31:0] inp;
 		sv2v_cast_32_signed = inp;
 	endfunction
-	always @(*) begin : sv2v_autoblock_2
+	always @(*) begin : sv2v_autoblock_4
 		reg signed [31:0] e4;
 		reg signed [31:0] ln;
 		if (_sv2v_0)
 			;
 		e4 = sv2v_cast_32_signed(e_q) * 4;
 		ln = sv2v_cast_32_signed(line_q);
-		begin : sv2v_autoblock_3
+		begin : sv2v_autoblock_5
 			reg signed [31:0] i;
 			for (i = 0; i < 8; i = i + 1)
 				smp[i] = 1'sb0;
 		end
 		(* full_case, parallel_case *)
 		case (st_q)
-			4'd1: begin : sv2v_autoblock_4
+			4'd1: begin : sv2v_autoblock_6
 				reg signed [31:0] i;
 				for (i = 0; i < 8; i = i + 1)
-					begin : sv2v_autoblock_5
+					begin : sv2v_autoblock_7
 						reg signed [31:0] x;
 						x = (e4 - 4) + i;
 						smp[i] = (x < 0 ? lft_y[((ln * 16) + 16) + x] : cur_y[(ln * 16) + x]);
 					end
 			end
-			4'd2: begin : sv2v_autoblock_6
+			4'd2: begin : sv2v_autoblock_8
 				reg signed [31:0] i;
 				for (i = 0; i < 8; i = i + 1)
-					begin : sv2v_autoblock_7
+					begin : sv2v_autoblock_9
 						reg signed [31:0] x;
 						x = (e4 - 4) + i;
 						if (comp_q)
@@ -4125,19 +5484,19 @@ module deblock_stream (
 							smp[i] = (x < 0 ? lft_u[((ln * 8) + 8) + x] : cur_u[(ln * 8) + x]);
 					end
 			end
-			4'd4: begin : sv2v_autoblock_8
+			4'd4: begin : sv2v_autoblock_10
 				reg signed [31:0] i;
 				for (i = 0; i < 8; i = i + 1)
-					begin : sv2v_autoblock_9
+					begin : sv2v_autoblock_11
 						reg signed [31:0] y;
 						y = (e4 - 4) + i;
 						smp[i] = (y < 0 ? top_y_q[4 + y][ln] : cur_y[(y * 16) + ln]);
 					end
 			end
-			4'd5: begin : sv2v_autoblock_10
+			4'd5: begin : sv2v_autoblock_12
 				reg signed [31:0] i;
 				for (i = 0; i < 8; i = i + 1)
-					begin : sv2v_autoblock_11
+					begin : sv2v_autoblock_13
 						reg signed [31:0] y;
 						y = (e4 - 4) + i;
 						if (comp_q)
@@ -4357,12 +5716,12 @@ module deblock_stream (
 						st_q <= 4'd11;
 					end
 					else if (mb_push) begin
-						begin : sv2v_autoblock_12
+						begin : sv2v_autoblock_14
 							reg signed [31:0] i;
 							for (i = 0; i < 256; i = i + 1)
 								cur_y[i] <= in_y[(255 - i) * 8+:8];
 						end
-						begin : sv2v_autoblock_13
+						begin : sv2v_autoblock_15
 							reg signed [31:0] i;
 							for (i = 0; i < 64; i = i + 1)
 								begin
@@ -4371,6 +5730,16 @@ module deblock_stream (
 								end
 						end
 						cur_qp <= mb_qp;
+						cur_int <= mb_inter;
+						cur_nz <= mb_nz;
+						begin : sv2v_autoblock_16
+							reg signed [31:0] i;
+							for (i = 0; i < 16; i = i + 1)
+								begin
+									cur_mvx[i] <= mb_mvx[(15 - i) * 16+:16];
+									cur_mvy[i] <= mb_mvy[(15 - i) * 16+:16];
+								end
+						end
 						cur_x <= mb_x;
 						cur_yc <= mb_y;
 						if (mb_x == 8'd0)
@@ -4381,32 +5750,34 @@ module deblock_stream (
 						st_q <= 4'd1;
 					end
 				4'd1: begin
-					if (cfg_enable && !((e_q == 0) && skip_v0)) begin : sv2v_autoblock_14
-						reg signed [31:0] e4;
-						reg signed [31:0] ln;
-						e4 = sv2v_cast_32_signed(e_q) * 4;
-						ln = sv2v_cast_32_signed(line_q);
-						begin : sv2v_autoblock_15
-							reg signed [31:0] i;
-							for (i = 1; i < 7; i = i + 1)
-								begin : sv2v_autoblock_16
-									reg signed [31:0] x;
-									reg [7:0] v;
-									x = (e4 - 4) + i;
-									(* full_case, parallel_case *)
-									case (i)
-										1: v = o_p2;
-										2: v = o_p1;
-										3: v = o_p0;
-										4: v = o_q0;
-										5: v = o_q1;
-										default: v = o_q2;
-									endcase
-									if (x < 0)
-										lft_y[((ln * 16) + 16) + x] <= v;
-									else
-										cur_y[(ln * 16) + x] <= v;
-								end
+					if (cfg_enable && !((e_q == 0) && skip_v0)) begin
+						if (bs != 3'd0) begin : sv2v_autoblock_17
+							reg signed [31:0] e4;
+							reg signed [31:0] ln;
+							e4 = sv2v_cast_32_signed(e_q) * 4;
+							ln = sv2v_cast_32_signed(line_q);
+							begin : sv2v_autoblock_18
+								reg signed [31:0] i;
+								for (i = 1; i < 7; i = i + 1)
+									begin : sv2v_autoblock_19
+										reg signed [31:0] x;
+										reg [7:0] v;
+										x = (e4 - 4) + i;
+										(* full_case, parallel_case *)
+										case (i)
+											1: v = o_p2;
+											2: v = o_p1;
+											3: v = o_p0;
+											4: v = o_q0;
+											5: v = o_q1;
+											default: v = o_q2;
+										endcase
+										if (x < 0)
+											lft_y[((ln * 16) + 16) + x] <= v;
+										else
+											cur_y[(ln * 16) + x] <= v;
+									end
+							end
 						end
 					end
 					if (((e_q == 0) && skip_v0) || (line_q == 5'd15)) begin
@@ -4423,36 +5794,38 @@ module deblock_stream (
 						line_q <= line_q + 5'd1;
 				end
 				4'd2: begin
-					if (cfg_enable && !((e_q == 0) && skip_v0)) begin : sv2v_autoblock_17
-						reg signed [31:0] e4;
-						reg signed [31:0] ln;
-						e4 = sv2v_cast_32_signed(e_q) * 4;
-						ln = sv2v_cast_32_signed(line_q);
-						begin : sv2v_autoblock_18
-							reg signed [31:0] i;
-							for (i = 2; i < 6; i = i + 1)
-								begin : sv2v_autoblock_19
-									reg signed [31:0] x;
-									reg [7:0] v;
-									x = (e4 - 4) + i;
-									(* full_case, parallel_case *)
-									case (i)
-										2: v = o_p1;
-										3: v = o_p0;
-										4: v = o_q0;
-										default: v = o_q1;
-									endcase
-									if (x < 0) begin
-										if (comp_q)
-											lft_v[((ln * 8) + 8) + x] <= v;
+					if (cfg_enable && !((e_q == 0) && skip_v0)) begin
+						if (bs != 3'd0) begin : sv2v_autoblock_20
+							reg signed [31:0] e4;
+							reg signed [31:0] ln;
+							e4 = sv2v_cast_32_signed(e_q) * 4;
+							ln = sv2v_cast_32_signed(line_q);
+							begin : sv2v_autoblock_21
+								reg signed [31:0] i;
+								for (i = 2; i < 6; i = i + 1)
+									begin : sv2v_autoblock_22
+										reg signed [31:0] x;
+										reg [7:0] v;
+										x = (e4 - 4) + i;
+										(* full_case, parallel_case *)
+										case (i)
+											2: v = o_p1;
+											3: v = o_p0;
+											4: v = o_q0;
+											default: v = o_q1;
+										endcase
+										if (x < 0) begin
+											if (comp_q)
+												lft_v[((ln * 8) + 8) + x] <= v;
+											else
+												lft_u[((ln * 8) + 8) + x] <= v;
+										end
+										else if (comp_q)
+											cur_v[(ln * 8) + x] <= v;
 										else
-											lft_u[((ln * 8) + 8) + x] <= v;
+											cur_u[(ln * 8) + x] <= v;
 									end
-									else if (comp_q)
-										cur_v[(ln * 8) + x] <= v;
-									else
-										cur_u[(ln * 8) + x] <= v;
-								end
+							end
 						end
 					end
 					if (((e_q == 0) && skip_v0) || (line_q == 5'd7)) begin
@@ -4475,16 +5848,16 @@ module deblock_stream (
 						line_q <= line_q + 5'd1;
 				end
 				4'd3: begin
-					begin : sv2v_autoblock_20
+					begin : sv2v_autoblock_23
 						reg signed [31:0] r;
 						for (r = 0; r < 4; r = r + 1)
 							begin
-								begin : sv2v_autoblock_21
+								begin : sv2v_autoblock_24
 									reg signed [31:0] c;
 									for (c = 0; c < 16; c = c + 1)
 										top_y_q[r][c] <= row_y[{cur_x, 4'b0000} + sv2v_cast_12_signed(12 + r)][c * 8+:8];
 								end
-								begin : sv2v_autoblock_22
+								begin : sv2v_autoblock_25
 									reg signed [31:0] c;
 									for (c = 0; c < 8; c = c + 1)
 										begin
@@ -4494,38 +5867,50 @@ module deblock_stream (
 								end
 							end
 					end
+					top_int <= row_mi_rd[0];
+					begin : sv2v_autoblock_26
+						reg signed [31:0] i;
+						for (i = 0; i < 4; i = i + 1)
+							begin
+								top_nz[i] <= row_mi_rd[1 + i];
+								top_mvx[i] <= row_mi_rd[5 + (i * 32)+:16];
+								top_mvy[i] <= row_mi_rd[21 + (i * 32)+:16];
+							end
+					end
 					dir_h <= 1'b1;
 					e_q <= 1'sb0;
 					line_q <= 1'sb0;
 					st_q <= 4'd4;
 				end
 				4'd4: begin
-					if (cfg_enable && !((e_q == 0) && skip_h0)) begin : sv2v_autoblock_23
-						reg signed [31:0] e4;
-						reg signed [31:0] ln;
-						e4 = sv2v_cast_32_signed(e_q) * 4;
-						ln = sv2v_cast_32_signed(line_q);
-						begin : sv2v_autoblock_24
-							reg signed [31:0] i;
-							for (i = 1; i < 7; i = i + 1)
-								begin : sv2v_autoblock_25
-									reg signed [31:0] y;
-									reg [7:0] v;
-									y = (e4 - 4) + i;
-									(* full_case, parallel_case *)
-									case (i)
-										1: v = o_p2;
-										2: v = o_p1;
-										3: v = o_p0;
-										4: v = o_q0;
-										5: v = o_q1;
-										default: v = o_q2;
-									endcase
-									if (y < 0)
-										top_y_q[4 + y][ln] <= v;
-									else
-										cur_y[(y * 16) + ln] <= v;
-								end
+					if (cfg_enable && !((e_q == 0) && skip_h0)) begin
+						if (bs != 3'd0) begin : sv2v_autoblock_27
+							reg signed [31:0] e4;
+							reg signed [31:0] ln;
+							e4 = sv2v_cast_32_signed(e_q) * 4;
+							ln = sv2v_cast_32_signed(line_q);
+							begin : sv2v_autoblock_28
+								reg signed [31:0] i;
+								for (i = 1; i < 7; i = i + 1)
+									begin : sv2v_autoblock_29
+										reg signed [31:0] y;
+										reg [7:0] v;
+										y = (e4 - 4) + i;
+										(* full_case, parallel_case *)
+										case (i)
+											1: v = o_p2;
+											2: v = o_p1;
+											3: v = o_p0;
+											4: v = o_q0;
+											5: v = o_q1;
+											default: v = o_q2;
+										endcase
+										if (y < 0)
+											top_y_q[4 + y][ln] <= v;
+										else
+											cur_y[(y * 16) + ln] <= v;
+									end
+							end
 						end
 					end
 					if (((e_q == 0) && skip_h0) || (line_q == 5'd15)) begin
@@ -4542,36 +5927,38 @@ module deblock_stream (
 						line_q <= line_q + 5'd1;
 				end
 				4'd5: begin
-					if (cfg_enable && !((e_q == 0) && skip_h0)) begin : sv2v_autoblock_26
-						reg signed [31:0] e4;
-						reg signed [31:0] ln;
-						e4 = sv2v_cast_32_signed(e_q) * 4;
-						ln = sv2v_cast_32_signed(line_q);
-						begin : sv2v_autoblock_27
-							reg signed [31:0] i;
-							for (i = 2; i < 6; i = i + 1)
-								begin : sv2v_autoblock_28
-									reg signed [31:0] y;
-									reg [7:0] v;
-									y = (e4 - 4) + i;
-									(* full_case, parallel_case *)
-									case (i)
-										2: v = o_p1;
-										3: v = o_p0;
-										4: v = o_q0;
-										default: v = o_q1;
-									endcase
-									if (y < 0) begin
-										if (comp_q)
-											top_v_q[4 + y][ln] <= v;
+					if (cfg_enable && !((e_q == 0) && skip_h0)) begin
+						if (bs != 3'd0) begin : sv2v_autoblock_30
+							reg signed [31:0] e4;
+							reg signed [31:0] ln;
+							e4 = sv2v_cast_32_signed(e_q) * 4;
+							ln = sv2v_cast_32_signed(line_q);
+							begin : sv2v_autoblock_31
+								reg signed [31:0] i;
+								for (i = 2; i < 6; i = i + 1)
+									begin : sv2v_autoblock_32
+										reg signed [31:0] y;
+										reg [7:0] v;
+										y = (e4 - 4) + i;
+										(* full_case, parallel_case *)
+										case (i)
+											2: v = o_p1;
+											3: v = o_p0;
+											4: v = o_q0;
+											default: v = o_q1;
+										endcase
+										if (y < 0) begin
+											if (comp_q)
+												top_v_q[4 + y][ln] <= v;
+											else
+												top_u_q[4 + y][ln] <= v;
+										end
+										else if (comp_q)
+											cur_v[(y * 8) + ln] <= v;
 										else
-											top_u_q[4 + y][ln] <= v;
+											cur_u[(y * 8) + ln] <= v;
 									end
-									else if (comp_q)
-										cur_v[(y * 8) + ln] <= v;
-									else
-										cur_u[(y * 8) + ln] <= v;
-								end
+							end
 						end
 					end
 					if (((e_q == 0) && skip_h0) || (line_q == 5'd7)) begin
@@ -4593,19 +5980,19 @@ module deblock_stream (
 						line_q <= line_q + 5'd1;
 				end
 				4'd6: begin
-					begin : sv2v_autoblock_29
+					begin : sv2v_autoblock_33
 						reg signed [31:0] r;
 						for (r = 0; r < 4; r = r + 1)
-							begin : sv2v_autoblock_30
+							begin : sv2v_autoblock_34
 								reg [127:0] wy;
 								reg [63:0] wu;
 								reg [63:0] wv;
-								begin : sv2v_autoblock_31
+								begin : sv2v_autoblock_35
 									reg signed [31:0] c;
 									for (c = 0; c < 16; c = c + 1)
 										wy[c * 8+:8] = top_y_q[r][c];
 								end
-								begin : sv2v_autoblock_32
+								begin : sv2v_autoblock_36
 									reg signed [31:0] c;
 									for (c = 0; c < 8; c = c + 1)
 										begin
@@ -4649,9 +6036,9 @@ module deblock_stream (
 				end
 				4'd8:
 					if (lft_valid) begin
-						if (emit_q < 5'd16) begin : sv2v_autoblock_33
+						if (emit_q < 5'd16) begin : sv2v_autoblock_37
 							reg [127:0] w;
-							begin : sv2v_autoblock_34
+							begin : sv2v_autoblock_38
 								reg signed [31:0] i;
 								for (i = 0; i < 16; i = i + 1)
 									w[i * 8+:8] = lft_y[(sv2v_cast_32_signed(emit_q) * 16) + i];
@@ -4659,10 +6046,10 @@ module deblock_stream (
 							row_y[{cur_x - 8'd1, 4'b0000} + sv2v_cast_12(emit_q)] <= w;
 							emit_q <= emit_q + 5'd1;
 						end
-						else if (emit_q < 5'd24) begin : sv2v_autoblock_35
+						else if (emit_q < 5'd24) begin : sv2v_autoblock_39
 							reg [63:0] wu;
 							reg [63:0] wv;
-							begin : sv2v_autoblock_36
+							begin : sv2v_autoblock_40
 								reg signed [31:0] i;
 								for (i = 0; i < 8; i = i + 1)
 									begin
@@ -4676,6 +6063,7 @@ module deblock_stream (
 						end
 						else begin
 							row_qp[cur_x - 8'd1] <= lft_qp;
+							row_mi[cur_x - 8'd1] <= lft_mi_pack;
 							row_vld[cur_x - 8'd1] <= 1'b1;
 							emit_q <= 1'sb0;
 							st_q <= 4'd9;
@@ -4686,12 +6074,12 @@ module deblock_stream (
 						st_q <= 4'd9;
 					end
 				4'd9: begin
-					begin : sv2v_autoblock_37
+					begin : sv2v_autoblock_41
 						reg signed [31:0] i;
 						for (i = 0; i < 256; i = i + 1)
 							lft_y[i] <= cur_y[i];
 					end
-					begin : sv2v_autoblock_38
+					begin : sv2v_autoblock_42
 						reg signed [31:0] i;
 						for (i = 0; i < 64; i = i + 1)
 							begin
@@ -4700,6 +6088,16 @@ module deblock_stream (
 							end
 					end
 					lft_qp <= cur_qp;
+					lft_int <= cur_int;
+					lft_nz <= cur_nz;
+					begin : sv2v_autoblock_43
+						reg signed [31:0] i;
+						for (i = 0; i < 16; i = i + 1)
+							begin
+								lft_mvx[i] <= cur_mvx[i];
+								lft_mvy[i] <= cur_mvy[i];
+							end
+					end
 					lft_valid <= 1'b1;
 					if ((cur_x + 8'd1) == cfg_mb_w) begin
 						emit_q <= 1'sb0;
@@ -4709,9 +6107,9 @@ module deblock_stream (
 						st_q <= 4'd0;
 				end
 				4'd10:
-					if (emit_q < 5'd16) begin : sv2v_autoblock_39
+					if (emit_q < 5'd16) begin : sv2v_autoblock_44
 						reg [127:0] w;
-						begin : sv2v_autoblock_40
+						begin : sv2v_autoblock_45
 							reg signed [31:0] i;
 							for (i = 0; i < 16; i = i + 1)
 								w[i * 8+:8] = lft_y[(sv2v_cast_32_signed(emit_q) * 16) + i];
@@ -4719,10 +6117,10 @@ module deblock_stream (
 						row_y[{cur_x, 4'b0000} + sv2v_cast_12(emit_q)] <= w;
 						emit_q <= emit_q + 5'd1;
 					end
-					else if (emit_q < 5'd24) begin : sv2v_autoblock_41
+					else if (emit_q < 5'd24) begin : sv2v_autoblock_46
 						reg [63:0] wu;
 						reg [63:0] wv;
-						begin : sv2v_autoblock_42
+						begin : sv2v_autoblock_47
 							reg signed [31:0] i;
 							for (i = 0; i < 8; i = i + 1)
 								begin
@@ -4736,6 +6134,7 @@ module deblock_stream (
 					end
 					else begin
 						row_qp[cur_x] <= lft_qp;
+						row_mi[cur_x] <= lft_mi_pack;
 						row_vld[cur_x] <= 1'b1;
 						lft_valid <= 1'b0;
 						emit_q <= 1'sb0;

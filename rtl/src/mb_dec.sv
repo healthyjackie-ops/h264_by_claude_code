@@ -54,6 +54,7 @@ module mb_dec #(
     output logic signed [15:0] mvd_x,
     output logic signed [15:0] mvd_y,
     output logic        skip_go,       // P_Skip MB derivation beat
+    output logic [15:0] mb_nz,         // 4x4 luma nz bitmap, raster
 
     // per-MB header pulse
     output logic        mb_valid,
@@ -272,6 +273,9 @@ module mb_dec #(
     assign mb_valid = (st_q == S_EMIT) || (st_q == S_WAIT_REC);
     assign mb_skip = skip_flag_q;
     assign skip_go = (st_q == S_PSKIP_FILL);
+    always_comb
+        for (int r = 0; r < 16; r++)
+            mb_nz[r] = (nz_q[zidx(2'(r & 3), 2'(r >> 2))] != 5'd0);
     assign mvd_valid = (st_q == S_PMVD_Y) && win_ok && eg_ok;
     assign mvd_x = mvdx_q;
     assign mvd_y = 16'(eg_se);

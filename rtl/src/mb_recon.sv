@@ -27,6 +27,7 @@ module mb_recon #(
     input  logic [7:0]  mb_x,
     input  logic [7:0]  mb_y,
     input  logic        mb_inter,      // P MB (incl. skip): MC prediction
+    input  logic [15:0] mb_nz,         // raster 4x4 nz bitmap
     input  logic signed [15:0] mb_mvx [16],   // z-scan final MVs
     input  logic signed [15:0] mb_mvy [16],
     input  logic        mb_i16,
@@ -46,6 +47,11 @@ module mb_recon #(
     output logic [7:0]  rec_y [256],
     output logic [7:0]  rec_u [64],
     output logic [7:0]  rec_v [64],
+    // motion/nz sideband for the P deblocker (valid with rec_valid)
+    output logic        rec_inter,
+    output logic [15:0] rec_nz,
+    output logic signed [15:0] rec_mvx [16],   // raster 4x4
+    output logic signed [15:0] rec_mvy [16],
     output logic        err,
 
     // reference-frame row-read channel (mc_fetch passthrough)
@@ -158,6 +164,18 @@ module mb_recon #(
     logic signed [15:0] mvq_x [16];
     logic signed [15:0] mvq_y [16];
     logic [5:0]  mk_q;
+    logic [15:0] nz_q;
+
+    // z<->raster permutation is an involution (swaps 2/4 3/5 10/12 11/13)
+    localparam int Z2R [16] = '{0, 1, 4, 5, 2, 3, 6, 7,
+                                8, 9, 12, 13, 10, 11, 14, 15};
+    assign rec_inter = inter_q;
+    assign rec_nz = nz_q;
+    always_comb
+        for (int r = 0; r < 16; r++) begin
+            rec_mvx[r] = mvq_x[Z2R[r]];
+            rec_mvy[r] = mvq_y[Z2R[r]];
+        end
 
     logic        mc_start_w, mc_busy_w, mc_done_w;
     logic [7:0]  mc_pred_w [16];
@@ -421,6 +439,7 @@ module mb_recon #(
                 for (int i = 0; i < 16; i++)
                     i4m_q[i] <= mb_i4m[i*4 +: 4];
                 inter_q <= mb_inter;
+                nz_q <= mb_nz;
                 for (int i = 0; i < 16; i++) begin
                     mvq_x[i] <= mb_mvx[i];
                     mvq_y[i] <= mb_mvy[i];

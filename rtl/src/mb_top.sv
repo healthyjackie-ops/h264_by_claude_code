@@ -109,7 +109,7 @@ module mb_top #(
         .blk_coef_addr(blk_coef_addr), .blk_coef_data(blk_coef_data),
         .mb_skip(mb_skip), .mb_inter(mb_inter), .mb_ptype(mb_ptype),
         .mb_sub(mb_sub), .mvd_valid(mvd_valid), .mvd_x(mvd_x),
-        .mvd_y(mvd_y), .skip_go(skip_go_w),
+        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(),
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
