@@ -2450,7 +2450,7 @@ static int decode_picture(slice_ent_t *ents, int nslices,
             }
         }
 
-        if (!use_cabac && !t8 && !sh->is_p && !sh->is_b) {
+        if (!t8 && !sh->is_p && !sh->is_b) {
             uint8_t i4m[16];
             for (int k = 0; k < 16; k++) {
                 i4m[k] = (uint8_t)c.i4_mode[(mby * 4 + zscan_y[k]) * bw +

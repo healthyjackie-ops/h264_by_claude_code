@@ -147,8 +147,8 @@ ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
 | Phase | 内容 | 验收 |
 |---|---|---|
 | **W15-a** ✅ | cabac_core.sv：9.3.3.2 算术解码引擎（decision/bypass/terminate 单拍/bin、renorm 组合 CLZ 移位 + show 窗口同拍消费、436 ctx flop-RF 同拍读改写、串行 init FSM 436 拍 + 9-bit prime）+ gen_cabac_rom.py（rangeTabLPS/状态转移/4 模型 init 表自 cabac.c 生成,单一可信源） | **833,673 bins bit-exact vs C 引擎**（400 随机流 × 随机 op/ctx 序列,terminate hit 重 init） |
-| W15-b | mb_dec CABAC 语法路径：ctxIdxInc 邻块推导（mb_type/cbp/qp_delta/intra 模式）+ bin 串解析 FSM | CABAC I 流逐 MB 语法对拍 |
-| W15-c | 残差 CABAC：cbf/sig/last/abs 上下文 + 系数重建,接 cram | CABAC I 流像素 bit-exact |
+| **W15-b/c** ✅ | cabac_mb.sv：CABAC I slice 完整 MB 层解析器（mb_dec 的 CABAC 孪生,接口全兼容）——mb_type 树（ctx 3..10 + 邻块 inc）/prev+rem intra4x4（68/69 + min 预测）/chroma mode（64..67）/CBP（73..84 邻位规则）/qp_delta（60..63 unary）/逐块 cbf（85+cat*4+cond,规范邻块项含 I16-vs-I4 DC 规则）/sig+last 图（105/166+off+pos）/level 节点机（227+,EG0 bypass 逃逸）/sign bypass/每 MB end_of_slice terminate；邻块状态 = nrow 35b 打包行缓冲（cat/cmode/cbp/ldc/cdc/cbf 底行/i4 底行）+ 左寄存组 | **20 条 CABAC I 向量逐 MB 840B 记录 bit-exact（make cmb-regress），组装后第一发全过**；CAVLC/C 回归零退化 |
+| W15-c2 | cabac_top 接 mb_recon → CABAC I 流像素/帧级 bit-exact + h264_core 熵模式双路 | CABAC I 流帧级 yuv bit-exact |
 | W15-d | P CABAC（mvd/ref/skip ctx）+ h264_core 集成 | CABAC I/P 流帧级 bit-exact |
 
 ## Wave 13 — RTL（进行中）

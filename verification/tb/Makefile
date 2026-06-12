@@ -337,4 +337,34 @@ cabac:
 	  tb_cabac.cpp $(CMODEL_BUILD)/cabac.o
 	./obj_dir_cabac/Vcabac_core
 
-.PHONY: pparse p-regress prec prec-regress corep corep-regress cabac
+cmb:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module cabac_top \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_cmb \
+	  -I$(REPO)/rtl/include \
+	  $(RTL_DIR)/cabac_top.sv $(RTL_DIR)/cabac_mb.sv \
+	  $(RTL_DIR)/cabac_core.sv $(RTL_DIR)/bitreader.sv \
+	  tb_cabac_mb.cpp $(MB_OBJS)
+	@echo built
+
+# CABAC I-slice MB-layer differential over phase08/09 vectors
+cmb-regress: cmb
+	@pass=0; skip=0; fail=0; \
+	for V in $(REPO)/verification/vectors/phase08/*.264; do \
+	  [ -f "$$V" ] || continue; \
+	  rm -f /tmp/cmb.dump; \
+	  H264_RTL_DUMP=/tmp/cmb.dump \
+	    $(CMODEL_DIR)/build/h264_decode $$V /tmp/cmb.yuv >/dev/null 2>&1; \
+	  if [ ! -s /tmp/cmb.dump ]; then skip=$$((skip+1)); continue; fi; \
+	  r=$$(./obj_dir_cmb/Vcabac_top $$V /tmp/cmb.dump 2>&1 | tail -1); \
+	  case "$$r" in \
+	    \[PASS\]*) pass=$$((pass+1));; \
+	    \[SKIP\]*) skip=$$((skip+1));; \
+	    *) fail=$$((fail+1)); echo "$$(basename $$V): $$r";; \
+	  esac; \
+	done; \
+	rm -f /tmp/cmb.dump /tmp/cmb.yuv; \
+	echo "=== cmb-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
+	test $$fail -eq 0
+
+.PHONY: pparse p-regress prec prec-regress corep corep-regress cabac \
+        cmb cmb-regress
