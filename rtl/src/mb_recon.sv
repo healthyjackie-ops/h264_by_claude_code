@@ -179,12 +179,18 @@ module mb_recon #(
 
     logic        mc_start_w, mc_busy_w, mc_done_w;
     logic [7:0]  mc_pred_w [16];
+    // geometry follows the block being LAUNCHED: on the done beat the
+    // next block starts back-to-back, so address with mk_q+1 there
+    logic [5:0]  mlk;
     logic [3:0]  mck;
     logic        mc_is_c;
     logic [11:0] mc_px;
     logic [10:0] mc_py;
-    assign mck = mk_q[3:0];
-    assign mc_is_c = (mk_q[5:4] != 2'd0);
+    assign mlk = mc_done_w ? mk_q + 6'd1 : mk_q;
+    assign mck = mlk[3:0];
+    assign mc_is_c = (mlk[5:4] != 2'd0);
+    logic [3:0] wck;                   // geometry of the FINISHED block
+    assign wck = mk_q[3:0];
     always_comb begin
         if (mc_is_c) begin
             mc_px = {1'b0, mbx_q, 3'b0} + 12'({zsx(mck), 1'b0});
@@ -194,12 +200,13 @@ module mb_recon #(
             mc_py = 11'({mby_q, 4'b0}) + 11'({zsy(mck), 2'b0});
         end
     end
-    assign mc_start_w = (st_q == S_MC) && !mc_busy_w && !mc_done_w;
+    assign mc_start_w = (st_q == S_MC) &&
+                        (!mc_busy_w || (mc_done_w && mk_q != 6'd47));
     assign mc_req_plane = mk_q[5:4];
 
     mc_fetch u_mc (
         .clk(clk), .rst_n(rst_n),
-        .start(mc_start_w), .is_chroma(mc_is_c),
+        .start(mc_start_w), .is_chroma(mc_is_c), .c2x2(mc_is_c),
         .px(mc_px), .py(mc_py),
         .mvx(mvq_x[mck]), .mvy(mvq_y[mck]),
         .busy(mc_busy_w), .done(mc_done_w),
@@ -465,23 +472,23 @@ module mb_recon #(
 
             // inter prediction: one mc_fetch block per iteration
             S_MC: if (mc_done_w) begin
-                if (!mc_is_c) begin
+                if (mk_q[5:4] == 2'd0) begin
                     for (int y = 0; y < 4; y++)
                         for (int x = 0; x < 4; x++)
-                            rec_y[(int'(zsy(mck))*4 + y) * 16 +
-                                  int'(zsx(mck))*4 + x]
+                            rec_y[(int'(zsy(wck))*4 + y) * 16 +
+                                  int'(zsx(wck))*4 + x]
                                 <= mc_pred_w[y*4 + x];
                 end else if (!mk_q[5]) begin
                     for (int y = 0; y < 2; y++)
                         for (int x = 0; x < 2; x++)
-                            rec_u[(int'(zsy(mck))*2 + y) * 8 +
-                                  int'(zsx(mck))*2 + x]
+                            rec_u[(int'(zsy(wck))*2 + y) * 8 +
+                                  int'(zsx(wck))*2 + x]
                                 <= mc_pred_w[y*4 + x];
                 end else begin
                     for (int y = 0; y < 2; y++)
                         for (int x = 0; x < 2; x++)
-                            rec_v[(int'(zsy(mck))*2 + y) * 8 +
-                                  int'(zsx(mck))*2 + x]
+                            rec_v[(int'(zsy(wck))*2 + y) * 8 +
+                                  int'(zsx(wck))*2 + x]
                                 <= mc_pred_w[y*4 + x];
                 end
                 if (mk_q == 6'd47) begin

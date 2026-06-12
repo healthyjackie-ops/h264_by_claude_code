@@ -18,6 +18,7 @@ module mc_fetch (
     // block request
     input  logic        start,
     input  logic        is_chroma,
+    input  logic        c2x2,          // chroma 2x2 block: 3x3 window
     input  logic [11:0] px,            // block pixel x in the plane
     input  logic [10:0] py,
     input  logic signed [15:0] mvx,    // quarter-pel (chroma: eighth)
@@ -55,12 +56,13 @@ module mc_fetch (
 
     // window dimensions per plane
     logic [3:0] nrows;
-    assign nrows = chroma_q ? 4'd5 : 4'd9;
+    logic       c2_q;
+    assign nrows = c2_q ? 4'd3 : (chroma_q ? 4'd5 : 4'd9);
 
     assign req_valid = (st_q == S_FETCH) && (row_q < nrows);
     assign req_x = x0_q;
     assign req_y = y0_q + 12'(row_q);
-    assign req_w = chroma_q ? 4'd5 : 4'd9;
+    assign req_w = c2_q ? 4'd3 : (chroma_q ? 4'd5 : 4'd9);
 
     // interpolators (combinational over the filled windows)
     logic [7:0] lpred [16];
@@ -78,12 +80,14 @@ module mc_fetch (
             row_q <= '0;
             got_q <= '0;
             chroma_q <= 1'b0;
+            c2_q <= 1'b0;
             x0_q <= '0; y0_q <= '0;
             lfx_q <= '0; lfy_q <= '0; cfx_q <= '0; cfy_q <= '0;
         end else begin
             unique case (st_q)
             S_IDLE: if (start) begin
                 chroma_q <= is_chroma;
+                c2_q <= c2x2;
                 if (is_chroma) begin
                     x0_q <= 13'($signed({1'b0, px}) + (mvx >>> 3));
                     y0_q <= 12'($signed({1'b0, py}) + (mvy >>> 3));
@@ -115,7 +119,24 @@ module mc_fetch (
                 end
             end
 
-            S_OUT: st_q <= S_IDLE;
+            S_OUT: if (start) begin       // back-to-back block accept
+                chroma_q <= is_chroma;
+                c2_q <= c2x2;
+                if (is_chroma) begin
+                    x0_q <= 13'($signed({1'b0, px}) + (mvx >>> 3));
+                    y0_q <= 12'($signed({1'b0, py}) + (mvy >>> 3));
+                    cfx_q <= 3'(mvx & 16'sd7);
+                    cfy_q <= 3'(mvy & 16'sd7);
+                end else begin
+                    x0_q <= 13'($signed({1'b0, px}) + (mvx >>> 2) - 13'sd2);
+                    y0_q <= 12'($signed({1'b0, py}) + (mvy >>> 2) - 12'sd2);
+                    lfx_q <= 2'(mvx & 16'sd3);
+                    lfy_q <= 2'(mvy & 16'sd3);
+                end
+                row_q <= '0;
+                got_q <= '0;
+                st_q <= S_FETCH;
+            end else st_q <= S_IDLE;
             default: st_q <= S_IDLE;
             endcase
         end

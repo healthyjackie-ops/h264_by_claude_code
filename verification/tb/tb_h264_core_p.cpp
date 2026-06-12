@@ -234,6 +234,9 @@ int main(int argc, char **argv) {
             if (top.in_valid) { fi += top.in_bytes; top.in_valid = 0; }
         }
         total_cycles += guard;
+        if (getenv("FRAME_CYC"))
+            printf("frame %zu (%s): %ld cycles\n", f,
+                   e.sh.is_p ? "P" : "I", guard);
         if (top.err || !top.frame_done) {
             printf("[FAIL] frame %zu %s after %ld cycles\n", f,
                    top.err ? "err" : "timeout", guard);
