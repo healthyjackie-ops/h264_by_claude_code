@@ -105,8 +105,8 @@ module p_rec_top #(
 
     logic        mb_skip, mb_inter, skip_go_w, mvd_valid;
     logic [15:0] mb_nz_w;
-    logic [2:0]  mb_ptype;
-    logic [7:0]  mb_sub;
+    logic [4:0]  mb_ptype;
+    logic [15:0] mb_sub;
     logic signed [15:0] mvd_x, mvd_y;
 
     mb_dec #(.MAX_MBW(MAX_MBW)) u_mb (
@@ -123,7 +123,7 @@ module p_rec_top #(
         .blk_coef_addr(blk_coef_addr), .blk_coef_data(blk_coef_data),
         .mb_skip(mb_skip), .mb_inter(mb_inter), .mb_ptype(mb_ptype),
         .mb_sub(mb_sub), .mvd_valid(mvd_valid), .mvd_x(mvd_x),
-        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(mb_nz_w),
+        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(mb_nz_w), .mvd_list(),
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),

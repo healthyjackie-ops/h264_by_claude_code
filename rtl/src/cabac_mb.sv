@@ -53,8 +53,8 @@ module cabac_mb #(
     // P syntax stream (mb_dec-compatible, drives mv_pred)
     output logic        mb_skip,
     output logic        mb_inter,
-    output logic [2:0]  mb_ptype,
-    output logic [7:0]  mb_sub,
+    output logic [4:0]  mb_ptype,
+    output logic [15:0] mb_sub,
     output logic        mvd_valid,
     output logic signed [15:0] mvd_x,
     output logic signed [15:0] mvd_y,
@@ -144,8 +144,8 @@ module cabac_mb #(
 
     // P-mode state
     logic        skip_q, inter_q;
-    logic [2:0]  ptype_q;
-    logic [7:0]  sub_q;
+    logic [4:0]  ptype_q;
+    logic [15:0] sub_q;
     logic [1:0]  pb_q, ps_q;           // partition / sub counters
     logic        axis_q;               // 0 = mvd x, 1 = mvd y
     logic [15:0] uegv_q;               // UEG3 |mvd| accumulator
@@ -232,13 +232,13 @@ module cabac_mb #(
     logic [1:0] sub2;
     logic [2:0] nsub;
     always_comb begin
-        sub2 = sub_q[{pb_q, 1'b0} +: 2];
+        sub2 = sub_q[{pb_q, 2'b0} +: 2];
         nsub = (sub2 == 2'd0) ? 3'd1 : (sub2 == 2'd3) ? 3'd4 : 3'd2;
         g_bx0 = '0; g_by0 = '0; g_w4 = 3'd4; g_h4 = 3'd4;
         unique case (ptype_q)
-        3'd0: ;
-        3'd1: begin g_by0 = {1'b0, pb_q[0], 1'b0}; g_h4 = 3'd2; end
-        3'd2: begin g_bx0 = {1'b0, pb_q[0], 1'b0}; g_w4 = 3'd2; end
+        5'd0: ;
+        5'd1: begin g_by0 = {1'b0, pb_q[0], 1'b0}; g_h4 = 3'd2; end
+        5'd2: begin g_bx0 = {1'b0, pb_q[0], 1'b0}; g_w4 = 3'd2; end
         default: begin
             g_bx0 = {2'b0, pb_q[0]} << 1;
             g_by0 = {2'b0, pb_q[1]} << 1;
@@ -612,13 +612,13 @@ module cabac_mb #(
                 end
                 3'd1: bcnt_q <= bin ? 3'd3 : 3'd2;
                 3'd2: begin                          // P_8x8 : 16x16
-                    ptype_q <= bin ? 3'd3 : 3'd0;
+                    ptype_q <= bin ? 5'd3 : 5'd0;
                     bcnt_q <= '0;
                     pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
                     st_q <= bin ? S_PSUB : M_B0;
                 end
                 default: begin                       // 16x8 : 8x16
-                    ptype_q <= bin ? 3'd1 : 3'd2;
+                    ptype_q <= bin ? 5'd1 : 5'd2;
                     bcnt_q <= '0;
                     pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
                     st_q <= M_B0;
@@ -667,7 +667,7 @@ module cabac_mb #(
                 unique case (bcnt_q)
                 3'd0: begin
                     if (bin) begin                   // sub 0 (8x8)
-                        sub_q[{pb_q, 1'b0} +: 2] <= 2'd0;
+                        sub_q[{pb_q, 2'b0} +: 4] <= 4'd0;
                         if (pb_q == 2'd3) begin
                             pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
                             st_q <= M_B0;
@@ -676,7 +676,7 @@ module cabac_mb #(
                 end
                 3'd1: begin
                     if (!bin) begin                  // sub 1 (8x4)
-                        sub_q[{pb_q, 1'b0} +: 2] <= 2'd1;
+                        sub_q[{pb_q, 2'b0} +: 4] <= 4'd1;
                         bcnt_q <= '0;
                         if (pb_q == 2'd3) begin
                             pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
@@ -685,7 +685,7 @@ module cabac_mb #(
                     end else bcnt_q <= 3'd2;
                 end
                 default: begin                       // 2 (4x8) : 3 (4x4)
-                    sub_q[{pb_q, 1'b0} +: 2] <= bin ? 2'd2 : 2'd3;
+                    sub_q[{pb_q, 2'b0} +: 4] <= bin ? 4'd2 : 4'd3;
                     bcnt_q <= '0;
                     if (pb_q == 2'd3) begin
                         pb_q <= '0; ps_q <= '0; axis_q <= 1'b0;
@@ -1110,8 +1110,8 @@ module cabac_mb #(
                     end
             axis_q <= 1'b0;
             // partition advance
-            if (ptype_q == 3'd0) st_q <= S_CBP;
-            else if (ptype_q == 3'd1 || ptype_q == 3'd2) begin
+            if (ptype_q == 5'd0) st_q <= S_CBP;
+            else if (ptype_q == 5'd1 || ptype_q == 5'd2) begin
                 if (pb_q[0]) st_q <= S_CBP;
                 else begin pb_q <= 2'd1; st_q <= M_B0; end
             end else begin

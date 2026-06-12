@@ -48,8 +48,9 @@ module mb_dec #(
     // pairs as they parse (consumer: MV prediction / golden compare)
     output logic        mb_skip,
     output logic        mb_inter,
-    output logic [2:0]  mb_ptype,      // 0..4 when inter
-    output logic [7:0]  mb_sub,        // 4 x 2b sub types (P_8x8)
+    output logic [4:0]  mb_ptype,      // P 0..4 / B 0..22 when inter
+    output logic [15:0] mb_sub,        // 4 x 4b sub types (P/B 8x8)
+    output logic        mvd_list,      // 0 = L0 (P always 0)
     output logic        mvd_valid,
     output logic signed [15:0] mvd_x,
     output logic signed [15:0] mvd_y,
@@ -109,8 +110,8 @@ module mb_dec #(
                                        // skip run (no mb_skip_run field)
     logic        skip_rd_q;            // skip_run consumed this slice pos
     logic        inter_q;
-    logic [2:0]  ptype_q;
-    logic [7:0]  sub_q;                // packed 4 x 2b
+    logic [4:0]  ptype_q;
+    logic [15:0] sub_q;                // packed 4 x 2b
     logic [2:0]  part_q;               // partition / sub-block counter
     logic [4:0]  nmvd_q;
     logic signed [15:0] mvdx_q;
@@ -281,6 +282,7 @@ module mb_dec #(
     assign mvd_y = 16'(eg_se);
     assign mb_inter = inter_q;
     assign mb_ptype = ptype_q;
+    assign mvd_list = 1'b0;
     assign mb_sub = sub_q;
     assign slice_done = (st_q == S_DONE);
     assign err = (st_q == S_ERR);
@@ -392,7 +394,7 @@ module mb_dec #(
                 else if (cfg_is_p && eg_ue < 12'd5) begin
                     // inter MB: partition shape, then mvds
                     inter_q <= 1'b1;
-                    ptype_q <= 3'(eg_ue);
+                    ptype_q <= 5'(eg_ue);
                     i16_q <= 1'b0;
                     for (int i = 0; i < 16; i++) i4m_q[i] <= 4'd2;
                     part_q <= '0;
@@ -430,7 +432,7 @@ module mb_dec #(
                 if (!eg_ok || eg_ue > 12'd3) st_q <= S_ERR;
                 else begin
                     logic [4:0] add;
-                    sub_q[part_q[1:0]*2 +: 2] <= 2'(eg_ue);
+                    sub_q[part_q[1:0]*4 +: 4] <= 4'(eg_ue);
                     add = (eg_ue == 12'd0) ? 5'd1
                         : (eg_ue == 12'd3) ? 5'd4 : 5'd2;
                     nmvd_q <= nmvd_q + add;

@@ -33,8 +33,8 @@ module mv_pred #(
     input  logic        start,
 
     // P-syntax stream (mb_dec)
-    input  logic [2:0]  mb_ptype,
-    input  logic [7:0]  mb_sub,
+    input  logic [4:0]  mb_ptype,
+    input  logic [15:0] mb_sub,
     input  logic        mvd_valid,
     input  logic signed [15:0] mvd_x,
     input  logic signed [15:0] mvd_y,
@@ -81,17 +81,17 @@ module mv_pred #(
     logic [1:0] sub2;
     logic [2:0] nsub;
     always_comb begin
-        sub2 = mb_sub[{b_q, 1'b0} +: 2];
+        sub2 = mb_sub[{b_q, 2'b0} +: 2];
         nsub = (sub2 == 2'd0) ? 3'd1 : (sub2 == 2'd3) ? 3'd4 : 3'd2;
         g_bx0 = '0; g_by0 = '0; g_w4 = 3'd4; g_h4 = 3'd4; g_dir = '0;
         unique case (mb_ptype)
-        3'd0: ;
-        3'd1: begin                                  // 16x8 top/bottom
+        5'd0: ;
+        5'd1: begin                                  // 16x8 top/bottom
             g_by0 = {1'b0, b_q[0], 1'b0};
             g_h4 = 3'd2;
             g_dir = 3'd1 + 3'(b_q[0]);
         end
-        3'd2: begin                                  // 8x16 left/right
+        5'd2: begin                                  // 8x16 left/right
             g_bx0 = {1'b0, b_q[0], 1'b0};
             g_w4 = 3'd2;
             g_dir = 3'd3 + 3'(b_q[0]);
@@ -135,8 +135,8 @@ module mv_pred #(
     // first mvd: unwritten current-MB blocks then read inter mv (0,0).
     logic prewrite;
     assign prewrite = mvd_valid &&
-                      (mb_ptype == 3'd1 || mb_ptype == 3'd2 ||
-                       mb_ptype == 3'd3);
+                      (mb_ptype == 5'd1 || mb_ptype == 5'd2 ||
+                       mb_ptype == 5'd3);
 
     typedef struct packed {
         logic has;                     // available AND decoded
@@ -282,9 +282,9 @@ module mv_pred #(
                             cur_w[j*4+i] <= 1'b1;
                         end
                 if (mvd_valid) begin
-                    if (mb_ptype == 3'd1 || mb_ptype == 3'd2)
+                    if (mb_ptype == 5'd1 || mb_ptype == 5'd2)
                         b_q <= b_q + 2'd1;
-                    else if (mb_ptype >= 3'd3) begin
+                    else if (mb_ptype >= 5'd3) begin
                         if (3'(s_q) + 3'd1 == nsub) begin
                             s_q <= '0;
                             b_q <= b_q + 2'd1;

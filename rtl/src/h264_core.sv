@@ -113,8 +113,8 @@ module h264_core #(
 
     logic        mb_skip, mb_inter, skip_go_w, mvd_valid;
     logic [15:0] mb_nz_w;
-    logic [2:0]  mb_ptype;
-    logic [7:0]  mb_sub;
+    logic [4:0]  mb_ptype;
+    logic [15:0] mb_sub;
     logic signed [15:0] mvd_x, mvd_y;
     logic signed [15:0] mv_x_w [16];
     logic signed [15:0] mv_y_w [16];
@@ -133,7 +133,7 @@ module h264_core #(
         .blk_coef_addr(blk_coef_addr), .blk_coef_data(blk_coef_data),
         .mb_skip(mb_skip), .mb_inter(mb_inter), .mb_ptype(mb_ptype),
         .mb_sub(mb_sub), .mvd_valid(mvd_valid), .mvd_x(mvd_x),
-        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(mb_nz_v),
+        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(mb_nz_v), .mvd_list(),
         .mb_valid(mb_valid_v), .mb_x(mb_x_v), .mb_y(mb_y_v),
         .mb_i16(mb_i16_v),
         .mb_cbp(mb_cbp_v), .mb_qp(mb_qp_v), .mb_i16_mode(mb_i16_mode_v),
@@ -155,8 +155,8 @@ module h264_core #(
     logic [3:0]  coef_addr_c;
     logic signed [15:0] coef_data_c;
     logic        mb_skip_c, mb_inter_c, mvd_valid_c, skip_go_c;
-    logic [2:0]  mb_ptype_c;
-    logic [7:0]  mb_sub_c;
+    logic [4:0]  mb_ptype_c;
+    logic [15:0] mb_sub_c;
     logic signed [15:0] mvd_x_c, mvd_y_c;
     logic [15:0] mb_nz_c;
 
@@ -200,8 +200,8 @@ module h264_core #(
 
     // P syntax stream mux into mv_pred / mb_recon / deblock
     logic mb_skip_m, mb_inter_m, mvd_valid_m, skip_go_m;
-    logic [2:0] mb_ptype_m;
-    logic [7:0] mb_sub_m;
+    logic [4:0] mb_ptype_m;
+    logic [15:0] mb_sub_m;
     logic signed [15:0] mvd_x_m, mvd_y_m;
     assign mb_skip_m = cfg_cabac ? mb_skip_c : mb_skip;
     assign mb_inter_m = cfg_cabac ? mb_inter_c : mb_inter;
