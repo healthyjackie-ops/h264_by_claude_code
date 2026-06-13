@@ -276,6 +276,20 @@ int main(int argc, char **argv) {
                 }
             }
 
+        // optional: dump the RTL-reassembled cropped frame (display order)
+        if (getenv("RTL_YUV")) {
+            FILE *yf = fopen(getenv("RTL_YUV"), f == 0 ? "wb" : "ab");
+            if (yf) {
+                for (int y = 0; y < H; y++)
+                    fwrite(&fy[y * FW], 1, W, yf);
+                for (int y = 0; y < H / 2; y++)
+                    fwrite(&fu[y * CWp], 1, W / 2, yf);
+                for (int y = 0; y < H / 2; y++)
+                    fwrite(&fv[y * CWp], 1, W / 2, yf);
+                fclose(yf);
+            }
+        }
+
         // writeback: this frame becomes the next frame's reference
         ry = fy;
         ru = fu;
