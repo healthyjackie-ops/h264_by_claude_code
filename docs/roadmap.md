@@ -146,7 +146,8 @@ ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
 
 | Phase | 内容 | 验收 |
 |---|---|---|
-| W16-a | mb_dec CAVLC B 语法 + mv_pred 双 list + spatial direct | B 语法/MV dump 逐 MB bit-exact |
+| **W16-a(syntax)** ✅ | mb_dec CAVLC B 语法 FSM：B mb_type（0..22 inter/≥23 intra）+ **list-major mvd 调度**（S_BNEXT 遍历 list×partition，bpair/bsub 表内联，跳过无 mvd 的 slot）+ B sub（4b 槽）+ B skip_run；接口加宽（ptype 5b/sub 16b/mvd_list 位）贯穿六文件；H264_RTL_DUMP_B（284B/MB 双 list） | **6 条 CAVLC B 流逐 MB 语法 bit-exact（make b-regress）**；I/P 回归零退化（mb 40/p 24/core 60） |
+| W16-a(MV) | mv_pred 双 list 化 + spatial direct 推导 | B MV 场 dump 逐 4x4 bit-exact |
 | W16-b | mb_recon 双向 MC + avg + 核集成（list 通道、tb DPB） | phase17 CAVLC B 多帧 yuv bit-exact |
 | W16-c | temporal direct（colocated 通道 + POC 缩放） | phase19 CAVLC 流 bit-exact |
 | W16-d | CABAC B + 双熵 | phase17/19 全熵 bit-exact |

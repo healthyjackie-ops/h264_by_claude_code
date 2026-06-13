@@ -20,7 +20,8 @@ module mb_dec #(
     input  logic [7:0]  cfg_mb_w,
     input  logic [7:0]  cfg_mb_h,
     input  logic [5:0]  cfg_qp,        // SliceQPy
-    input  logic        cfg_is_p,      // P slice (P-R3b)
+    input  logic        cfg_is_p,
+    input  logic        cfg_is_b,      // P slice (P-R3b)
 
     input  logic        start,         // begin slice_data (bitreader primed)
 
@@ -100,7 +101,7 @@ module mb_dec #(
         S_IDLE, S_PRE, S_MBTYPE, S_I4MODE, S_CMODE, S_CBP, S_QPD,
         S_LDC_GO, S_LAC_GO, S_RES_WAIT, S_CDC_GO, S_CAC_GO,
         S_EMIT, S_WAIT_REC, S_DONE, S_ERR,
-        S_SKIPRUN, S_PSUB, S_PMVD_X, S_PMVD_Y, S_PSKIP_FILL
+        S_SKIPRUN, S_PSUB, S_PMVD_X, S_PMVD_Y, S_PSKIP_FILL, S_BNEXT
     } state_e;
     state_e st_q, ret_q;               // ret_q: state after S_RES_WAIT
 
@@ -111,6 +112,41 @@ module mb_dec #(
     logic        skip_rd_q;            // skip_run consumed this slice pos
     logic        inter_q;
     logic [4:0]  ptype_q;
+    // B scheduling: bpair (Table 7-14 two-partition modes), bsub
+    // (Table 7-18 {mode,w4,h4,nsub}); the mvd walk is LIST-major.
+    function automatic logic [1:0] bpair_mode(input logic [3:0] pair,
+                                              input logic part);
+        logic [1:0] m;
+        unique case (pair)
+        4'd0: m = part ? 2'd1 : 2'd1;
+        4'd1: m = part ? 2'd2 : 2'd2;
+        4'd2: m = part ? 2'd2 : 2'd1;
+        4'd3: m = part ? 2'd1 : 2'd2;
+        4'd4: m = part ? 2'd3 : 2'd1;
+        4'd5: m = part ? 2'd3 : 2'd2;
+        4'd6: m = part ? 2'd1 : 2'd3;
+        4'd7: m = part ? 2'd2 : 2'd3;
+        default: m = 2'd3;
+        endcase
+        return m;
+    endfunction
+    function automatic logic [1:0] bsub_mode(input logic [3:0] s);
+        unique case (s)
+        4'd0: return 2'd0;                  // direct
+        4'd1, 4'd4, 4'd5, 4'd10: return 2'd1;
+        4'd2, 4'd6, 4'd7, 4'd11: return 2'd2;
+        default: return 2'd3;               // 3,8,9,12 Bi
+        endcase
+    endfunction
+    function automatic logic [2:0] bsub_nsub(input logic [3:0] s);
+        unique case (s)
+        4'd0, 4'd1, 4'd2, 4'd3: return 3'd1;
+        4'd10, 4'd11, 4'd12: return 3'd4;
+        default: return 3'd2;
+        endcase
+    endfunction
+    logic        blist_q;               // current list of the mvd walk
+    logic        is_b_mb_q;             // inter B MB in flight
     logic [15:0] sub_q;                // packed 4 x 2b
     logic [2:0]  part_q;               // partition / sub-block counter
     logic [4:0]  nmvd_q;
@@ -282,7 +318,7 @@ module mb_dec #(
     assign mvd_y = 16'(eg_se);
     assign mb_inter = inter_q;
     assign mb_ptype = ptype_q;
-    assign mvd_list = 1'b0;
+    assign mvd_list = is_b_mb_q & blist_q;
     assign mb_sub = sub_q;
     assign slice_done = (st_q == S_DONE);
     assign err = (st_q == S_ERR);
@@ -330,6 +366,8 @@ module mb_dec #(
                 have_left <= 1'b0;
                 skip_q <= '0;
                 coded_next_q <= 1'b0;
+                is_b_mb_q <= 1'b0;
+                blist_q <= 1'b0;
                 st_q <= S_PRE;
             end
 
@@ -340,9 +378,11 @@ module mb_dec #(
                 nzct_q[1] <= nbr_w[55:46];
                 skip_flag_q <= 1'b0;
                 inter_q <= 1'b0;
+                is_b_mb_q <= 1'b0;
+                blist_q <= 1'b0;
                 ptype_q <= '0;
                 sub_q <= '0;
-                if (cfg_is_p && skip_q != 16'd0) begin
+                if ((cfg_is_p || cfg_is_b) && skip_q != 16'd0) begin
                     // inside a skip run: this MB is skipped
                     skip_q <= skip_q - 16'd1;
                     if (skip_q == 16'd1) coded_next_q <= 1'b1;
@@ -352,8 +392,8 @@ module mb_dec #(
                 end else begin
                     // the coded MB terminating a skip run carries no
                     // mb_skip_run of its own (7.3.4 do/while shape)
-                    st_q <= (cfg_is_p && !coded_next_q) ? S_SKIPRUN
-                                                        : S_MBTYPE;
+                    st_q <= ((cfg_is_p || cfg_is_b) && !coded_next_q)
+                            ? S_SKIPRUN : S_MBTYPE;
                     coded_next_q <= 1'b0;
                 end
             end
@@ -388,9 +428,27 @@ module mb_dec #(
 
             S_MBTYPE: if (win_ok) begin
                 logic [11:0] eff;
-                eff = (cfg_is_p && eg_ue >= 12'd5) ? (eg_ue - 12'd5)
+                eff = (cfg_is_b && eg_ue >= 12'd23) ? (eg_ue - 12'd23)
+                    : (cfg_is_p && eg_ue >= 12'd5) ? (eg_ue - 12'd5)
                                                    : eg_ue;
                 if (!eg_ok) st_q <= S_ERR;
+                else if (cfg_is_b && eg_ue < 12'd23) begin
+                    // B inter MB: list-major mvd walk
+                    inter_q <= 1'b1;
+                    is_b_mb_q <= 1'b1;
+                    ptype_q <= 5'(eg_ue);
+                    i16_q <= 1'b0;
+                    for (int i = 0; i < 16; i++) i4m_q[i] <= 4'd2;
+                    part_q <= '0;
+                    blist_q <= 1'b0;
+                    if (eg_ue == 12'd0) begin       // B_Direct_16x16
+                        st_q <= S_CBP;
+                    end else if (eg_ue == 12'd22) begin
+                        sub_q <= '0;
+                        st_q <= S_PSUB;             // 4 B sub types
+                    end else
+                        st_q <= S_BNEXT;
+                end
                 else if (cfg_is_p && eg_ue < 12'd5) begin
                     // inter MB: partition shape, then mvds
                     inter_q <= 1'b1;
@@ -429,17 +487,55 @@ module mb_dec #(
             end
 
             S_PSUB: if (win_ok) begin
-                if (!eg_ok || eg_ue > 12'd3) st_q <= S_ERR;
+                if (!eg_ok || eg_ue > (is_b_mb_q ? 12'd12 : 12'd3))
+                    st_q <= S_ERR;
                 else begin
                     logic [4:0] add;
                     sub_q[part_q[1:0]*4 +: 4] <= 4'(eg_ue);
                     add = (eg_ue == 12'd0) ? 5'd1
                         : (eg_ue == 12'd3) ? 5'd4 : 5'd2;
-                    nmvd_q <= nmvd_q + add;
+                    if (!is_b_mb_q) nmvd_q <= nmvd_q + add;
                     if (part_q == 3'd3) begin
                         part_q <= '0;
-                        st_q <= S_PMVD_X;
+                        st_q <= is_b_mb_q ? S_BNEXT : S_PMVD_X;
                     end else part_q <= part_q + 3'd1;
+                end
+            end
+
+            // B list-major walk: does slot (blist, part_q) carry mvds?
+            S_BNEXT: begin
+                logic [1:0] mode;
+                logic       has;
+                logic [2:0] np;                      // slots this pass
+                if (ptype_q <= 5'd3) begin           // 16x16
+                    mode = ptype_q[1:0];
+                    np = 3'd1;
+                end else if (ptype_q <= 5'd21) begin
+                    mode = bpair_mode(4'((ptype_q - 5'd4) >> 1),
+                                      part_q[0]);
+                    np = 3'd2;
+                end else begin                       // B_8x8
+                    mode = bsub_mode(sub_q[part_q[1:0]*4 +: 4]);
+                    np = 3'd4;
+                end
+                has = mode[blist_q];
+                if (has && ptype_q == 5'd22 &&
+                    sub_q[part_q[1:0]*4 +: 4] != 4'd0) begin
+                    // sub-partitions: nmvd_q counts them down
+                    nmvd_q <= 5'(bsub_nsub(sub_q[part_q[1:0]*4 +: 4]));
+                    st_q <= S_PMVD_X;
+                end else if (has) begin
+                    nmvd_q <= 5'd1;
+                    st_q <= S_PMVD_X;
+                end else begin
+                    // no mvd in this slot: advance the walk
+                    if (part_q + 3'd1 < {1'b0, np})
+                        part_q <= part_q + 3'd1;
+                    else begin
+                        part_q <= '0;
+                        if (!blist_q) blist_q <= 1'b1;
+                        else st_q <= S_CBP;
+                    end
                 end
             end
 
@@ -456,7 +552,27 @@ module mb_dec #(
                 else begin
                     // mvd pair complete (pulse handled combinationally)
                     nmvd_q <= nmvd_q - 5'd1;
-                    st_q <= (nmvd_q == 5'd1) ? S_CBP : S_PMVD_X;
+                    if (nmvd_q != 5'd1)
+                        st_q <= S_PMVD_X;
+                    else if (!is_b_mb_q)
+                        st_q <= S_CBP;
+                    else begin
+                        // B walk: next slot in list-major order
+                        logic [2:0] np;
+                        np = (ptype_q <= 5'd3) ? 3'd1
+                           : (ptype_q <= 5'd21) ? 3'd2 : 3'd4;
+                        if (part_q + 3'd1 < {1'b0, np}) begin
+                            part_q <= part_q + 3'd1;
+                            st_q <= S_BNEXT;
+                        end else begin
+                            part_q <= '0;
+                            if (!blist_q) begin
+                                blist_q <= 1'b1;
+                                st_q <= S_BNEXT;
+                            end else
+                                st_q <= S_CBP;
+                        end
+                    end
                 end
             end
 

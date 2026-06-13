@@ -18,6 +18,7 @@ module mb_top #(
     input  logic [7:0]  cfg_mb_h,
     input  logic [5:0]  cfg_qp,
     input  logic        cfg_is_p,
+    input  logic        cfg_is_b,
     input  logic        start,
 
     // bit-alignment: consume n residue bits before starting (slice_data
@@ -30,6 +31,7 @@ module mb_top #(
     output logic [4:0]  mb_ptype,
     output logic [15:0] mb_sub,
     output logic        mvd_valid,
+    output logic        mvd_list,
     output logic signed [15:0] mvd_x,
     output logic signed [15:0] mvd_y,
     output logic signed [15:0] mv_out_x [16],
@@ -98,7 +100,7 @@ module mb_top #(
 
     mb_dec #(.MAX_MBW(MAX_MBW)) u_mb (
         .clk(clk), .rst_n(rst_n),
-        .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_qp(cfg_qp), .cfg_is_p(cfg_is_p),
+        .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_qp(cfg_qp), .cfg_is_p(cfg_is_p), .cfg_is_b(cfg_is_b),
         .start(start),
         .req_valid(m_req_valid), .req_bits(m_req_bits),
         .req_ready(br_req_ready), .show(show), .avail(avail),
@@ -109,7 +111,7 @@ module mb_top #(
         .blk_coef_addr(blk_coef_addr), .blk_coef_data(blk_coef_data),
         .mb_skip(mb_skip), .mb_inter(mb_inter), .mb_ptype(mb_ptype),
         .mb_sub(mb_sub), .mvd_valid(mvd_valid), .mvd_x(mvd_x),
-        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(), .mvd_list(),
+        .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(), .mvd_list(mvd_list),
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),

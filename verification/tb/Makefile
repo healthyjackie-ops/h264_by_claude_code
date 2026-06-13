@@ -372,5 +372,35 @@ cmb-regress: cmb
 	echo "=== cmb-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
 	test $$fail -eq 0
 
+bparse:
+	$(VERILATOR) --cc --exe --build -Wall -Wno-fatal --top-module mb_top \
+	  -CFLAGS "-I$(CMODEL_DIR)/src -O2" -Mdir obj_dir_bparse \
+	  -I$(REPO)/rtl/include \
+	  $(RTL_DIR)/mb_top.sv $(RTL_DIR)/mb_dec.sv $(RTL_DIR)/bitreader.sv \
+	  $(RTL_DIR)/cavlc_block.sv $(RTL_DIR)/expgolomb.sv \
+	  $(RTL_DIR)/mv_pred.sv \
+	  tb_b_parse.cpp $(MB_OBJS)
+	@echo built
+
+b-regress: bparse
+	@pass=0; skip=0; fail=0; \
+	for V in $(REPO)/verification/vectors/phase17/*.264 \
+	         $(REPO)/verification/vectors/phase19/*.264; do \
+	  [ -f "$$V" ] || continue; \
+	  rm -f /tmp/b.dump; \
+	  H264_RTL_DUMP_B=/tmp/b.dump \
+	    $(CMODEL_DIR)/build/h264_decode $$V /tmp/b.yuv >/dev/null 2>&1; \
+	  if [ ! -s /tmp/b.dump ]; then skip=$$((skip+1)); continue; fi; \
+	  r=$$(./obj_dir_bparse/Vmb_top $$V /tmp/b.dump 2>&1 | tail -1); \
+	  case "$$r" in \
+	    \[PASS\]*) pass=$$((pass+1));; \
+	    \[SKIP\]*) skip=$$((skip+1));; \
+	    *) fail=$$((fail+1)); echo "$$(basename $$V): $$r";; \
+	  esac; \
+	done; \
+	rm -f /tmp/b.dump /tmp/b.yuv; \
+	echo "=== b-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
+	test $$fail -eq 0
+
 .PHONY: pparse p-regress prec prec-regress corep corep-regress cabac \
-        cmb cmb-regress
+        cmb cmb-regress bparse b-regress

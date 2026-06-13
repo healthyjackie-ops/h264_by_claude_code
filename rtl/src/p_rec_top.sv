@@ -22,6 +22,7 @@ module p_rec_top #(
     input  logic [5:0]  cfg_qp,
     input  logic signed [5:0] cfg_cqp_off,
     input  logic        cfg_is_p,
+    input  logic        cfg_is_b,
     input  logic        start,
 
     input  logic        align_valid,
@@ -112,7 +113,7 @@ module p_rec_top #(
     mb_dec #(.MAX_MBW(MAX_MBW)) u_mb (
         .clk(clk), .rst_n(rst_n),
         .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_qp(cfg_qp),
-        .cfg_is_p(cfg_is_p),
+        .cfg_is_p(cfg_is_p), .cfg_is_b(cfg_is_b),
         .start(start),
         .req_valid(m_req_valid), .req_bits(m_req_bits),
         .req_ready(br_req_ready), .show(show), .avail(avail),

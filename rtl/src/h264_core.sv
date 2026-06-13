@@ -23,6 +23,7 @@ module h264_core #(
     input  logic signed [5:0] cfg_b_off,
     input  logic        cfg_deblock,
     input  logic        cfg_is_p,
+    input  logic        cfg_is_b,
     input  logic        cfg_cabac,
     input  logic [1:0]  cfg_init_idc,
 
@@ -122,7 +123,7 @@ module h264_core #(
     mb_dec #(.MAX_MBW(MAX_MBW)) u_mb (
         .clk(clk), .rst_n(rst_n),
         .cfg_mb_w(cfg_mb_w), .cfg_mb_h(cfg_mb_h), .cfg_qp(cfg_qp),
-        .cfg_is_p(cfg_is_p),
+        .cfg_is_p(cfg_is_p), .cfg_is_b(cfg_is_b),
         .start(start && !cfg_cabac),
         .req_valid(m_req_valid), .req_bits(m_req_bits),
         .req_ready(br_req_ready), .show(show), .avail(avail),
