@@ -49,12 +49,33 @@ int main(int argc, char **argv) {
     }
     auto stream = rd(argv[1]);
     auto db = rd(argv[2]);
+    std::vector<uint8_t> col = (argc > 3) ? rd(argv[3])
+                                          : std::vector<uint8_t>();
     if (stream.empty() || db.size() % sizeof(BRec)) {
         printf("[SKIP] inputs (%zu dump bytes)\n", db.size());
         return 1;
     }
     const BRec *recs = (const BRec *)db.data();
     size_t nrec = db.size() / sizeof(BRec);
+
+    // colocated motion field (W16-a): per 4x4 ref0/mv0/ref1/mv1
+    int col_w = 0, col_h = 0;
+    const uint8_t *cold = nullptr;
+    if (col.size() >= 4) {
+        col_w = col[0] | (col[1] << 8);
+        col_h = col[2] | (col[3] << 8);
+        cold = col.data() + 4;
+    }
+    auto colent = [&](int gx, int gy, int *r0, int *m0x, int *m0y,
+                      int *r1, int *m1x, int *m1y) {
+        const uint8_t *e = cold + (size_t)(gy * col_w * 4 + gx) * 10;
+        *r0 = (int8_t)e[0];
+        *m0x = (int16_t)(e[1] | (e[2] << 8));
+        *m0y = (int16_t)(e[3] | (e[4] << 8));
+        *r1 = (int8_t)e[5];
+        *m1x = (int16_t)(e[6] | (e[7] << 8));
+        *m1y = (int16_t)(e[8] | (e[9] << 8));
+    };
 
     sps_t sps;
     pps_t pps;
@@ -100,7 +121,25 @@ int main(int argc, char **argv) {
     if (nrec < nmb) { printf("[SKIP] dump too small\n"); return 1; }
 
     Vmb_top top;
+    auto drive_col = [&] {
+        if (!cold) return;
+        int mx = top.col_mbx, my = top.col_mby;
+        static const int cbx[4] = {0, 3, 0, 3};
+        static const int cby[4] = {0, 0, 3, 3};
+        for (int q = 0; q < 4; q++) {
+            int r0, m0x, m0y, r1, m1x, m1y;
+            int gx = mx * 4 + cbx[q], gy = my * 4 + cby[q];
+            if (gx < col_w * 4 && gy < col_h * 4)
+                colent(gx, gy, &r0, &m0x, &m0y, &r1, &m1x, &m1y);
+            else { r0 = r1 = -1; m0x = m0y = m1x = m1y = 0; }
+            top.col_ref0[q] = (int8_t)r0;
+            top.col_mv0x[q] = (int16_t)m0x; top.col_mv0y[q] = (int16_t)m0y;
+            top.col_ref1[q] = (int8_t)r1;
+            top.col_mv1x[q] = (int16_t)m1x; top.col_mv1y[q] = (int16_t)m1y;
+        }
+    };
     auto tick = [&] {
+        drive_col();
         top.clk = 0;
         top.eval();
         top.clk = 1;
@@ -223,6 +262,24 @@ int main(int argc, char **argv) {
                         fails++;
                     }
                 }
+            if (cold) {
+                for (int k = 0; k < 16; k++) {
+                    int rx0 = (int16_t)top.mv_out_x[k];
+                    int ry0 = (int16_t)top.mv_out_y[k];
+                    int rx1 = (int16_t)top.mv1_out_x[k];
+                    int ry1 = (int16_t)top.mv1_out_y[k];
+                    if (rx0 != g.mv[0][k][0] || ry0 != g.mv[0][k][1] ||
+                        rx1 != g.mv[1][k][0] || ry1 != g.mv[1][k][1]) {
+                        printf("[FAIL] MB %zu mv[%d] rtl L0(%d,%d) "
+                               "L1(%d,%d) c L0(%d,%d) L1(%d,%d)\n",
+                               gi, k, rx0, ry0, rx1, ry1,
+                               g.mv[0][k][0], g.mv[0][k][1],
+                               g.mv[1][k][0], g.mv[1][k][1]);
+                        fails++;
+                        if (fails >= 6) break;
+                    }
+                }
+            }
             gi++;
             nmvd[0] = 0;
             nmvd[1] = 0;
@@ -238,7 +295,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (!fails) {
-        printf("[PASS] B parse: %zu MBs syntax bit-exact vs dump\n", gi);
+        printf("[PASS] B parse: %zu MBs syntax+MV bit-exact vs dump\n", gi);
         return 0;
     }
     return 1;

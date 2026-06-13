@@ -56,6 +56,13 @@ module mb_dec #(
     output logic signed [15:0] mvd_x,
     output logic signed [15:0] mvd_y,
     output logic        skip_go,       // P_Skip MB derivation beat
+    output logic        bdir_go,       // B spatial-direct derivation beat
+    output logic [3:0]  bdir_mask,     // which 8x8 blocks are direct
+    output logic [2:0]  mvd_bx0,       // B explicit partition rectangle
+    output logic [2:0]  mvd_by0,       // (4x4 units, valid with mvd_valid)
+    output logic [2:0]  mvd_w4,
+    output logic [2:0]  mvd_h4,
+    output logic [2:0]  mvd_dir,       // directional rule (16x8/8x16)
     output logic [15:0] mb_nz,         // 4x4 luma nz bitmap, raster
 
     // per-MB header pulse
@@ -147,6 +154,11 @@ module mb_dec #(
     endfunction
     logic        blist_q;               // current list of the mvd walk
     logic        is_b_mb_q;             // inter B MB in flight
+    logic        bdir_go_q;
+    logic [3:0]  bdir_mask_q;
+    logic [2:0]  bsi_q;                // sub-partition index within a slot
+    assign bdir_go = bdir_go_q;
+    assign bdir_mask = bdir_mask_q;
     logic [15:0] sub_q;                // packed 4 x 2b
     logic [2:0]  part_q;               // partition / sub-block counter
     logic [4:0]  nmvd_q;
@@ -323,6 +335,48 @@ module mb_dec #(
     assign slice_done = (st_q == S_DONE);
     assign err = (st_q == S_ERR);
 
+    // B explicit partition rectangle from the walk state
+    always_comb begin
+        logic [3:0] bs;
+        logic is8x16;
+        mvd_bx0 = '0; mvd_by0 = '0; mvd_w4 = 3'd4; mvd_h4 = 3'd4;
+        mvd_dir = '0;
+        if (ptype_q <= 5'd3) begin
+            // 16x16
+        end else if (ptype_q <= 5'd21) begin
+            is8x16 = (ptype_q - 5'd4) & 5'd1;
+            mvd_dir = (is8x16 ? 3'd3 : 3'd1) + 3'(part_q[0]);
+            if (is8x16) begin
+                mvd_bx0 = {1'b0, part_q[0], 1'b0}; mvd_w4 = 3'd2;
+            end else begin
+                mvd_by0 = {1'b0, part_q[0], 1'b0}; mvd_h4 = 3'd2;
+            end
+        end else begin                              // B_8x8
+            bs = sub_q[part_q[1:0]*4 +: 4];
+            mvd_bx0 = {2'b0, part_q[0]} << 1;
+            mvd_by0 = {2'b0, part_q[1]} << 1;
+            unique case (bsub_geom(bs))
+            2'd0: begin mvd_w4 = 3'd2; mvd_h4 = 3'd2; end
+            2'd1: begin mvd_w4 = 3'd2; mvd_h4 = 3'd1;
+                        mvd_by0 = mvd_by0 + bsi_q; end
+            2'd2: begin mvd_w4 = 3'd1; mvd_h4 = 3'd2;
+                        mvd_bx0 = mvd_bx0 + bsi_q; end
+            default: begin mvd_w4 = 3'd1; mvd_h4 = 3'd1;
+                           mvd_bx0 = mvd_bx0 + {2'b0, bsi_q[0]};
+                           mvd_by0 = mvd_by0 + {2'b0, bsi_q[1]}; end
+            endcase
+        end
+    end
+
+    function automatic logic [1:0] bsub_geom(input logic [3:0] s);
+        unique case (s)
+        4'd0, 4'd1, 4'd2, 4'd3: return 2'd0;        // 8x8
+        4'd4, 4'd6, 4'd8:       return 2'd1;        // 8x4
+        4'd5, 4'd7, 4'd9:       return 2'd2;        // 4x8
+        default:                return 2'd3;        // 4x4
+        endcase
+    endfunction
+
     // luma cbp bit for 8x8 group of z-block k
     function automatic logic cbp_l_bit(input logic [3:0] k);
         return cbp_q[{k[3], k[2]}];
@@ -355,8 +409,12 @@ module mb_dec #(
             have_left <= 1'b0;
             ac15_q <= 1'b0;
             cur_blk_q <= '0;
+            bdir_go_q <= 1'b0;
+            bdir_mask_q <= '0;
+            bsi_q <= '0;
         end else begin
             blk_start <= 1'b0;
+            bdir_go_q <= 1'b0;          // one-cycle pulse
 
             unique case (st_q)
             S_IDLE: if (start) begin
@@ -423,6 +481,10 @@ module mb_dec #(
                 cbp_q <= '0;
                 i16_q <= 1'b0;
                 cmode_q <= '0;
+                if (cfg_is_b) begin            // B_Skip: whole-MB direct
+                    bdir_go_q <= 1'b1;
+                    bdir_mask_q <= 4'b1111;
+                end
                 st_q <= S_EMIT;
             end
 
@@ -442,6 +504,8 @@ module mb_dec #(
                     part_q <= '0;
                     blist_q <= 1'b0;
                     if (eg_ue == 12'd0) begin       // B_Direct_16x16
+                        bdir_go_q <= 1'b1;
+                        bdir_mask_q <= 4'b1111;
                         st_q <= S_CBP;
                     end else if (eg_ue == 12'd22) begin
                         sub_q <= '0;
@@ -497,7 +561,15 @@ module mb_dec #(
                     if (!is_b_mb_q) nmvd_q <= nmvd_q + add;
                     if (part_q == 3'd3) begin
                         part_q <= '0;
-                        st_q <= is_b_mb_q ? S_BNEXT : S_PMVD_X;
+                        if (is_b_mb_q) begin
+                            // direct subs (sub type 0) derive first
+                            bdir_go_q <= 1'b1;
+                            bdir_mask_q <= {(eg_ue == 12'd0),
+                                            (sub_q[8 +: 4] == 4'd0),
+                                            (sub_q[4 +: 4] == 4'd0),
+                                            (sub_q[0 +: 4] == 4'd0)};
+                            st_q <= S_BNEXT;
+                        end else st_q <= S_PMVD_X;
                     end else part_q <= part_q + 3'd1;
                 end
             end
@@ -519,6 +591,7 @@ module mb_dec #(
                     np = 3'd4;
                 end
                 has = mode[blist_q];
+                bsi_q <= '0;
                 if (has && ptype_q == 5'd22 &&
                     sub_q[part_q[1:0]*4 +: 4] != 4'd0) begin
                     // sub-partitions: nmvd_q counts them down
@@ -552,8 +625,10 @@ module mb_dec #(
                 else begin
                     // mvd pair complete (pulse handled combinationally)
                     nmvd_q <= nmvd_q - 5'd1;
-                    if (nmvd_q != 5'd1)
+                    if (nmvd_q != 5'd1) begin
+                        bsi_q <= bsi_q + 3'd1;
                         st_q <= S_PMVD_X;
+                    end
                     else if (!is_b_mb_q)
                         st_q <= S_CBP;
                     else begin

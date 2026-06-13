@@ -388,17 +388,17 @@ b-regress: bparse
 	         $(REPO)/verification/vectors/phase19/*.264; do \
 	  [ -f "$$V" ] || continue; \
 	  rm -f /tmp/b.dump; \
-	  H264_RTL_DUMP_B=/tmp/b.dump \
+	  H264_RTL_DUMP_B=/tmp/b.dump H264_RTL_DUMP_BCOL=/tmp/bcol.dump \
 	    $(CMODEL_DIR)/build/h264_decode $$V /tmp/b.yuv >/dev/null 2>&1; \
 	  if [ ! -s /tmp/b.dump ]; then skip=$$((skip+1)); continue; fi; \
-	  r=$$(./obj_dir_bparse/Vmb_top $$V /tmp/b.dump 2>&1 | tail -1); \
+	  r=$$(./obj_dir_bparse/Vmb_top $$V /tmp/b.dump /tmp/bcol.dump 2>&1 | tail -1); \
 	  case "$$r" in \
 	    \[PASS\]*) pass=$$((pass+1));; \
 	    \[SKIP\]*) skip=$$((skip+1));; \
 	    *) fail=$$((fail+1)); echo "$$(basename $$V): $$r";; \
 	  esac; \
 	done; \
-	rm -f /tmp/b.dump /tmp/b.yuv; \
+	rm -f /tmp/b.dump /tmp/bcol.dump /tmp/b.yuv; \
 	echo "=== b-regress: $$pass pass, $$skip skip, $$fail fail ==="; \
 	test $$fail -eq 0
 

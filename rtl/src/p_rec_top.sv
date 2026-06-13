@@ -125,6 +125,8 @@ module p_rec_top #(
         .mb_skip(mb_skip), .mb_inter(mb_inter), .mb_ptype(mb_ptype),
         .mb_sub(mb_sub), .mvd_valid(mvd_valid), .mvd_x(mvd_x),
         .mvd_y(mvd_y), .skip_go(skip_go_w), .mb_nz(mb_nz_w), .mvd_list(),
+        .bdir_go(), .bdir_mask(), .mvd_bx0(), .mvd_by0(), .mvd_w4(),
+        .mvd_h4(), .mvd_dir(),
         .mb_valid(mb_valid), .mb_x(mb_x), .mb_y(mb_y), .mb_i16(mb_i16),
         .mb_cbp(mb_cbp), .mb_qp(mb_qp), .mb_i16_mode(mb_i16_mode),
         .mb_cmode(mb_cmode), .mb_i4m(mb_i4m),
@@ -138,14 +140,28 @@ module p_rec_top #(
     logic signed [15:0] mv_y_w [16];
 
     // neighbor advance happens on the accept beat (parse/recon pipeline)
+    logic signed [7:0]  z_ref [4];
+    logic signed [15:0] z_mv [4];
+    always_comb for (int zi = 0; zi < 4; zi++) begin
+        z_ref[zi] = '0; z_mv[zi] = '0;
+    end
+    logic signed [15:0] mv1x_u [16], mv1y_u [16];
+    logic [1:0] pmode_u [16];
     mv_pred #(.MAX_MBW(MAX_MBW)) u_mv (
         .clk(clk), .rst_n(rst_n),
-        .cfg_mb_w(cfg_mb_w), .start(start),
+        .cfg_mb_w(cfg_mb_w), .cfg_is_b(1'b0), .start(start),
         .mb_ptype(mb_ptype), .mb_sub(mb_sub),
-        .mvd_valid(mvd_valid), .mvd_x(mvd_x), .mvd_y(mvd_y),
-        .skip_go(skip_go_w), .commit(rec_accept),
+        .mvd_valid(mvd_valid), .mvd_list(1'b0), .mvd_x(mvd_x), .mvd_y(mvd_y),
+        .skip_go(skip_go_w), .bdir_go(1'b0), .bdir_mask(4'd0),
+        .bmvd_bx0(3'd0), .bmvd_by0(3'd0), .bmvd_w4(3'd4),
+        .bmvd_h4(3'd4), .bmvd_dir(3'd0),
+        .commit(rec_accept),
         .mb_inter(mb_inter), .mb_skip(mb_skip),
-        .mv_out_x(mv_x_w), .mv_out_y(mv_y_w)
+        .col_mbx(), .col_mby(),
+        .col_ref0(z_ref), .col_mv0x(z_mv), .col_mv0y(z_mv),
+        .col_ref1(z_ref), .col_mv1x(z_mv), .col_mv1y(z_mv),
+        .mv_out_x(mv_x_w), .mv_out_y(mv_y_w),
+        .mv1_out_x(mv1x_u), .mv1_out_y(mv1y_u), .pmode_out(pmode_u)
     );
 
     mb_recon #(.MAX_MBW(MAX_MBW)) u_rec (
