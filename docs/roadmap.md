@@ -148,7 +148,7 @@ ASO 放弃：x264 不产 ASO 流，无验证手段（做了即死代码）。
 |---|---|---|
 | **W16-a(syntax)** ✅ | mb_dec CAVLC B 语法 FSM：B mb_type（0..22 inter/≥23 intra）+ **list-major mvd 调度**（S_BNEXT 遍历 list×partition，bpair/bsub 表内联，跳过无 mvd 的 slot）+ B sub（4b 槽）+ B skip_run；接口加宽（ptype 5b/sub 16b/mvd_list 位）贯穿六文件；H264_RTL_DUMP_B（284B/MB 双 list） | **6 条 CAVLC B 流逐 MB 语法 bit-exact（make b-regress）**；I/P 回归零退化（mb 40/p 24/core 60） |
 | **W16-a(MV)** ✅ | mv_pred 双 list 化（per-4x4 per-list used+mv 行缓冲、per-list 中值）+ spatial direct（8.4.1.2.2：per-list refIdxL min A/B/C→D、direct_zero→零 Bi、per-8x8 colZero 用 colocated 角块）+ colocated 通道（系统侧持 list1[0] 运动场，bench 喂 4 角）；mb_dec 供分区矩形（list-major 走查无法从 mvd 流重建）+ bdir_go/mask 触发 direct | **6 条 B 流双 list 最终 MV z-scan bit-exact（make b-regress）第一发全过**；P/I 回归零退化（p/prec 24、corep 30、mb 40、core 60） |
-| W16-b | mb_recon 双向 MC + avg + 核集成（list 通道、tb DPB） | phase17 CAVLC B 多帧 yuv bit-exact |
+| W16-b (进行中) | mb_recon 双向 MC + avg + 核集成。**prep ✅**：B 像素 dump（H264_RTL_DUMP_BPX 384B/MB）。**待做**：mb_recon S_MC 加 list 维度（per-block pmode 决定 L0/L1/Bi 取数趟数，mc_req 加 list 位，Bi 平均 (p0+p1+1)>>1，保 P 路径不退化）+ b_rec_top 差分台对拍 BPX | phase17 CAVLC B 帧级 yuv bit-exact |
 | W16-c | temporal direct（colocated 通道 + POC 缩放） | phase19 CAVLC 流 bit-exact |
 | W16-d | CABAC B + 双熵 | phase17/19 全熵 bit-exact |
 
