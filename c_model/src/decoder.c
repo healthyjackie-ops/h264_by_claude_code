@@ -163,6 +163,34 @@ static void rtl_dump_b(const rtl_b_rec_t *r) {
     if (f) fwrite(r, sizeof(*r), 1, f);
 }
 
+/* One-shot colocated motion dump for the W16-a(MV) bench: list1[0]'s
+ * per-4x4 motion field (the spatial-direct colZero source). Header
+ * u16 mb_w, mb_h; then per 4x4 (raster): s8 ref0, s16 mv0x, mv0y,
+ * s8 ref1, s16 mv1x, mv1y. */
+static void rtl_dump_bcol_once(const int8_t *ref0, const int16_t *mv0x,
+                               const int16_t *mv0y, const int8_t *ref1,
+                               const int16_t *mv1x, const int16_t *mv1y,
+                               uint32_t mb_w, uint32_t mb_h) {
+    static int done;
+    if (done) return;
+    const char *path = getenv("H264_RTL_DUMP_BCOL");
+    if (!path || !ref0) return;
+    done = 1;
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    uint16_t hdr[2] = { (uint16_t)mb_w, (uint16_t)mb_h };
+    fwrite(hdr, 2, 2, f);
+    uint32_t n4 = mb_w * 4 * mb_h * 4;
+    for (uint32_t i = 0; i < n4; i++) {
+        int8_t r0 = ref0[i], r1 = ref1 ? ref1[i] : -1;
+        int16_t m0x = mv0x[i], m0y = mv0y[i];
+        int16_t m1x = mv1x ? mv1x[i] : 0, m1y = mv1y ? mv1y[i] : 0;
+        fwrite(&r0, 1, 1, f); fwrite(&m0x, 2, 1, f); fwrite(&m0y, 2, 1, f);
+        fwrite(&r1, 1, 1, f); fwrite(&m1x, 2, 1, f); fwrite(&m1y, 2, 1, f);
+    }
+    fclose(f);
+}
+
 /* One-shot reference-plane dump for the P-R3d bench: the FIRST gated
  * P slice's list0[0] uncropped planes (the bench implements the MC
  * clamp over these). Layout: u16 mb_w, u16 mb_h (LE), then Y, U, V. */
@@ -1391,6 +1419,11 @@ static int decode_picture(slice_ent_t *ents, int nslices,
                        !pps->weighted_pred && !pps->weighted_bipred &&
                        !pps->transform_8x8 && rtl_dump_b_file() != NULL);
         if (brec_on) {
+            if (c.list1[0])
+                rtl_dump_bcol_once(c.list1[0]->ref, c.list1[0]->mvx,
+                                   c.list1[0]->mvy, c.list1[0]->ref1,
+                                   c.list1[0]->mv1x, c.list1[0]->mv1y,
+                                   c.mb_w, c.mb_h);
             memset(&brec, 0, sizeof(brec));
             brec.mbx = (uint8_t)mbx;
             brec.mby = (uint8_t)mby;
