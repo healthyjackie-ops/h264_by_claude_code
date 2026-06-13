@@ -163,6 +163,26 @@ static void rtl_dump_b(const rtl_b_rec_t *r) {
     if (f) fwrite(r, sizeof(*r), 1, f);
 }
 
+/* B reconstruction pixels (W16-b), 384B/MB like DUMP_PREC. */
+static FILE *rtl_dump_bpx_file(void) {
+    static FILE *f;
+    static int tried;
+    if (!tried) {
+        tried = 1;
+        const char *path = getenv("H264_RTL_DUMP_BPX");
+        if (path) f = fopen(path, "wb");
+    }
+    return f;
+}
+static void rtl_dump_bpx(const uint8_t *y, size_t ls, const uint8_t *u,
+                         const uint8_t *v, size_t cs) {
+    FILE *f = rtl_dump_bpx_file();
+    if (!f) return;
+    for (int r = 0; r < 16; r++) fwrite(y + (size_t)r * ls, 1, 16, f);
+    for (int r = 0; r < 8; r++) fwrite(u + (size_t)r * cs, 1, 8, f);
+    for (int r = 0; r < 8; r++) fwrite(v + (size_t)r * cs, 1, 8, f);
+}
+
 /* One-shot colocated motion dump for the W16-a(MV) bench: list1[0]'s
  * per-4x4 motion field (the spatial-direct colZero source). Header
  * u16 mb_w, mb_h; then per 4x4 (raster): s8 ref0, s16 mv0x, mv0y,
@@ -2664,6 +2684,10 @@ mb_done:
                 brec.pmode[k] = (uint8_t)(l0 | (l1 << 1));
             }
             rtl_dump_b(&brec);
+            rtl_dump_bpx(
+                c.Y + (size_t)mby * 16 * c.ls + (size_t)mbx * 16, c.ls,
+                c.U + (size_t)mby * 8 * c.cs + (size_t)mbx * 8,
+                c.V + (size_t)mby * 8 * c.cs + (size_t)mbx * 8, c.cs);
         }
         if (prec_on) {
             for (int k = 0; k < 16; k++) {
